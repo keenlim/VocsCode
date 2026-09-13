@@ -14,7 +14,8 @@ import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
 import { gitnexusHomeBase } from './mcp';
-import { RuntimeResolver } from './runtime';
+import { SharedGitnexusServer } from './mcp/shared-server';
+import { RuntimeResolver, which } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
 import { SessionManager } from './session-manager';
@@ -121,6 +122,13 @@ async function main(): Promise<void> {
     () => settings.get()
   );
 
+  const gitnexusBinary = which('gitnexus');
+  const sharedGitnexus = new SharedGitnexusServer({
+    command: gitnexusBinary ?? 'npx',
+    baseArgs: gitnexusBinary ? ['serve'] : ['-y', 'gitnexus@latest', 'serve'],
+    log: (level, message) => log(level, message)
+  });
+
   sessions = new SessionManager({
     store,
     settings,
@@ -128,6 +136,8 @@ async function main(): Promise<void> {
     analytics,
     getSecret: (id) => secrets.get(id),
     gitnexusHomeBase: gitnexusHomeBase(userData),
+    sharedGitnexus: () => sharedGitnexus.ensure(),
+    gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);
@@ -275,7 +285,8 @@ async function main(): Promise<void> {
       safe('session drain', drainSessions),
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
-      safe('web server stop', webServer?.stop())
+      safe('web server stop', webServer?.stop()),
+      safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop()))
     ]);
     const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));
     void Promise.race([shutdown.then(() => false), cap]).then((timedOut) => {

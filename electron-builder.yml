@@ -11,6 +11,8 @@ files:
 extraResources:
   - from: resources/pi
     to: pi
+  - from: resources/mcp
+    to: mcp
   - from: resources/icons
     to: icons
 asarUnpack:

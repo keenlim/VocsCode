@@ -3,14 +3,14 @@
  * need to show. The one place that knows about settings, the repo file and the secret store at
  * the same time; adapters only ever see the resolved list through `ctx.mcpServers()`.
  */
-import type { AppSettings, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpServerDef } from '../../shared/types';
+import type { AppSettings, GitnexusMode, HarnessId, McpBuiltinInfo, McpProjectInfo, McpProjectState, McpServerDef } from '../../shared/types';
 import os from 'node:os';
 import path from 'node:path';
 import { HARNESS_BY_ID } from '../../shared/harness-meta';
 import { which } from '../runtime';
 import { builtinEntries, effectiveEntries, effectiveServers, normalizeStdio, resolveVars, type ResolvedServer } from './effective';
 import { globalStores, projectStores, readProjectMcp, readStores } from './file';
-import { GITNEXUS_SERVER_ID, gitnexusBaseDef, isBuiltinServerId, isGitnexusIndexed, prepareGitnexusHome, readGitnexusRegistry, realGitnexusHome } from './gitnexus';
+import { GITNEXUS_SERVER_ID, gitnexusBaseDef, gitnexusSharedRoots, isBuiltinServerId, isGitnexusIndexed, prepareGitnexusHome, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './gitnexus';
 
 export * from './effective';
 export * from './file';
@@ -25,6 +25,10 @@ export function secretKeyFor(varName: string): string {
 export interface McpHostDeps {
   getSecret: (id: string) => Promise<string | undefined>;
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /** Shared mode: the shared GitNexus MCP endpoint, started lazily. Null when unavailable. */
+  sharedGitnexus?: () => Promise<string | null>;
+  /** Shared mode: path to the scope proxy the harness spawns. */
+  gitnexusProxyPath?: string;
 }
 
 export interface SessionScope {
@@ -47,18 +51,58 @@ function builtinDefs(): McpServerDef[] {
   return [gitnexusBaseDef(which(GITNEXUS_SERVER_ID))];
 }
 
-/** Built-ins the session actually gets, with the per-repo GitNexus home attached. */
+function gitnexusMode(settings: AppSettings): GitnexusMode {
+  return settings.gitnexus?.mode === 'shared' ? 'shared' : 'per-repo';
+}
+
+/** Per-repo mode: a GitNexus process whose private home holds only this repo (+ shared ones). */
+async function perRepoGitnexusDef(scope: SessionScope, def: McpServerDef): Promise<McpServerDef> {
+  const base = scope.gitnexusHomeBase ?? path.join(os.tmpdir(), 'vocs-code-gitnexus-homes');
+  const home = await prepareGitnexusHome({ baseDir: base, projectRoot: scope.projectRoot, cwd: scope.cwd, settings: scope.settings });
+  return { ...def, env: { ...(def.env ?? {}), GITNEXUS_HOME: home } };
+}
+
+/**
+ * Shared mode: the harness spawns the scope proxy, which talks to the one shared server and
+ * pins every call to the repos this session is allowed to see. Null when the repo is not
+ * indexed or the shared server cannot start, so we inject nothing rather than a broken server.
+ */
+async function sharedGitnexusDef(scope: SessionScope, def: McpServerDef, deps: McpHostDeps): Promise<McpServerDef | null> {
+  if (!deps.sharedGitnexus || !deps.gitnexusProxyPath) return null;
+  const registry = await readGitnexusRegistry(realGitnexusHome());
+  if (!isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd })) return null;
+  const allow = visibleGitnexusEntries(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd, sharedRoots: gitnexusSharedRoots(scope.settings) }).map((e) => ({ name: e.name, path: e.path }));
+  const url = await deps.sharedGitnexus();
+  if (!url) return null;
+  const node = which('node');
+  return {
+    ...def,
+    transport: 'stdio',
+    command: node ?? process.execPath,
+    args: [deps.gitnexusProxyPath],
+    env: {
+      ...(node ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
+      VOCS_GITNEXUS_URL: url,
+      VOCS_GITNEXUS_PRIMARY: scope.projectRoot,
+      VOCS_GITNEXUS_ALLOW: JSON.stringify(allow)
+    }
+  };
+}
+
+/** Built-ins the session actually gets, materialized per the configured serving mode. */
 async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps: McpHostDeps): Promise<ResolvedServer[]> {
   const support = HARNESS_BY_ID[scope.harness].capabilities.mcp;
+  const mode = gitnexusMode(scope.settings);
+  // The per-repo on/off switch only applies to per-repo servers; a shared server is on everywhere.
+  const effectiveState = mode === 'shared' ? { ...state, disabledBuiltin: undefined } : state;
   const defs = builtinDefs();
-  const chosen = builtinEntries({ builtin: defs, state, harness: scope.harness, support }).filter((e) => e.enabled);
+  const chosen = builtinEntries({ builtin: defs, state: effectiveState, harness: scope.harness, support }).filter((e) => e.enabled);
   const out: ResolvedServer[] = [];
   for (const { def } of chosen) {
-    let materialized = def;
+    let materialized: McpServerDef | null = def;
     if (def.id === GITNEXUS_SERVER_ID) {
-      const base = scope.gitnexusHomeBase ?? path.join(os.tmpdir(), 'vocs-code-gitnexus-homes');
-      const home = await prepareGitnexusHome({ baseDir: base, projectRoot: scope.projectRoot, cwd: scope.cwd, settings: scope.settings });
-      materialized = { ...def, env: { ...(def.env ?? {}), GITNEXUS_HOME: home } };
+      materialized = mode === 'shared' ? await sharedGitnexusDef(scope, def, deps) : await perRepoGitnexusDef(scope, def);
+      if (!materialized) continue;
     }
     const resolved = await resolveVars(materialized, { env: process.env, secret: (name) => deps.getSecret(secretKeyFor(name)) });
     if (resolved.missing.length) deps.log?.('warn', `mcp ${def.id}: no value for ${resolved.missing.join(', ')}`);
@@ -100,16 +144,20 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
   const detected = (await readStores(projectStores(scope.cwd))).filter((s) => s.exists);
   const defs = builtinDefs();
   const injectable = support === 'inject' || support === 'client';
+  const mode = gitnexusMode(scope.settings);
+  const effectiveState = mode === 'shared' ? { ...state, disabledBuiltin: undefined } : state;
   const registry = await readGitnexusRegistry(realGitnexusHome());
   const indexed = isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd });
   const builtin: McpBuiltinInfo[] = defs.map((def) => ({
     def,
-    enabled: injectable && !(state.disabledBuiltin ?? []).includes(def.id),
+    // In per-repo mode each repo opts in; a shared server is on for every repo.
+    enabled: injectable && (mode === 'shared' || !(state.disabledBuiltin ?? []).includes(def.id)),
     shared: state.gitnexusGlobal === true,
     indexed
   }));
   return {
     projectRoot: scope.projectRoot,
+    mode,
     file: repo.file,
     display: repo.file.replace(/\\/g, '/'),
     exists: repo.exists,
@@ -120,8 +168,8 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     builtin,
     detected,
     effective: [
-      ...builtinEntries({ builtin: defs, state, harness: scope.harness, support }),
-      ...effectiveEntries({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: defs })
+      ...builtinEntries({ builtin: defs, state: effectiveState, harness: scope.harness, support }),
+      ...effectiveEntries({ global: globals, repo: repoDefs, state: effectiveState, harness: scope.harness, support, builtin: defs })
     ],
     harness: scope.harness,
     support
