@@ -21,6 +21,7 @@ const emit = (text: string) => child.stdout.emit('data', Buffer.from(text));
 const row = (file: string, n: number, text = 'match') => `${path.join(cwd, file)}:${n}:${text}`;
 const listeners = () => getEventListeners(controller.signal, 'abort').length;
 const run = (max_results?: number) => grepTool(cwd, { pattern: 'match', max_results }, controller.signal);
+const overflow = (max: number) => `\n[Results truncated: more than ${max} matches; narrow the search.]`;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -39,7 +40,7 @@ describe('native grep ripgrep streaming', () => {
     const killedAtCap = child.kill.mock.calls.length;
     emit(`${row('late.ts', 5)}\n`.repeat(100));
     child.emit('close', null, 'SIGTERM');
-    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:match\nc.ts:3:match', isError: false });
+    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:match\nc.ts:3:match' + overflow(3), isError: false });
     expect(killedAtCap).toBe(1);
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(listeners()).toBe(0);
@@ -47,9 +48,9 @@ describe('native grep ripgrep streaming', () => {
 
   it('returns exactly the match cap even when a single burst exceeds the byte budget', async () => {
     const result = run(2);
-    emit(`${row('a.ts', 1)}\n${row('b.ts', 2)}\n${'unused'.repeat(budget)}`);
+    emit(`${row('a.ts', 1)}\n${row('b.ts', 2)}\n${row('extra.ts', 3)}\n${'unused'.repeat(budget)}`);
     child.emit('close', null);
-    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:match', isError: false });
+    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:match' + overflow(2), isError: false });
     expect(child.kill).toHaveBeenCalledTimes(1);
   });
 
@@ -61,7 +62,7 @@ describe('native grep ripgrep streaming', () => {
     emit('ial\r\nignored:3:match\n');
     const killedAtCap = child.kill.mock.calls.length;
     child.emit('close', null);
-    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:partial', isError: false });
+    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:partial' + overflow(2), isError: false });
     expect(killedAtCap).toBe(1);
   });
 
@@ -86,11 +87,13 @@ describe('native grep ripgrep streaming', () => {
     child.stderr.emit('data', Buffer.from('warning\n'));
     expect(child.kill).not.toHaveBeenCalled();
     emit(`${row('a.ts', 1)}\n`);
+    // Exactly one result is not proof of overflow, even with a diagnostic line.
+    expect(child.kill).not.toHaveBeenCalled();
+    emit(`${row('b.ts', 2)}\n`);
     const killedAtCap = child.kill.mock.calls.length;
     child.emit('close', null);
     const res = await result;
-    expect(res.isError).toBe(false);
-    expect(res.output).toContain('a.ts:1:match');
+    expect(res).toEqual({ output: 'a.ts:1:match\nwarning' + overflow(1), isError: false });
     expect(killedAtCap).toBe(1);
   });
 
@@ -136,6 +139,31 @@ describe('native grep ripgrep streaming', () => {
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(res.output).not.toContain('�');
     expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(budget + 100);
+  });
+
+  it.each(['', '\n'])('reports exactly-at-limit EOF without killing or claiming overflow (ending=%j)', async (ending) => {
+    const result = run(2);
+    emit(`${row('a.ts', 1)}\n${row('b.ts', 2)}${ending}`);
+    expect(child.kill).not.toHaveBeenCalled();
+    child.emit('close', 0);
+    expect(await result).toEqual({ output: 'a.ts:1:match\nb.ts:2:match', isError: false });
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(listeners()).toBe(0);
+  });
+
+  it('retains the deadline and cleans its timer/listener after timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const result = run();
+      emit(`${row('a.ts', 1)}\n`);
+      vi.advanceTimersByTime(30_000);
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      emit(`${row('late.ts', 2)}\n`);
+      child.emit('close', 0);
+      expect(await result).toEqual({ output: 'a.ts:1:match\n[Search timed out after 30000 ms.]', isError: true });
+      expect(listeners()).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it('reports no matches and removes the abort listener', async () => {
@@ -194,10 +222,10 @@ describe('native grep ripgrep streaming', () => {
 
   it('does not mistake cancellation after a limit for successful completion', async () => {
     const result = run(1);
-    emit(`${row('a.ts', 1)}\n`);
+    emit(`${row('a.ts', 1)}\n${row('extra.ts', 2)}\n`);
     controller.abort();
     child.emit('close', null);
-    expect(await result).toEqual({ output: 'a.ts:1:match\n[interrupted by user]', isError: true });
+    expect(await result).toEqual({ output: 'a.ts:1:match' + overflow(1) + '\n[interrupted by user]', isError: true });
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(listeners()).toBe(0);
   });
@@ -210,8 +238,9 @@ describe('native grep ripgrep streaming', () => {
     child.emit('close', null);
     const res = await result;
     expect(res.isError).toBe(false);
-    expect(res.output.split('\n')).toHaveLength(expected);
-    expect(res.output.split('\n').at(-1)).toBe(`file${expected}.ts:${expected}:match`);
+    expect(res.output.split('\n')).toHaveLength(expected + 1);
+    expect(res.output.split('\n').at(-2)).toBe(`file${expected}.ts:${expected}:match`);
+    expect(res.output.endsWith(overflow(expected))).toBe(true);
     expect(killedAtCap).toBe(1);
   });
 });
