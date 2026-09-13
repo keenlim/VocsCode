@@ -181,6 +181,14 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await picker.locator('.mp-row').first().waitFor({ timeout: 60_000 });
     await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
     await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
+
+    // The dialog starts on a listed model only: the header accepts a typed custom id after start,
+    // but here the search must not offer one, so it can never leak into a new session's config.
+    await picker.locator('.mp-search input').fill('acme-custom-1');
+    await picker.locator('.mp-clear').waitFor({ timeout: 10_000 });
+    expect(await picker.getByRole('button', { name: 'Use “acme-custom-1”' }).count()).toBe(0);
+    await picker.locator('.mp-clear').click();
+
     await pickModel(win, 'openrouter/z-ai/glm-4.6');
 
     await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 10_000 }).toBe(1);
