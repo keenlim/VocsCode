@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { BrowserWindow, Menu, Notification, app, nativeTheme, shell } from 'electron';
+import { BrowserWindow, Menu, Notification, app, nativeTheme, screen, shell } from 'electron';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import type { SessionEventEnvelope, SessionMeta } from '../shared/types';
 import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
@@ -29,6 +29,16 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
 const APP_NAME = 'Vocs Code';
 const APP_ID = 'dev.vocs.vocscode';
+
+// The e2e suites drive real windows. Park them outside every display and never activate them, so a
+// test run neither covers the desktop nor takes the focus away from whatever the developer is doing.
+// Set VOCS_CODE_E2E_VISIBLE=1 to watch a suite on screen instead.
+const e2eQuiet = process.env.VOCS_CODE_E2E_VISIBLE !== '1' && (process.env.VOCS_CODE_E2E_UI === '1' || process.env.HARNESS_E2E === '1');
+// Chromium stops compositing a window it believes is occluded, which is what a window parked off
+// every display looks like: without this, Playwright's screenshots come back blank.
+if (e2eQuiet && !app.commandLine.hasSwitch('disable-features')) {
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+}
 
 // Electron uses its own name and AppUserModelId in development unless the host sets them explicitly.
 // Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
@@ -144,6 +154,9 @@ async function main(): Promise<void> {
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
     notify: (sessionId, title, body) => {
+      // An off-screen test window is never focused, so without this every approval in a live suite
+      // would raise a desktop toast on top of whatever the developer is doing.
+      if (e2eQuiet) return;
       if (!settings.get().notifications) return;
       if (mainWindow?.isFocused()) return;
       if (!Notification.isSupported()) return;
@@ -441,7 +454,10 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
-      spellcheck: true
+      spellcheck: true,
+      // An off-screen window is never the foreground window, and throttling would stall the renders
+      // and timers the suites wait on.
+      backgroundThrottling: !e2eQuiet
     }
   });
   if (process.platform === 'win32') {
@@ -451,7 +467,19 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
   log('debug', `window created ${bounds.width}x${bounds.height}${'x' in bounds && bounds.x !== undefined ? ` at ${bounds.x},${bounds.y}` : ''}`);
   win.once('ready-to-show', () => {
     log('info', `window shown ${Math.round(process.uptime() * 1000)}ms after launch`);
-    win.show();
+    if (!e2eQuiet) {
+      win.show();
+      return;
+    }
+    // Playwright can screenshot a shown window but not a hidden one, so this is off-screen rather
+    // than hidden. `showInactive` shows it without activation, which is what keeps the focus put.
+    const rect = win.getBounds();
+    const displays = screen.getAllDisplays();
+    const left = Math.min(...displays.map((d) => d.bounds.x));
+    const top = Math.min(...displays.map((d) => d.bounds.y));
+    win.setPosition(left - rect.width - 100, top + 50);
+    win.setSkipTaskbar(true);
+    win.showInactive();
   });
   win.on('closed', () => {
     log('debug', 'window closed');
@@ -463,6 +491,8 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     log('error', `preload script ${preloadPath} failed; the renderer has no IPC bridge: ${describeError(error)}`);
   });
   const saveBounds = () => {
+    // The off-screen test position is not user intent; never write it back to settings.
+    if (e2eQuiet) return;
     if (win.isDestroyed() || win.isMinimized()) return;
     const b = win.getBounds();
     settings
