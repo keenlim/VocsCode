@@ -4,6 +4,7 @@ import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
 import { ANTHROPIC_STATIC_MODELS, CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
+import { mergeCodexCatalog } from '../models/codex-catalog';
 import { AcpAdapter } from './acp';
 import { ClaudeAdapter } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
@@ -60,14 +61,10 @@ async function listHarnessModelsRaw(opts: {
       }
       case 'codex':
       case 'codex-exec': {
-        const bin = runtime.resolve('codex');
-        if (!bin) return { models: CODEX_STATIC_MODELS, error: 'Codex CLI not found; showing the built-in catalog.' };
-        try {
-          const models = await listCodexModels(bin.path);
-          return { models: models.length ? models : CODEX_STATIC_MODELS };
-        } catch (e) {
-          return { models: CODEX_STATIC_MODELS, error: `model/list failed (${errorMessage(e)}); showing the built-in catalog.` };
-        }
+        const native = await codexNativeModels(runtime);
+        // Only the app-server harness can register a custom provider, so only it lists their models.
+        const models = harness === 'codex' ? mergeCodexCatalog(native.models, settings) : native.models;
+        return { models, error: native.error };
       }
       case 'cursor': {
         const key = await opts.getApiKey('cursor');
@@ -103,5 +100,17 @@ async function listHarnessModelsRaw(opts: {
     }
   } catch (e) {
     return { models: [], error: errorMessage(e) };
+  }
+}
+
+/** Codex's own catalog, or the built-in fallback when the CLI is missing or `model/list` fails. */
+async function codexNativeModels(runtime: RuntimeResolver): Promise<{ models: ModelInfo[]; error?: string }> {
+  const bin = runtime.resolve('codex');
+  if (!bin) return { models: CODEX_STATIC_MODELS, error: 'Codex CLI not found; showing the built-in catalog.' };
+  try {
+    const models = await listCodexModels(bin.path);
+    return { models: models.length ? models : CODEX_STATIC_MODELS };
+  } catch (e) {
+    return { models: CODEX_STATIC_MODELS, error: `model/list failed (${errorMessage(e)}); showing the built-in catalog.` };
   }
 }
