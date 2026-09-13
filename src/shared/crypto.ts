@@ -120,12 +120,18 @@ function canonical(data: unknown): Uint8Array {
   return enc.encode(stable(data));
 }
 
-/** Stable JSON: key order normalized so both sides sign identical bytes. */
+/** Stable JSON: key order normalized, undefined dropped like JSON.stringify, so both
+ *  sides sign and parse identical bytes. */
 export function stable(value: unknown): string {
+  if (value === undefined) return 'null';
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
     const o = value as Record<string, unknown>;
-    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stable(o[k])}`).join(',')}}`;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stable(o[k])}`)
+      .join(',')}}`;
   }
   return JSON.stringify(value);
 }

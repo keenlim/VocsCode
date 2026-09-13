@@ -45,10 +45,13 @@ describe('relay web client (browser-side protocol)', () => {
     // Desktop side (as in remote-e2e.test.ts).
     const calls: string[] = [];
     const registry = {
-      channels: () => ['sessions:list'],
-      invoke: async (channel: string) => {
-        calls.push(channel);
+      channels: () => ['sessions:list', 'sessions:send', 'sessions:create', 'settings:update'],
+      invoke: async (channel: string, request?: unknown) => {
+        calls.push(request && typeof request === 'object' && 'input' in request ? `${channel}:${JSON.stringify((request as { input: unknown }).input)}` : channel);
         if (channel === 'sessions:list') return [{ id: 's1', title: 'From the host' }];
+        if (channel === 'sessions:send') return undefined;
+        if (channel === 'sessions:create') return { id: 's2', title: 'New' };
+        if (channel === 'settings:update') return { remote: { enabled: true } };
         throw new Error('unknown');
       }
     } as unknown as HandlerRegistry;
@@ -94,7 +97,19 @@ describe('relay web client (browser-side protocol)', () => {
     // Read-only invoke through the e2e channel reaches the real registry.
     const list = (await restored.invoke('sessions:list', null)) as Array<{ id: string }>;
     expect(list[0].id).toBe('s1');
-    expect(calls).toEqual(['sessions:list']);
+    expect(calls[0]).toBe('sessions:list');
+
+    // Interactive P3: sending a prompt lands on the registry with the full input.
+    await restored.invoke('sessions:send', { id: 's1', input: { text: 'hello agent' } });
+    expect(calls).toContain('sessions:send:{"text":"hello agent"}');
+
+    // Session creation: the folder comes from the host's known folders, no native dialog.
+    const created = (await restored.invoke('sessions:create', { config: { harness: 'native', projectRoot: '/repo', permissionMode: 'ask' } })) as { id: string };
+    expect(created.id).toBe('s2');
+
+    // Disallowed channels are still refused without consulting the registry.
+    await expect(restored.invoke('settings:update', { remote: { enabled: true } })).rejects.toThrow('channel not available remotely');
+    expect(calls).not.toContain('settings:update');
 
     // Host pushes reach the browser, sealed.
     await host.broadcastPush('push:settingsChanged', { notifications: true });

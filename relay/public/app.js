@@ -64,10 +64,11 @@
     return enc.encode(stable(data));
   }
   function stable(value) {
+    if (value === void 0) return "null";
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
     if (value && typeof value === "object") {
       const o = value;
-      return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stable(o[k])}`).join(",")}}`;
+      return `{${Object.keys(o).filter((k) => o[k] !== void 0).sort().map((k) => `${JSON.stringify(k)}:${stable(o[k])}`).join(",")}}`;
     }
     return JSON.stringify(value);
   }
@@ -254,6 +255,7 @@
   var client = new RelayClient({ storage: localStorageApi() });
   var sessions = [];
   var active = null;
+  var activeStatus = "idle";
   function localStorageApi() {
     return {
       get: (k) => window.localStorage.getItem(k),
@@ -291,8 +293,75 @@
       client.logout();
       location.reload();
     });
+    el("new-session").addEventListener("click", () => void toggleNewSession(true));
+    el("ns-cancel").addEventListener("click", () => void toggleNewSession(false));
+    el("ns-create").addEventListener("click", () => void createSession());
+    el("send").addEventListener("click", () => void sendComposer());
+    el("act-interrupt").addEventListener("click", () => void actOnActive("sessions:interrupt", null));
+    el("act-stop").addEventListener("click", () => void actOnActive("sessions:stop", null));
+    const composer = el("composer");
+    composer.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        void sendComposer();
+      }
+    });
     if (client.restore()) void enter();
     else show("screen-pair");
+  }
+  async function sendComposer() {
+    const box = el("composer");
+    const text = box.value.trim();
+    if (!text || !active) return;
+    box.value = "";
+    try {
+      await client.invoke("sessions:send", { id: active, input: { text } });
+    } catch (e) {
+      setConnection(`send failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  async function actOnActive(channel, request) {
+    if (!active) return;
+    try {
+      await client.invoke(channel, request ? { id: active, ...request } : { id: active });
+    } catch (e) {
+      setConnection(`${channel} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  async function toggleNewSession(open) {
+    el("new-session-panel").toggleAttribute("hidden", !open);
+    if (!open) return;
+    try {
+      const settings = await client.invoke("settings:get", null);
+      const folders = [.../* @__PURE__ */ new Set([...settings.folders ?? [], ...settings.recentProjects ?? []])];
+      el("known-folders").innerHTML = folders.map((f) => `<option value="${esc(f)}"></option>`).join("");
+      const availability = await client.invoke("harness:availability", null);
+      el("ns-harness").innerHTML = Object.entries(availability).map(([id, a]) => `<option value="${esc(id)}">${esc(id)}${a.available ? "" : " (not installed)"}</option>`).join("");
+    } catch (e) {
+      el("ns-error").textContent = e instanceof Error ? e.message : String(e);
+    }
+  }
+  async function createSession() {
+    const folder = el("ns-folder").value.trim();
+    const harness = el("ns-harness").value;
+    const title = el("ns-title").value.trim() || void 0;
+    const initialPrompt = el("ns-prompt").value.trim() || void 0;
+    if (!folder) {
+      el("ns-error").textContent = "A folder path on the host machine is required.";
+      return;
+    }
+    try {
+      const created = await client.invoke("sessions:create", {
+        config: { harness, projectRoot: folder, permissionMode: "ask" },
+        title,
+        initialPrompt
+      });
+      el("new-session-panel").setAttribute("hidden", "");
+      await refreshSessions();
+      await openSession(created.id);
+    } catch (e) {
+      el("ns-error").textContent = e instanceof Error ? e.message : String(e);
+    }
   }
   async function startPairing(relay, code, name) {
     show("screen-pairing");
@@ -343,6 +412,12 @@
     active = id;
     const items = await client.invoke("sessions:transcript", { id });
     renderTranscript(items);
+    const meta = sessions.find((s) => s.id === id);
+    activeStatus = meta?.status ?? "idle";
+    el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
+    const running = activeStatus === "running" || activeStatus === "starting" || activeStatus === "awaiting";
+    el("act-interrupt").hidden = !running;
+    el("act-stop").hidden = !running;
     for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
   }
   function renderTranscript(items) {
@@ -373,10 +448,31 @@
   async function onPush(channel, payload) {
     if (channel === "push:sessionEvent" && payload) {
       const env = payload;
-      if (active && env.sessionId === active) await openSession(active);
+      if (active && env.sessionId === active) {
+        if (env.event?.type === "status" && env.event.status) {
+          activeStatus = env.event.status;
+          const meta = sessions.find((s) => s.id === active);
+          el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
+          const running = activeStatus === "running" || activeStatus === "starting" || activeStatus === "awaiting";
+          el("act-interrupt").hidden = !running;
+          el("act-stop").hidden = !running;
+        }
+        await openSession(active);
+      }
       return;
     }
-    if (channel === "push:sessionsChanged") await refreshSessions();
+    if (channel === "push:sessionsChanged") {
+      sessions = payload ?? sessions;
+      renderSessionList();
+      if (active) await openSession(active);
+    }
+  }
+  function renderSessionList() {
+    const list = el("session-list");
+    list.innerHTML = sessions.map((s) => `<button class="session-row" data-id="${esc(s.id)}"><span>${esc(s.title)}</span><small>${esc(s.status)}</small></button>`).join("");
+    for (const row of Array.from(list.querySelectorAll("button"))) {
+      row.addEventListener("click", () => void openSession(row.dataset.id));
+    }
   }
   document.addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-decision]");
