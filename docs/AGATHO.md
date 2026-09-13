@@ -13,14 +13,24 @@ Configuring an MCP server by hand means knowing the transport, the command line 
 ```
 src/shared/agent.ts            transcript, proposal and state types
 src/shared/agent-manifest.ts   THE ALLOWLIST — one entry per capability
-src/main/agents/model.ts       which provider/model answers (shared with session titles)
+src/main/agents/pi-runtime.ts  the pi process: spawn, RPC events, the capability bridge
 src/main/agents/context.ts     system prompt + per-turn app context
 src/main/agents/tools.ts       manifest -> tool defs; runs one capability
-src/main/agents/index.ts       the loop: stream, gate, apply, confirm
+src/main/agents/index.ts       the gate: batch, approve, apply, confirm
+resources/pi/vocs-code-agatho.ts  registers the allowlist tools with pi
 src/renderer/src/components/Agatho.tsx   the floating panel
 ```
 
-The loop is ~80 lines over `anthropicStep` / `openaiStep` (`src/main/harness/native/drivers.ts`), the same provider-neutral step functions the native harness uses. It has no shell, no filesystem and no network of its own.
+Agatho runs on **pi**, the same coding agent the Pi harness uses, started once per conversation in
+RPC mode. It is a hermetic run: no session file, no built-in tools, and no user extensions, skills,
+prompt templates or context files — only the capability bridge. The bridge extension registers one
+pi tool per allowlist entry and forwards every call back to the app over pi's extension-UI channel,
+where this code decides, gates and performs it. Neither the tool list nor any capability logic
+lives in the extension; both come from the app at spawn time. A turn's system prompt is rewritten
+before every message, so the app-context block stays fresh without restarting pi.
+
+Agatho has no shell, no filesystem and no network of its own: if a job needs any of those, it says
+so. `unavailable` is set when pi is not installed, and the panel shows where to install it.
 
 ## The allowlist is the security boundary
 
@@ -59,13 +69,22 @@ Rules of thumb:
 - Anything that deletes, pushes, merges or spends money is `destructive`.
 
 `tests/agatho.test.ts` asserts the boundary: no forbidden channel is reachable, nothing gated runs unapproved, and `tests/handler-registry.test.ts` proves every allowlisted channel actually exists.
+`tests/agatho-pi.integration.test.ts` (opt-in, `VOCS_CODE_PI_INTEGRATION=1`) runs the real installed
+pi with a scripted provider and proves the bridge itself: the extension registers the allowlist,
+pi dispatches the calls, and the gate answers them.
 
 ## Model
 
-`settings.agentModel`, falling back to `settings.utilityModel`, falling back to the first usable provider's default. Picking correctly among a dozen capabilities is a harder job than naming a session, so a flash-tier model may struggle — the panel shows which model answered, and a prose-only reply (no tool call) is handled as a normal outcome rather than an error.
+Agatho uses pi's own providers and models. `settings.agentModel` pins one from pi's catalog (the
+Settings → General picker lists them); unset means pi's default model, which is also what a pi
+session would use. The panel shows the model pi reports for the run, so a weak pick is diagnosable
+rather than mysterious. If the pinned model no longer resolves, pi reports the error in the
+conversation and the user picks another one.
 
 ## Not yet
 
 - Repo-scoped chat on the right-panel MCP tab (the component takes a scope prop cleanly).
-- Conversation persistence across restarts; today the transcript is in-memory.
-- A second persona. The runtime is general, but one assistant that can do more beats several that each do less.
+- Conversation persistence across restarts; today the transcript is in-memory and clearing it
+  restarts the pi process.
+- A second persona. The runtime is general, but one assistant that can do more beats several that
+  each do less.

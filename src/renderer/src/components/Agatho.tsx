@@ -10,20 +10,30 @@ import { useStore, toastError } from '../store';
 import { askConfirm, Button, Icon, Spinner } from './ui';
 
 const PANEL_W = 360;
+/** Tallest the expanded panel grows before the transcript starts scrolling. */
 const PANEL_H = 460;
 const AVATAR = 52;
+/** Gap kept between the panel and the window edge. */
+const MARGIN = 8;
+/** Where a panel that has never been moved parks: bottom-right, clear of the composer. */
+const PARK_MARGIN = 24;
 /** Pointer travel below this counts as a click, not a drag. */
 const DRAG_SLOP = 4;
 
+/** `y` is the top of the avatar square. The panel hangs from the avatar's bottom edge and grows
+ *  upward, so how far up the avatar may travel depends on how tall the panel currently is. */
 interface Point {
   x: number;
   y: number;
 }
 
 function clamp(p: Point, w: number, h: number): Point {
+  const minY = MARGIN + Math.max(0, h - AVATAR);
+  const maxY = Math.max(minY, window.innerHeight - AVATAR - MARGIN);
+  const maxX = Math.max(MARGIN, window.innerWidth - w - MARGIN);
   return {
-    x: Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8)),
-    y: Math.min(Math.max(8, p.y), Math.max(8, window.innerHeight - h - 8))
+    x: Math.round(Math.min(Math.max(MARGIN, p.x), maxX)),
+    y: Math.round(Math.min(Math.max(minY, p.y), maxY))
   };
 }
 
@@ -39,19 +49,44 @@ export function Agatho() {
   const collapsed = stored?.collapsed !== false;
   const [pos, setPos] = useState<Point | null>(null);
   const [text, setText] = useState('');
+  /** Measured height of the rendered panel, so growth can be anchored at the bottom edge. */
+  const [panelH, setPanelH] = useState(0);
+  const boxRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const dragRef = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const width = collapsed ? AVATAR : PANEL_W;
-  const height = collapsed ? AVATAR : PANEL_H;
+  const height = collapsed ? AVATAR : panelH;
 
   // First paint: use the stored corner, else park it bottom-right out of the composer's way.
   useLayoutEffect(() => {
     if (pos) return;
-    const x = typeof stored?.x === 'number' ? stored.x : window.innerWidth - PANEL_W - 24;
-    const y = typeof stored?.y === 'number' ? stored.y : window.innerHeight - PANEL_H - 24;
-    setPos(clamp({ x, y }, width, height));
-  }, [pos, stored?.x, stored?.y, width, height]);
+    const x = typeof stored?.x === 'number' ? stored.x : window.innerWidth - PANEL_W - PARK_MARGIN;
+    const y = typeof stored?.y === 'number' ? stored.y : window.innerHeight - AVATAR - PARK_MARGIN;
+    // An expanded panel is given its tallest shape up front, so a stored position cannot leave
+    // the header above the top of the window.
+    setPos(clamp({ x, y }, width, collapsed ? AVATAR : PANEL_H));
+  }, [pos, stored?.x, stored?.y, width, collapsed]);
+
+  // Expanding after the avatar was dragged near the top pulls the panel down just enough to fit.
+  const wasCollapsed = useRef(collapsed);
+  useLayoutEffect(() => {
+    if (wasCollapsed.current === collapsed) return;
+    wasCollapsed.current = collapsed;
+    if (collapsed) return;
+    setPos((p) => (p ? clamp(p, PANEL_W, panelH || PANEL_H) : p));
+  }, [collapsed, panelH]);
+
+  // Track the rendered height so a drag cannot push the panel's header off the top of the window.
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setPanelH(el.getBoundingClientRect().height || el.offsetHeight);
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, [collapsed]);
 
   useEffect(() => {
     const onResize = () => setPos((p) => (p ? clamp(p, width, height) : p));
@@ -77,12 +112,14 @@ export function Agatho() {
     if (!pos) return;
     if ((e.target as HTMLElement).closest('button, textarea, input, a')) return;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y, moved: false };
+    // Offsets are kept from the anchor (the avatar's bottom edge) so grabbing the header of an
+    // expanded panel does not make it jump by its own height.
+    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - (pos.y + AVATAR), moved: false };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
-    const next = { x: e.clientX - d.dx, y: e.clientY - d.dy };
+    const next = { x: e.clientX - d.dx, y: e.clientY - d.dy - AVATAR };
     if (Math.abs(next.x - (pos?.x ?? 0)) > DRAG_SLOP || Math.abs(next.y - (pos?.y ?? 0)) > DRAG_SLOP) d.moved = true;
     setPos(clamp(next, width, height));
   };
@@ -108,11 +145,19 @@ export function Agatho() {
 
   if (!settings || settings.agent?.enabled === false || !pos) return null;
 
-  const style: React.CSSProperties = { left: pos.x, top: pos.y, width, height: collapsed ? AVATAR : undefined };
+  // Anchored by the bottom edge: the panel's foot stays put and the transcript grows upward,
+  // which also means "drag it to the bottom" really does reach the bottom of the window.
+  const anchorBottom = pos.y + AVATAR;
+  const bottom = Math.max(MARGIN, window.innerHeight - anchorBottom);
+  const maxHeight = Math.max(160, Math.min(PANEL_H, anchorBottom - MARGIN, window.innerHeight - 2 * MARGIN));
+  const style: React.CSSProperties = collapsed
+    ? { left: pos.x, bottom, width: AVATAR, height: AVATAR }
+    : { left: pos.x, bottom, width: PANEL_W, maxHeight };
 
   if (collapsed) {
     return createPortal(
       <div
+        ref={boxRef}
         className={`agatho agatho-avatar ${agent.busy ? 'busy' : ''}`}
         style={style}
         onPointerDown={onPointerDown}
@@ -136,11 +181,11 @@ export function Agatho() {
   }
 
   return createPortal(
-    <div className="agatho agatho-panel" style={style} role="dialog" aria-label={AGENT_NAME}>
+    <div ref={boxRef} className="agatho agatho-panel" style={style} role="dialog" aria-label={AGENT_NAME}>
       <div className="agatho-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
         <Icon name="sparkles" size={15} />
         <strong>{AGENT_NAME}</strong>
-        {agent.model && <span className="agatho-model" title="Model answering — set it under Settings → Models">{agent.model}</span>}
+        {agent.model && <span className="agatho-model" title="Model answering — set it under Settings → General">{agent.model}</span>}
         <span className="spacer" />
         <button className="icon-btn" title="Clear the conversation" aria-label="Clear the conversation" onClick={() => void invoke('agent:reset', undefined).catch(toastError)}>
           <Icon name="trash" size={13} />

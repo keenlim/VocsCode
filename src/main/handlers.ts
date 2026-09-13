@@ -4,6 +4,7 @@
  *  DesktopBridge, push delivery via deps.push. */
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
@@ -85,6 +86,8 @@ export interface HandlerRegistry {
   /** Every channel this registry serves — the host binds each to its transport. */
   channels(): IpcChannel[];
   invoke(channel: string, req: unknown): Promise<unknown>;
+  /** Stops background children the registry owns (Agatho's pi process). */
+  shutdown(): Promise<void>;
 }
 
 /** A handler holding the host process this long has already frozen the UI; say so. */
@@ -494,7 +497,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     getSecret: (providerId) => secrets.get(providerId),
     invoke: invokeChannel,
     push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
-    log: deps.log
+    log: deps.log,
+    // Agatho runs on pi (docs/AGATHO.md); it is absent until pi is installed, which the panel says.
+    piBinary: () => runtime.resolve('pi')?.path ?? null,
+    piExtension: () => runtime.resource('pi', 'vocs-code-agatho.ts'),
+    piCwd: () => homedir()
   });
   handle('agent:state', () => agatho.state());
   // A turn streams over push:agentState, so the invoke returns as soon as it is accepted.
@@ -672,7 +679,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   return {
     channels: () => Array.from(handlers.keys()),
-    invoke: invokeChannel
+    invoke: invokeChannel,
+    shutdown: () => agatho.dispose()
   };
 }
 

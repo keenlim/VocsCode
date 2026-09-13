@@ -47,7 +47,7 @@ function toolPath(input: Record<string, unknown> | undefined): string | undefine
 }
 
 /** Env var names pi understands for each of our provider ids. */
-const PI_ENV_KEYS: Record<string, string> = {
+export const PI_ENV_KEYS: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   deepseek: 'DEEPSEEK_API_KEY',

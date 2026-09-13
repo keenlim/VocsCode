@@ -36,7 +36,7 @@ export interface AgentState {
   busy: boolean;
   /** `provider/model` that answered, so a weak utility model is diagnosable rather than mysterious. */
   model?: string;
-  /** Set when no provider is usable; the panel shows setup guidance instead of a dead textarea. */
+  /** Set when pi is not installed; the panel shows setup guidance instead of a dead textarea. */
   unavailable?: string;
 }
 
