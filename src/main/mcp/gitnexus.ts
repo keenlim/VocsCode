@@ -2,12 +2,12 @@
  * GitNexus ships with Vocs Code as a built-in MCP server, scoped strictly to the session's repo.
  *
  * GitNexus keeps every index in one global registry (`~/.gitnexus/registry.json`) and its `mcp`
- * command serves all of them, so isolation is ours to build: for each session we write a private
- * `GITNEXUS_HOME` whose registry contains only the session repo — plus any repo the user has
- * promoted to global scope (`mcpProjectState[root].gitnexusGlobal`). A repo-scoped session can
- * then never reach another repo's graph. No Electron imports.
+ * command serves all of them, so isolation is ours to build. One `gitnexus serve` process backs
+ * every session (see shared-server.ts); what a session may reach is decided here, by the registry
+ * entries visible to its repo — the repo itself (matched against `projectRoot` and `cwd`) plus any
+ * repo the user promoted to global scope (`mcpProjectState[root].gitnexusGlobal`). The scope proxy
+ * enforces that list on every call. No Electron imports.
  */
-import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,11 +25,6 @@ export function gitnexusBaseDef(installedPath?: string | null): McpServerDef {
   return installedPath
     ? { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: installedPath, args: ['mcp'], description: 'GitNexus code knowledge graph' }
     : { id: GITNEXUS_SERVER_ID, transport: 'stdio', command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'], description: 'GitNexus code knowledge graph' };
-}
-
-/** Where the per-project GitNexus homes live, inside the app's userData directory. */
-export function gitnexusHomeBase(userData: string): string {
-  return path.join(userData, 'gitnexus-homes');
 }
 
 /** GitNexus's own home resolution: `GITNEXUS_HOME`, else `~/.gitnexus`. */
@@ -82,21 +77,3 @@ export function isGitnexusIndexed(entries: GitnexusRegistryEntry[], opts: { proj
   return visibleGitnexusEntries(entries, { ...opts, sharedRoots: [] }).length > 0;
 }
 
-/**
- * Writes the session's private GitNexus home and returns its path. The directory always exists
- * after this resolves, even with an empty registry, so the MCP server starts deterministically.
- */
-export async function prepareGitnexusHome(opts: {
-  baseDir: string;
-  projectRoot: string;
-  cwd: string;
-  settings: AppSettings;
-  realHome?: string;
-}): Promise<string> {
-  const home = path.join(opts.baseDir, createHash('sha1').update(normalize(opts.projectRoot)).digest('hex').slice(0, 16));
-  const entries = await readGitnexusRegistry(opts.realHome ?? realGitnexusHome());
-  const visible = visibleGitnexusEntries(entries, { projectRoot: opts.projectRoot, cwd: opts.cwd, sharedRoots: gitnexusSharedRoots(opts.settings) });
-  await fs.mkdir(home, { recursive: true });
-  await fs.writeFile(path.join(home, 'registry.json'), JSON.stringify(visible, null, 2) + '\n', 'utf8');
-  return home;
-}

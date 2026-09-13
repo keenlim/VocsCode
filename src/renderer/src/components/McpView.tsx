@@ -3,7 +3,7 @@
  * store so a definition can be copied across. Per-repo servers live on the right-panel MCP tab.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { GitnexusMode, McpServerDef, McpStoreInfo } from '../../../shared/types';
+import type { McpServerDef, McpStoreInfo } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
@@ -38,11 +38,6 @@ export function McpView() {
 
   const save = async (list: McpServerDef[]) => {
     await invoke('settings:update', { mcpServers: list });
-  };
-
-  const gitnexusMode: GitnexusMode = settings?.gitnexus?.mode ?? 'per-repo';
-  const setGitnexusMode = async (mode: GitnexusMode) => {
-    await invoke('settings:update', { gitnexus: { mode } });
   };
 
   const upsert = async (def: McpServerDef) => {
@@ -124,19 +119,11 @@ export function McpView() {
                 <span className="mcp-name">GitNexus</span>
                 <Badge tone="blue">built-in</Badge>
               </div>
-              <div className="muted small">Ships with Vocs Code and is offered to every repo. Choose how its server runs.</div>
-              <div className="row gap8 pad-t">
-                <Button size="sm" variant={gitnexusMode === 'per-repo' ? 'primary' : 'ghost'} onClick={() => void setGitnexusMode('per-repo')}>
-                  Per-repo servers
-                </Button>
-                <Button size="sm" variant={gitnexusMode === 'shared' ? 'primary' : 'ghost'} onClick={() => void setGitnexusMode('shared')}>
-                  One shared server
-                </Button>
-              </div>
+              <div className="muted small">Ships with Vocs Code and is offered to every repo, served by one shared process.</div>
               <div className="muted small pad-t">
-                {gitnexusMode === 'shared'
-                  ? 'One GitNexus process serves every indexed repo. Each session still only sees its own graph (plus any repo you share), enforced by this app.'
-                  : 'Each repo gets its own GitNexus process, scoped to that repo. Enable or disable it per repo on the MCP panel tab.'}
+                One GitNexus process serves every indexed repo. Each session still only sees its own graph
+                (plus any repo you share), enforced by this app. Turn it off for a single repo on that
+                repo's MCP panel tab.
               </div>
             </div>
             {servers.length === 0 && !editing && (
