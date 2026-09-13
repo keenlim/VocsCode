@@ -46,6 +46,10 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.files.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 ```
 
+Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
+takes focus, so suites can run while you work. `VOCS_CODE_E2E_VISIBLE=1` brings the window back on
+screen when you need to watch a run.
+
 Which suite a change must keep passing — and extend, per **E2E discipline**:
 
 | You changed | Required suite(s) |

@@ -13,7 +13,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { openNewSession, seedSettings } from './e2e-ui';
+import { expectQuietWindow, openNewSession, seedSettings } from './e2e-ui';
 
 const enabled = process.env.HARNESS_E2E === '1';
 const root = path.resolve(__dirname, '..');
@@ -75,6 +75,9 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     let win: Page = await app.firstWindow();
     // Only now is there a window to ask: launch() resolves as soon as the main process is up.
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.getTitle())).toBe('Vocs Code');
+    // Suites run off-screen and inactive so a test run does not disturb the desktop; the app's
+    // window is the thing to check, since that is invisible from the page.
+    await expectQuietWindow(app);
     const consoleLines: string[] = [];
     const watch = (p: Page) => {
       p.on('console', (msg) => consoleLines.push(`[${msg.type()}] ${msg.text()}`));

@@ -3,7 +3,8 @@
  * way by five tests; keeping it here means a move in the chrome is one fix, not five.
  */
 import { inflateSync } from 'node:zlib';
-import type { Page } from 'playwright-core';
+import { expect } from 'vitest';
+import type { ElectronApplication, Page } from 'playwright-core';
 
 /**
  * settings.json for a returning user: the project is already in the sidebar's folder list (so a
@@ -27,6 +28,30 @@ export async function openNewSession(win: Page): Promise<void> {
 export async function openAnalytics(win: Page): Promise<void> {
   await win.getByRole('button', { name: 'Analytics', exact: true }).click();
   await win.getByRole('tablist', { name: 'Analytics sections' }).waitFor();
+}
+
+/**
+ * Suites run off-screen and inactive so a test run covers nothing and takes no focus (see
+ * `e2eQuiet` in src/main/index.ts). That is invisible from the page, so assert the window itself:
+ * unfocused, and entirely outside every display. The window is placed when it is ready to show, so
+ * this polls rather than racing the first paint. A no-op under VOCS_CODE_E2E_VISIBLE=1.
+ */
+export async function expectQuietWindow(app: ElectronApplication): Promise<void> {
+  if (process.env.VOCS_CODE_E2E_VISIBLE === '1') return;
+  const read = () =>
+    app.evaluate(({ BrowserWindow, screen }) => {
+      const win = BrowserWindow.getAllWindows()[0]!;
+      const b = win.getBounds();
+      const displays = screen.getAllDisplays().map((d) => d.bounds);
+      return { focused: win.isFocused(), right: b.x + b.width, left: Math.min(...displays.map((d) => d.x)) };
+    });
+  let state = await read();
+  for (let i = 0; i < 100 && state.right > state.left; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    state = await read();
+  }
+  expect(state.focused).toBe(false);
+  expect(state.right).toBeLessThanOrEqual(state.left);
 }
 
 /**
