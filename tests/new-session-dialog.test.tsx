@@ -87,24 +87,23 @@ describe('NewSessionDialog', () => {
     expect(start.textContent).not.toContain('Ctrl');
   });
 
-  it('starts a session on a typed custom model id the catalog does not list', async () => {
+  it('does not offer an unlisted model id typed into the model search', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'harness:models') return { models: [{ id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' }] };
       if (channel === 'sessions:create') return createdSession;
       return {};
     });
     render(<NewSessionDialog />);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('harness:models', expect.anything()));
+    // The catalog's first model becomes the selection; typing must not add a custom row alongside it.
+    await screen.findByRole('button', { name: /Claude Sonnet 5/ });
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'glm-4.6' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Use “glm-4.6”' }));
-    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    expect(screen.queryByRole('button', { name: 'Use “glm-4.6”' })).toBeNull();
 
-    await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith(
-        'sessions:create',
-        expect.objectContaining({ config: expect.objectContaining({ model: { provider: 'anthropic', model: 'glm-4.6' } }) }),
-      ),
-    );
+    // Starting submits the listed selection, never the typed id.
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const createCall = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
+    expect((createCall?.[1] as { config: { model?: unknown } }).config.model).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5' });
   });
 });

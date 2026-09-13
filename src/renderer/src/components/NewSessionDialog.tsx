@@ -249,8 +249,8 @@ export function NewSessionDialog() {
               error={modelsError}
               selected={model}
               clearOption={{ label: harness === 'acp' ? 'Agent default (choose after start)' : 'Harness default' }}
+              // No onSelectCustom here: a new session starts on a listed model only; an unlisted id is switched in the header afterwards.
               onSelect={(m) => setModel(m ? { provider: m.provider, model: m.id } : undefined)}
-              onSelectCustom={(id) => setModel({ provider: model?.provider ?? models[0]?.provider ?? 'anthropic', model: id })}
             />
           </Field>
           <div className="row gap12">
