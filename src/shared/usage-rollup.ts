@@ -18,6 +18,7 @@ import type {
   UsageSlice,
   UsageSpeed
 } from './types';
+import { modelKeyLabel } from './model-names';
 
 export const COUNTER_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'costUsd', 'turns', 'durationMs', 'toolCalls', 'speedTokens', 'speedMs'] as const;
 
@@ -115,9 +116,9 @@ function groupedOwnerTools(owners: Record<string, Record<string, ToolUsage>>): {
 export function modelToolUsageRows(modelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): ModelToolRow[] {
   const rows: ModelToolRow[] = [];
   for (const { ownerKey, tools } of groupedOwnerTools(modelTools)) {
-    // The key is the model's qualified name; the map only overrides it when a caller counts
-    // something else by the same key (harness tool rows reuse this with harness ids).
-    const label = modelLabels.get(ownerKey) || ownerKey;
+    // The key is the model's qualified name, so it is also the label unless a caller counts
+    // something else by the same key (harness tool rows reuse this with their own identity map).
+    const label = modelLabels.get(ownerKey) || modelKeyLabel(ownerKey);
     for (const t of tools) rows.push({ key: ownerKey, label, name: t.name, ...t.usage });
   }
   return rows.sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
@@ -133,7 +134,7 @@ export function harnessModelToolUsageRows(harnessModelTools: Record<string, Reco
   const rows: HarnessModelToolRow[] = [];
   for (const { ownerKey, tools } of groupedOwnerTools(harnessModelTools)) {
     const [harness, key] = splitHarnessModelKey(ownerKey);
-    const label = modelLabels.get(key) || key;
+    const label = modelLabels.get(key) || modelKeyLabel(key);
     for (const t of tools) rows.push({ harness, key, label, name: t.name, ...t.usage });
   }
   return rows.sort((a, b) => b.calls - a.calls || a.harness.localeCompare(b.harness) || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
@@ -189,8 +190,11 @@ function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension): UsageBucket[
     const slices = d.usage.by?.[dim];
     if (!slices) continue;
     for (const [key, s] of Object.entries(slices)) {
-      const b = map.get(key) ?? { key, label: s.label, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }, toolCalls: 0, durationMs: 0, sessions: 0, speed: { tokens: 0, ms: 0 }, ids: new Set<string>() };
-      b.label = s.label || b.label;
+      // A model slice is named from the key it is filed under, so history recorded before the
+      // provider was tracked — or under the old bare label — still reads provider/model.
+      const label = dim === 'model' ? modelKeyLabel(key) : s.label;
+      const b = map.get(key) ?? { key, label, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }, toolCalls: 0, durationMs: 0, sessions: 0, speed: { tokens: 0, ms: 0 }, ids: new Set<string>() };
+      if (dim !== 'model') b.label = s.label || b.label;
       b.usage.inputTokens += s.inputTokens;
       b.usage.outputTokens += s.outputTokens;
       b.usage.cacheReadTokens += s.cacheReadTokens;
@@ -232,7 +236,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
       for (const id of s.sessions) ids.add(id);
     }
     for (const [name, t] of Object.entries(by.tool)) addToolUsage((tools[name] ??= emptyToolUsage()), t);
-    for (const [key, s] of Object.entries(by.model)) if (s.label) modelToolLabels.set(key, s.label);
+    for (const key of Object.keys(by.model)) modelToolLabels.set(key, modelKeyLabel(key));
     for (const [key, perTool] of Object.entries(by.modelTool)) {
       for (const [name, t] of Object.entries(perTool)) addToolUsage(((modelTools[key] ??= {})[name] ??= emptyToolUsage()), t);
     }
@@ -298,9 +302,10 @@ export function dimensionSeries(days: AnalyticsDayPoint[], dim: SliceDimension, 
   const totals = new Map<string, { label: string; total: number }>();
   for (const d of days) {
     for (const [key, s] of Object.entries(d.usage.by?.[dim] ?? {})) {
-      const t = totals.get(key) ?? { label: s.label, total: 0 };
+      const label = dim === 'model' ? modelKeyLabel(key) : s.label;
+      const t = totals.get(key) ?? { label, total: 0 };
       t.total += metric(s);
-      t.label = s.label || t.label;
+      if (dim !== 'model') t.label = s.label || t.label;
       totals.set(key, t);
     }
   }

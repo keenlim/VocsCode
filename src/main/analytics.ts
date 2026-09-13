@@ -22,7 +22,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { modelName } from '../shared/model-names';
+import { modelKeyLabel } from '../shared/model-names';
 import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
@@ -142,9 +142,12 @@ function attributionOf(meta: SessionMeta): Attribution {
 export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageCounters>): void {
   const by = (day.by ??= emptyDimensions());
   addSlice(by.harness, who.harness, who.harness, delta, who.id);
-  // The slice carries the same qualified name as its key: usage recorded before per-model provider
+  // The slice is named from the key it is filed under: usage recorded before per-model provider
   // tracking has none, so it keeps the bare id rather than showing a leading slash.
-  if (who.model) addSlice(by.model, `${who.provider ?? ''}/${who.model}`, who.provider ? modelName(who.provider, who.model) : who.model, delta, who.id);
+  if (who.model) {
+    const key = `${who.provider ?? ''}/${who.model}`;
+    addSlice(by.model, key, modelKeyLabel(key), delta, who.id);
+  }
   addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
 }
 
@@ -289,7 +292,11 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
   };
 
   const byHarness = rollup((s) => ({ key: s.harness, label: s.harness }));
-  const byModel = rollup((s) => (s.model ? { key: `${s.provider ?? ''}/${s.model}`, label: s.provider ? modelName(s.provider, s.model) : s.model } : null));
+  const byModel = rollup((s) => {
+    if (!s.model) return null;
+    const key = `${s.provider ?? ''}/${s.model}`;
+    return { key, label: modelKeyLabel(key) };
+  });
   const byProject = rollup((s) => ({ key: s.projectRoot, label: s.projectRoot }));
   // Effective rates per model: blended $/M tokens across input, output and cache, and $/call where
   // one call is one model turn. Rates stay undefined while the denominator was never measured.
@@ -578,7 +585,7 @@ export class AnalyticsStore {
       const moved = Math.min(c.costUsd, from.costUsd);
       if (moved <= 0) continue;
       from.costUsd -= moved;
-      const to = (by.model[key] ??= emptySlice(key));
+      const to = (by.model[key] ??= emptySlice(modelKeyLabel(key)));
       to.costUsd += moved;
       if (!to.sessions.includes(meta.id)) to.sessions.push(meta.id);
       c.costUsd -= moved;

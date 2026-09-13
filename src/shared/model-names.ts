@@ -17,6 +17,16 @@ export function modelRefName(ref: ModelRef | undefined): string | undefined {
 }
 
 /**
+ * The name a stored model slice displays, read from the key it is filed under. Slices are keyed
+ * `provider/model`, so history recorded before the provider was tracked (`/model`) keeps the bare
+ * id instead of gaining a leading slash, and a slice stored under an older, unqualified label
+ * still reads the same as every other surface.
+ */
+export function modelKeyLabel(key: string): string {
+  return key.startsWith('/') ? key.slice(1) : key;
+}
+
+/**
  * Reads a name typed into the picker back into a ref, so a name it displayed can be pasted back in.
  * The leading segment is the provider only when it names one the app knows: an aggregator's id is
  * itself slashed (`z-ai/glm-4.6`), and splitting that would invent a provider called `z-ai`.
