@@ -18,10 +18,11 @@ Working agreements for agents in this repo: how to verify, what to touch, what t
 - **PR titles feed releases.** PRs are squash-merged into `develop`, so the PR title becomes the commit that release-please parses on `master` to write the changelog and pick version bumps. Titles must follow Conventional Commits (`feat:`, `fix:`, `chore:`, `docs:`, `ci:`, `refactor:`, `test:`) with imperative sentence case after the prefix. The `develop` → `master` ship PR is the one exception — rebase-merge it so the individual conventional commits land on master's first-parent chain where the bot parses them (a merge commit hides them under its PR title). See [docs/RELEASING.md](docs/RELEASING.md).
 - **Report tight.** The final write-up — and the PR description — is a short structured report, same shape every time, bullets only, no process narration:
   - **Task** — one-line recap of the original task as it was asked, so the report stands alone.
+  - **Done** — the summary of what was actually delivered: what changed in outcome terms, decisions taken and why, anything done beyond the literal ask. Tight bullets; no process narration and no file-by-file recap (that is **Files**).
   - **Files** — files touched, grouped by what changed and why.
   - **Verification** — the exact commands run and their results (pass/fail); name anything that could not be run and why.
   - **PR** — merge status: merged into `develop` with the PR link, or left open for review with the reason it was not merged.
-  - **Notes** — anything spotted but deliberately not fixed, out of scope, or left for follow-up. Omit if empty.
+  - **Notes** — additional information for the reader to take note of: anything spotted but deliberately not fixed, out of scope, or left for follow-up. Not a recap of the work; omit if empty.
 - **Deliver a PR — and merge it.** After the local commit, push the agent branch and open a PR into `develop`. By default, merge the PR yourself once verification passes (`develop` is the integration branch; releases ship from `develop` → `master`, see [docs/RELEASING.md](docs/RELEASING.md)). Skip merging only when the user explicitly says to hold the PR for review, or when the change needs further consideration before it lands (touching permission gating or secrets handling, skipping a required verification run, an ambiguous requirement the user hasn't confirmed, or a destructive action). When you don't merge, say so in the report and why, and leave the PR open for review.
 
 ## Commands
