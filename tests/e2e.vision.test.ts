@@ -156,27 +156,27 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       const win = await app.firstWindow();
       await openAnalytics(win);
       await win.getByRole('tab', { name: 'Tools & files' }).click();
-      const table = win.getByRole('table', { name: 'Harness/tool reliability' });
+      const table = win.getByRole('table', { name: 'Error rate by harness' });
       const rows = () => table.getByRole('row').evaluateAll((els) => els.slice(1).map((row) => Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent)));
-      const expected = (claude: string[]) => [claude, ['Pi', 'read', '2', '0', '1', '0%'], ['Pi', 'bash', '1', '0', '1', '—']];
+      const expected = (claude: string[]) => [claude, ['Pi', '(0/1) 0%', '(0/1) 0%', '—']];
       await table.waitFor();
-      expect(await table.getByRole('columnheader').allTextContents()).toEqual(['Harness', 'Tool', 'Calls', 'Errors', 'Declined', 'Error rate']);
-      expect(await rows()).toEqual(expected(['Claude', 'read', '4', '1', '1', '33%']));
+      expect(await table.getByRole('columnheader').allTextContents()).toEqual(['Harness', 'Total', 'read', 'bash']);
+      expect(await rows()).toEqual(expected(['Claude', '(1/3) 33%', '(1/3) 33%', '—']));
       expect(await win.getByText(/Recorded since update/).innerText()).toContain('same model and workload');
       expect(await win.getByText(/Error rate = errors/).innerText()).toContain('executed calls (calls − declined)');
       expect(await win.getByText(`last 30 days · ${dateOf(29)} – ${dateOf(0)}`).count()).toBe(1);
 
       await win.getByRole('radio', { name: '7 days', exact: true }).click();
       await win.getByText(`last 7 days · ${dateOf(6)} – ${dateOf(0)}`).waitFor();
-      await expect.poll(rows).toEqual(expected(['Claude', 'read', '3', '1', '1', '50%']));
+      await expect.poll(rows).toEqual(expected(['Claude', '(1/2) 50%', '(1/2) 50%', '—']));
       expect(await win.getByRole('radio', { name: '7 days', exact: true }).getAttribute('aria-checked')).toBe('true');
 
       await win.getByRole('radio', { name: 'All time' }).click();
       await win.getByText(`all time · ${dateOf(40)} – ${dateOf(0)}`).waitFor();
-      await expect.poll(rows).toEqual(expected(['Claude', 'read', '6', '2', '1', '40%']));
+      await expect.poll(rows).toEqual(expected(['Claude', '(2/5) 40%', '(2/5) 40%', '—']));
       await win.getByRole('radio', { name: '30 days', exact: true }).click();
       await win.getByText(`last 30 days · ${dateOf(29)} – ${dateOf(0)}`).waitFor();
-      await expect.poll(rows).toEqual(expected(['Claude', 'read', '4', '1', '1', '33%']));
+      await expect.poll(rows).toEqual(expected(['Claude', '(1/3) 33%', '(1/3) 33%', '—']));
       // A real process restart with the same userData must preserve exact counters.
       await app.close();
       app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });
@@ -184,10 +184,10 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       await openAnalytics(restarted);
       await restarted.getByRole('tab', { name: 'Tools & files' }).click();
       await restarted.getByRole('radio', { name: 'All time' }).click();
-      const restored = restarted.getByRole('table', { name: 'Harness/tool reliability' });
+      const restored = restarted.getByRole('table', { name: 'Error rate by harness' });
       await restored.waitFor();
       await expect.poll(() => restored.getByRole('row').evaluateAll((els) => els.slice(1).map((row) => Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent))))
-        .toEqual(expected(['Claude', 'read', '6', '2', '1', '40%']));
+        .toEqual(expected(['Claude', '(2/5) 40%', '(2/5) 40%', '—']));
     } finally {
       await app?.close();
       app = null;

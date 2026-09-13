@@ -4,9 +4,9 @@ Tool labels retain each harness's spelling (`Read`, `read`, `read_file`). Casing
 
 ## Harness/tool analytics
 
-Analytics → Tools & files includes **Harness/tool reliability**, alongside the existing model breakdown. The table reports calls, errors and declined operations for each harness/tool pair. Its error rate is `errors / (calls - declined)`; with no executed calls it shows `—`.
+Analytics → Tools & files includes **Error rate by harness**, alongside the model breakdowns. The table is a matrix: one row per harness, one column per tool, plus a leading Total column that sums the harness. Its error rate is `errors / (calls - declined)`; with no executed calls it shows `—`.
 
-Only tool-name casing is combined. `Read` and `read` combine within a harness; `read_file` remains a distinct name. Compare the same model and workload across harnesses. The older model table still labels its own denominator as errors/calls.
+Only tool-name casing is combined. `Read` and `read` combine within a harness; `read_file` remains a distinct name. Compare the same model and workload across harnesses. The sibling model and harness+model matrices label their own denominator as errors/calls.
 
 Harness/tool attribution starts with newly recorded calls after this update. Historical aggregates are not guessed or replayed to populate the new dimension. Unknown sessions remain unattributed. All-time and selected-date views use their corresponding recorded counters. Recent duplicate terminal events are suppressed across restart using the latest 10,000 call identities persisted with the counters; older identities are retained only in process memory.
 
