@@ -13,7 +13,14 @@ export function titleFromPrompt(text: string): string {
   return words.slice(0, 6).join(' ').slice(0, 60) || line.slice(0, 60);
 }
 
-/** Strips quoting/preamble from a raw model reply and clamps it to the same 6-word cap. */
+/** Chat-template control tokens (`<|im_start|>`, DeepSeek's `<｜DSML｜tool_calls>` with U+FF5C bars)
+ *  leak into a reply as content when a provider fails to parse them out. They are never a title. */
+const CONTROL_TOKEN_RE = /<\||\uFF5C/;
+
+/**
+ * Strips quoting/preamble from a raw model reply and clamps it to the same 6-word cap. Rejects an
+ * empty reply and leaked control-token markup, so a glitched reply leaves the placeholder in place.
+ */
 export function sanitizeLlmTitle(raw: string): string | null {
   const line = raw
     .trim()
@@ -21,7 +28,7 @@ export function sanitizeLlmTitle(raw: string): string | null {
     .replace(/^(session|chat)?\s*(title|name)\s*:\s*/i, '')
     .replace(/^[\s"'`#*]+|[\s"'`*.,!]+$/g, '')
     .trim();
-  if (!line) return null;
+  if (!line || CONTROL_TOKEN_RE.test(line)) return null;
   return titleFromPrompt(line) || null;
 }
 
@@ -78,7 +85,7 @@ export async function generateSessionTitle(
         { signal: AbortSignal.timeout(TITLE_TIMEOUT_MS) }
       );
       const title = sanitizeLlmTitle(msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join(' '));
-      log?.('debug', `session title: ${title ? `got "${title}"` : 'empty reply'}`);
+      log?.('debug', `session title: ${title ? `got "${title}"` : 'no usable reply'}`);
       return title;
     }
     const client = new OpenAI({ apiKey: apiKey || 'not-needed', baseURL: provider.baseUrl, maxRetries: 1, defaultHeaders: provider.headers });
@@ -90,7 +97,7 @@ export async function generateSessionTitle(
     const res = await client.chat.completions.create(body, { signal: AbortSignal.timeout(TITLE_TIMEOUT_MS) });
     const choice = res.choices[0];
     const title = sanitizeLlmTitle(choice?.message?.content ?? '');
-    log?.('debug', `session title: ${title ? `got "${title}"` : `empty reply (finish_reason ${choice?.finish_reason ?? 'unknown'})`}`);
+    log?.('debug', `session title: ${title ? `got "${title}"` : `no usable reply (finish_reason ${choice?.finish_reason ?? 'unknown'})`}`);
     return title;
   } catch (e) {
     log?.('warn', `session title failed, keeping placeholder: ${errorMessage(e)}`);
