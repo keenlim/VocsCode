@@ -112,7 +112,7 @@ export function GitSetup({
     setIdentEmail((v) => v || status.identity.email || '');
   }, [status]);
 
-  const root = status?.root ?? session.cwd;
+  const root = status?.mainRoot ?? status?.root ?? session.cwd;
   const dismissed = skipped.includes(root);
 
   /** Runs one step, reports the outcome, and re-reads the state so the guide advances. */
@@ -208,9 +208,10 @@ export function GitSetup({
     );
   }
 
-  // The banner is only the "repository exists but is not on GitHub yet" continuation, and it
-  // stays until the branch actually exists on origin (not merely once a remote is configured).
-  if (variant === 'banner' && (!status.isRepo || status.pushed || dismissed)) return null;
+  // The banner is only the "just created this repository, it isn't on GitHub yet" continuation.
+  // A repo with any remote-tracking branch has been published, so an established repository (or a
+  // new worktree branch on one) never sees the setup nag, even if this branch has no upstream.
+  if (variant === 'banner' && (!status.isRepo || status.published || dismissed)) return null;
 
   const isRepo = status.isRepo;
   const hasCommits = status.hasCommits;

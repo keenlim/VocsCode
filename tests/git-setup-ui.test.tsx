@@ -41,7 +41,7 @@ const session: SessionMeta = {
 const noGh: GitSetupStatus['gh'] = { installed: false, authenticated: false };
 const ghReady: GitSetupStatus['gh'] = { installed: true, authenticated: true, account: 'octocat' };
 
-const status = (patch: Partial<GitSetupStatus>): GitSetupStatus => ({ isRepo: false, hasCommits: false, pushed: false, identity: {}, gh: noGh, ...patch });
+const status = (patch: Partial<GitSetupStatus>): GitSetupStatus => ({ isRepo: false, hasCommits: false, pushed: false, published: false, identity: {}, gh: noGh, ...patch });
 
 /** A fresh-per-test stateful backend: the guide must advance only because an action changed it. */
 let setup: GitSetupStatus;
@@ -79,10 +79,10 @@ beforeEach(() => {
         setup = { ...setup, remote: req.url };
         return Promise.resolve({ ok: true });
       case 'git:push':
-        setup = { ...setup, pushed: true };
+        setup = { ...setup, pushed: true, published: true };
         return Promise.resolve({ ok: true, output: '' });
       case 'git:createGitHubRepo':
-        setup = { ...setup, remote: 'https://github.com/octocat/a.git', pushed: true };
+        setup = { ...setup, remote: 'https://github.com/octocat/a.git', pushed: true, published: true };
         return Promise.resolve({ ok: true, url: 'https://github.com/octocat/a', output: '' });
       case 'settings:update':
         return Promise.resolve({});
@@ -207,8 +207,9 @@ describe('guided git setup', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('settings:update', { gitSetupSkipped: ['G:/proj/a'] }));
   });
 
-  it('stays hidden once the branch is on origin', async () => {
-    setup = status({ isRepo: true, root: 'G:/proj/a', branch: 'main', hasCommits: true, remote: 'https://github.com/me/a.git', pushed: true });
+  it('stays hidden once the repository has been published', async () => {
+    // The user's case: an established repo where the session's own branch has no upstream yet.
+    setup = status({ isRepo: true, root: 'G:/proj/a', branch: 'main', hasCommits: true, remote: 'https://github.com/me/a.git', pushed: false, published: true });
     render(<RightPanel session={session} />);
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('git:setupStatus', { sessionId: 's1' }));
     expect(screen.queryByText('Publish this repository to GitHub')).toBeNull();
