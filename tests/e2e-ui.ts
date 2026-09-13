@@ -10,8 +10,8 @@ import type { Page } from 'playwright-core';
  * session starts without the native folder picker, which a test cannot drive) and the onboarding
  * wizard, which otherwise covers the whole window on first run, is done.
  */
-export function seedSettings(project: string): string {
-  return JSON.stringify({ folders: [project], recentProjects: [project], onboardingDone: true });
+export function seedSettings(project: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ folders: [project], recentProjects: [project], onboardingDone: true, ...extra });
 }
 
 /**

@@ -2,9 +2,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
+import { isCodexBuiltinProvider, isOpenAiWireProvider } from '../../shared/providers';
 import { deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { estimateCostUsd, findPricing, CODEX_STATIC_MODELS } from '../models/static-models';
+import { codexProviderModels } from '../models/codex-catalog';
 import { toCodex } from '../mcp/effective';
 import { JsonRpcStdioClient } from './jsonrpc';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY } from './permissions';
@@ -114,6 +116,23 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     return this._busy;
   }
 
+  /**
+   * The OpenAI-compatible provider this thread is pinned to. An explicit session override wins;
+   * otherwise a model selected from one of the app's configured providers supplies one. Codex's
+   * own `openai` provider needs no `model_providers` entry. Codex 0.153 only accepts the Responses
+   * wire API, so every custom provider is registered as `responses`.
+   */
+  private resolveCodexProvider(): { id: string; name: string; baseUrl: string; envKey?: string; wireApi: 'chat' | 'responses' } | undefined {
+    const meta = this.ctx.session();
+    const explicit = meta.config.codexModelProvider;
+    if (explicit) return { ...explicit, wireApi: explicit.wireApi ?? 'responses' };
+    const id = (meta.config.model ?? meta.activeModel)?.provider;
+    if (isCodexBuiltinProvider(id)) return undefined;
+    const provider = this.ctx.settings().providers.find((p) => p.id === id && p.enabled && p.baseUrl && isOpenAiWireProvider(p));
+    if (!provider?.baseUrl) return undefined;
+    return { id: provider.id, name: provider.name, baseUrl: provider.baseUrl, envKey: provider.envKey, wireApi: 'responses' };
+  }
+
   async start(): Promise<void> {
     const meta = this.ctx.session();
     const bin = this.ctx.runtime.resolve('codex');
@@ -121,9 +140,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     const env: NodeJS.ProcessEnv = { ...process.env };
     const key = await this.ctx.getApiKey('openai');
     if (key && !env.OPENAI_API_KEY && !env.CODEX_API_KEY) env.OPENAI_API_KEY = key;
-    if (meta.config.codexModelProvider?.envKey) {
-      const custom = await this.ctx.getApiKey(meta.config.codexModelProvider.id);
-      if (custom) env[meta.config.codexModelProvider.envKey] = custom;
+    const provider = this.resolveCodexProvider();
+    if (provider?.envKey) {
+      const custom = await this.ctx.getApiKey(provider.id);
+      if (custom) env[provider.envKey] = custom;
     }
     this.ctx.log('info', `spawning codex app-server: ${bin.path} (${bin.source} runtime) in ${meta.cwd}`);
     const child = spawnTool(bin.path, ['app-server'], { cwd: meta.cwd, env });
@@ -148,7 +168,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       );
 
       this.model = meta.config.model?.model || meta.activeModel?.model;
-      this.modelProvider = meta.config.codexModelProvider?.id;
+      this.modelProvider = provider?.id;
       this.effort = this.ctx.effort();
       const mode = this.ctx.permissionMode();
       const common: Record<string, unknown> = {
@@ -159,10 +179,9 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         sandbox: sandboxModeFor(mode)
       };
       const config: Record<string, unknown> = {};
-      if (meta.config.codexModelProvider) {
-        const p = meta.config.codexModelProvider;
+      if (provider) {
         config.model_providers = {
-          [p.id]: { name: p.name, base_url: p.baseUrl, env_key: p.envKey, wire_api: p.wireApi ?? 'chat' }
+          [provider.id]: { name: provider.name, base_url: provider.baseUrl, env_key: provider.envKey, wire_api: provider.wireApi }
         };
       }
       // The app-server takes `config` over JSON-RPC, not argv, so resolved values may be inlined.
@@ -653,10 +672,16 @@ export class CodexAppServerAdapter implements HarnessAdapter {
   }
 
   async listModels(): Promise<ModelInfo[]> {
+    // The thread is pinned to its provider, so only that provider's models are switchable.
+    const provider = this.resolveCodexProvider();
+    if (provider) {
+      this.models = codexProviderModels(this.ctx.settings(), provider.id);
+      return this.models;
+    }
     if (!this.rpc) return CODEX_STATIC_MODELS;
     try {
       const res = await withTimeout(this.rpc.request<{ data: CodexModel[] }>('model/list', { limit: 100, includeHidden: false }), 20_000, 'model/list');
-      this.models = res.data.map((m) => codexModelToInfo(m, this.modelProvider ?? 'openai'));
+      this.models = res.data.map((m) => codexModelToInfo(m));
       return this.models.length ? this.models : CODEX_STATIC_MODELS;
     } catch (e) {
       this.ctx.log('warn', `model/list failed: ${errorMessage(e)}`);

@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta } from '../src/shared/types';
+import { openNewSession, pickModel, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -96,5 +97,49 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
     await win.waitForSelector('.pill[title="Model"]:has-text("acme-custom-1")', { timeout: 10_000 });
+  }, 180_000);
+
+  it('offers a configured provider model for the Codex harness', async () => {
+    // A codex session cannot reach OpenRouter on its own; the dialog catalog has to merge the
+    // provider the user configured in Settings, and the adapter registers it on start (covered
+    // offline in codex-provider.test.ts). Here the user-visible outcome is the picker entry.
+    await app?.close().catch(() => undefined);
+    app = null;
+    const tmp = path.join(os.tmpdir(), `vocs-code-codex-models-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), '# codex models e2e\n');
+    await fs.writeFile(
+      path.join(userData, 'settings.json'),
+      seedSettings(project, {
+        providers: [{ id: 'openrouter', enabled: true, models: [{ id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6', supportsImages: false }] }]
+      }),
+      'utf8'
+    );
+    await fs.mkdir(shots, { recursive: true });
+
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v === undefined) continue;
+      if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
+      if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
+      env[k] = v;
+    }
+    env.VOCS_CODE_USER_DATA = userData;
+
+    const args = [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`];
+    app = await electron.launch({ executablePath: require('electron') as string, args, env, timeout: 60_000 });
+    const win: Page = await app.firstWindow();
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+
+    await openNewSession(win);
+    await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Codex \(app-server\)$/ }) }).click();
+    await pickModel(win, 'openrouter/z-ai/glm-4.6');
+
+    const picker = win.locator('.ns-col-model .model-picker');
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 10_000 }).toBe(1);
+    await win.screenshot({ path: path.join(shots, 'models-02-codex-openrouter.png') });
   }, 180_000);
 });
