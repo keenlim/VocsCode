@@ -195,3 +195,39 @@ describe('Pi adapter turn-state tracking', () => {
     expect(infos.at(-1)?.text).toBe('Compaction failed: quota exceeded');
   });
 });
+
+describe('Pi adapter subagent reporting', () => {
+  it('records a background completion once, as an analytics event and a transcript note', () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    const details = { id: 'a1', description: 'Find things', status: 'completed', toolUses: 37, totalTokens: 51127, totalCost: 0.1558, durationMs: 1000 };
+    feed(a, { type: 'message_end', message: { role: 'custom', customType: 'subagent-notification', details } });
+    const sub = events.find((e): e is Extract<SessionEvent, { type: 'subagent' }> => e.type === 'subagent');
+    expect(sub?.completion).toMatchObject({ agentId: 'a1', status: 'completed', toolUses: 37, costUsd: 0.1558, tokens: 51127 });
+    expect(events.some((e) => e.type === 'item.upsert' && e.item.kind === 'info' && /Find things/.test(e.item.text))).toBe(true);
+    // The same run reported again (e.g. by get_subagent_result) must not be counted twice.
+    feed(a, { type: 'message_end', message: { role: 'custom', customType: 'subagent-notification', details } });
+    expect(events.filter((e) => e.type === 'subagent')).toHaveLength(1);
+  });
+
+  it('records a group notification for every run it carries', () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    feed(a, {
+      type: 'message_end',
+      message: { role: 'custom', customType: 'subagent-notification', details: { id: 'g1', status: 'completed', toolUses: 1, others: [{ id: 'g2', status: 'error', toolUses: 2 }] } }
+    });
+    expect(events.filter((e) => e.type === 'subagent').map((e) => (e as Extract<SessionEvent, { type: 'subagent' }>).completion.agentId)).toEqual(['g1', 'g2']);
+  });
+
+  it('records a foreground Agent result and ignores a background spawn placeholder', () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    feed(a, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'Agent', args: {} });
+    feed(a, { type: 'tool_execution_end', toolCallId: 't1', toolName: 'Agent', isError: false, result: { content: [{ type: 'text', text: 'spawned' }], details: { agentId: 'bg', status: 'background', toolUses: 0 } } });
+    expect(events.some((e) => e.type === 'subagent')).toBe(false);
+    feed(a, { type: 'tool_execution_start', toolCallId: 't2', toolName: 'Agent', args: {} });
+    feed(a, { type: 'tool_execution_end', toolCallId: 't2', toolName: 'Agent', isError: false, result: { content: [{ type: 'text', text: 'done' }], details: { agentId: 'fg', modelName: 'claude haiku 4.5', status: 'completed', toolUses: 5, cost: 0.02 } } });
+    expect(events.find((e): e is Extract<SessionEvent, { type: 'subagent' }> => e.type === 'subagent')?.completion).toMatchObject({ agentId: 'fg', toolUses: 5, costUsd: 0.02 });
+  });
+});

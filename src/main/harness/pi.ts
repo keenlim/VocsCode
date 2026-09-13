@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool } from './spawn';
@@ -16,6 +16,29 @@ const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const PI_READY_MARKER = 'VCODE_PI_READY::';
 const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
 const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
+
+/** pi-subagents' completion payload, as it reaches us on the tool result or the custom notification. */
+interface PiSubagentDetails {
+  id?: string;
+  agentId?: string;
+  description?: string;
+  status?: string;
+  modelName?: string;
+  toolUses?: number;
+  /** Foreground tool-result name for the cost. */
+  cost?: number;
+  /** Background notification name for the cost. */
+  totalCost?: number;
+  totalTokens?: number;
+  durationMs?: number;
+  error?: string;
+  others?: PiSubagentDetails[];
+}
+
+/** A pi-subagents run is only counted once its own status is terminal. */
+function isTerminalSubagentStatus(status: string | undefined): status is string {
+  return status === 'completed' || status === 'error' || status === 'stopped' || status === 'aborted';
+}
 const PI_TOOL_PROMPT = 'Pi tools: prefer path (file_path is accepted). edit uses edits[]; a single old_string/new_string pair is accepted, including empty new_string. replace_all:true is unsupported: use unique non-overlapping edits. bash timeout is seconds; timeout_ms explicitly means milliseconds. Never send both timeout fields or guess their units.';
 
 function toolPath(input: Record<string, unknown> | undefined): string | undefined {
@@ -98,6 +121,12 @@ export class PiAdapter implements HarnessAdapter {
   private lastErrorMessage: string | null = null;
   private models: ModelInfo[] = [];
   private nextId = 1;
+  /** agentId -> the model name its Agent call reported, for attributing the completion notification. */
+  private readonly subagentModelNames = new Map<string, string>();
+  /** agentIds already counted, so a background run's tool result and notification are not both recorded. */
+  private readonly recordedSubagents = new Set<string>();
+  /** Subagent spend since the last usage report, keyed `provider/model`, for model re-attribution. */
+  private readonly pendingSubagentCost = new Map<string, SubagentCost>();
   private exited = false;
   private modeFile: string | null = null;
   private extensionNonce = '';
@@ -118,6 +147,9 @@ export class PiAdapter implements HarnessAdapter {
     this.extensionCapabilities.clear();
     this.extensionFailure = null;
     this.exited = false;
+    this.subagentModelNames.clear();
+    this.recordedSubagents.clear();
+    this.pendingSubagentCost.clear();
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const intendedEffort = this.ctx.effort();
@@ -129,7 +161,8 @@ export class PiAdapter implements HarnessAdapter {
     await fs.mkdir(sessionDir, { recursive: true });
 
     // Subagents inherit the session model: override pi-subagents' pinned Explore agent globally
-    // and per project, without clobbering a file the user or the project already provides.
+    // and per project, without clobbering a file the user or the project already provides. The
+    // same pass turns on usage reporting so their spend reaches the session totals and analytics.
     await installPiAgentOverrides({
       cwd: meta.cwd,
       log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
@@ -281,7 +314,13 @@ export class PiAdapter implements HarnessAdapter {
         return;
       }
       case 'message_end': {
-        const msg = ev.message as { role?: string; content?: { type: string; text?: string; thinking?: string }[]; model?: string; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        const msg = ev.message as { role?: string; customType?: string; details?: unknown; content?: { type: string; text?: string; thinking?: string }[]; model?: string; stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: { total?: number } } };
+        if (msg?.role === 'custom') {
+          // pi-subagents reports each finished background run as a custom message; without this the
+          // run's spend and tool uses were dropped on the floor.
+          if (msg.customType === 'subagent-notification') this.handleSubagentNotification(msg.details);
+          return;
+        }
         if (msg?.role === 'assistant') {
           this.lastStopReason = msg.stopReason ?? null;
           this.lastErrorMessage = msg.errorMessage ?? null;
@@ -334,6 +373,7 @@ export class PiAdapter implements HarnessAdapter {
           item.changes = [{ path: toolPath(item.input as Record<string, unknown>) ?? '', kind: 'update' }];
         }
         if (typeof details?.exitCode === 'number') item.exitCode = details.exitCode;
+        if (e.toolName === 'Agent' || e.toolName === 'get_subagent_result') this.captureSubagentResult(details);
         this.ctx.emit({ type: 'item.upsert', item: { ...item } });
         return;
       }
@@ -396,6 +436,77 @@ export class PiAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
       this.currentAssistant = null;
     }
+  }
+
+  /** Captures the model and terminal stats pi-subagents puts on an Agent / get_subagent_result tool result. */
+  private captureSubagentResult(details: unknown): void {
+    const d = details as PiSubagentDetails | undefined;
+    if (!d || typeof d !== 'object') return;
+    const agentId = d.agentId ?? d.id;
+    if (!agentId) return;
+    if (d.modelName) this.subagentModelNames.set(agentId, d.modelName);
+    // Foreground runs return their full stats here; a background spawn's result is zeros.
+    if (isTerminalSubagentStatus(d.status)) this.recordSubagent(d, agentId);
+  }
+
+  /** Handles a background completion, including a group notification's `others`. */
+  private handleSubagentNotification(details: unknown): void {
+    const d = details as PiSubagentDetails | undefined;
+    if (!d || typeof d !== 'object') return;
+    for (const rec of [d, ...(Array.isArray(d.others) ? d.others : [])]) {
+      const agentId = rec.id ?? rec.agentId;
+      if (agentId && isTerminalSubagentStatus(rec.status)) this.recordSubagent(rec, agentId);
+    }
+  }
+
+  /** Records one finished run once: tool uses go to analytics, spend to the model that actually ran it. */
+  private recordSubagent(d: PiSubagentDetails, agentId: string): void {
+    if (this.recordedSubagents.has(agentId)) return;
+    this.recordedSubagents.add(agentId);
+    const costUsd = typeof d.cost === 'number' ? d.cost : typeof d.totalCost === 'number' ? d.totalCost : undefined;
+    const model = this.resolveSubagentModel(this.subagentModelNames.get(agentId));
+    if (costUsd && costUsd > 0) {
+      const ref = model ?? this.ctx.session().activeModel;
+      if (ref?.provider && ref.model) {
+        const key = `${ref.provider}/${ref.model}`;
+        const cur = this.pendingSubagentCost.get(key) ?? { provider: ref.provider, model: ref.model, costUsd: 0 };
+        cur.costUsd += costUsd;
+        this.pendingSubagentCost.set(key, cur);
+      }
+    }
+    const completion: SubagentCompletion = {
+      agentId,
+      description: d.description,
+      status: d.status ?? 'completed',
+      model: model ?? undefined,
+      toolUses: typeof d.toolUses === 'number' ? d.toolUses : 0,
+      costUsd,
+      tokens: typeof d.totalTokens === 'number' ? d.totalTokens : undefined,
+      durationMs: d.durationMs,
+      error: d.error
+    };
+    this.ctx.emit({ type: 'subagent', completion });
+    const bits: string[] = [completion.status === 'error' ? 'failed' : 'finished'];
+    if (model) bits.push(`${model.provider}/${model.model}`);
+    if (completion.toolUses) bits.push(`${completion.toolUses} tool ${completion.toolUses === 1 ? 'use' : 'uses'}`);
+    if (completion.tokens) bits.push(`${completion.tokens.toLocaleString()} tokens`);
+    if (costUsd) bits.push(`$${costUsd.toFixed(4)}`);
+    this.info(`Subagent${d.description ? ` "${d.description}"` : ''}: ${bits.join(' · ')}`, completion.status === 'error' ? 'error' : 'info');
+  }
+
+  /** Best-effort match of a pi-subagents display name to a known model, for spend attribution. */
+  private resolveSubagentModel(name?: string): ModelRef | null {
+    if (!name || !this.models.length) return null;
+    const norm = (s: string) => s.toLowerCase().replace(/^claude\s+/, '').replace(/[^a-z0-9]/g, '');
+    const target = norm(name);
+    if (!target) return null;
+    for (const m of this.models) {
+      if (norm(m.displayName) === target || norm(m.id) === target) return { provider: m.provider, model: m.id };
+    }
+    for (const m of this.models) {
+      if (norm(m.displayName).includes(target) || target.includes(norm(m.id))) return { provider: m.provider, model: m.id };
+    }
+    return null;
   }
 
   private async handleUiRequest(req: { id: string; method: string; title?: string; message?: string; options?: string[]; notifyType?: string }): Promise<void> {
@@ -562,7 +673,10 @@ export class PiAdapter implements HarnessAdapter {
       const completed = this.usage.finishTurn();
       turnCost = completed.usage?.costUsd ?? 0;
       turnUsage = completed.usage ? { inputTokens: completed.usage.inputTokens, outputTokens: completed.usage.outputTokens } : undefined;
-      this.ctx.emit({ type: 'usage', totals: completed.totals });
+      // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
+      const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
+      this.pendingSubagentCost.clear();
+      this.ctx.emit({ type: 'usage', totals: completed.totals, ...(subagentCostByModel ? { subagentCostByModel } : {}) });
     } catch (e) {
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
     }

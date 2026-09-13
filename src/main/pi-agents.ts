@@ -88,8 +88,7 @@ export interface AgentOverrideInstall {
   skipped: 'exists' | null;
 }
 
-/** Write an agent file unless one already exists. Never overwrites a user's file. */
-export async function installAgentOverride(destDir: string, filename: string, content: string): Promise<AgentOverrideInstall> {
+/** Write an agent file unless one already exists. Never overwrites a user's file. */export async function installAgentOverride(destDir: string, filename: string, content: string): Promise<AgentOverrideInstall> {
   const file = path.join(destDir, filename);
   try {
     await fs.access(file);
@@ -107,6 +106,39 @@ export interface InstallOverridesOptions {
   env?: NodeJS.ProcessEnv;
   home?: string;
   log?: (level: 'info' | 'warn', message: string) => void;
+}
+
+/**
+ * Merge `reportUsage: true` into pi-subagents' global settings so each run's spend is folded into
+ * `getSessionStats()` instead of living only in its own session. An explicit boolean the user
+ * already set is respected; a malformed file is left alone rather than clobbered. Returns true when
+ * the file was written. The project `subagents.json` is deliberately not touched — it is often
+ * tracked, and rewriting it would show up as a repo change.
+ */
+export async function installPiSubagentsReportUsage(agentDir: string): Promise<boolean> {
+  const file = path.join(agentDir, 'subagents.json');
+  let raw: string | null = null;
+  try {
+    raw = await fs.readFile(file, 'utf8');
+  } catch {
+    raw = null;
+  }
+  let settings: Record<string, unknown> = {};
+  if (raw !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false; // pi-subagents warns about this itself; do not destroy the content
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    settings = parsed as Record<string, unknown>;
+    if (typeof settings.reportUsage === 'boolean') return false; // the user chose
+  }
+  settings.reportUsage = true;
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
+  return true;
 }
 
 /**
@@ -130,6 +162,11 @@ export async function installPiAgentOverrides(opts: InstallOverridesOptions): Pr
     } catch (e) {
       log('warn', `could not install pi subagent override in ${target.dir}: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+  try {
+    if (await installPiSubagentsReportUsage(piAgentDir(env, opts.home))) log('info', 'enabled pi subagent usage reporting');
+  } catch (e) {
+    log('warn', `could not enable pi subagent usage reporting: ${e instanceof Error ? e.message : String(e)}`);
   }
   return result;
 }

@@ -1038,7 +1038,7 @@ export class SessionManager {
       case 'usage':
         if (meta) {
           meta.usage = event.totals;
-          this.deps.analytics.recordUsage(meta, event.totals);
+          this.deps.analytics.recordUsage(meta, event.totals, undefined, event.subagentCostByModel);
           const threshold = this.settings().autoCompactionThreshold;
           if (active) {
             if (active.autoCompactionThreshold !== threshold) {
@@ -1055,6 +1055,9 @@ export class SessionManager {
           this.pushSessions();
           if (meta.status === 'idle') this.scheduleAutoCompaction(meta.id);
         }
+        break;
+      case 'subagent':
+        if (meta) this.deps.analytics.recordSubagent(meta, event.completion);
         break;
       case 'meta':
         if (meta) {
