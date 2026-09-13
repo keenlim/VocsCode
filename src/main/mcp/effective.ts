@@ -20,6 +20,8 @@ export interface EffectiveInput {
   state: McpProjectState;
   harness: HarnessId;
   support: McpSupport;
+  /** App-shipped servers; a same-id global/repo entry is shadowed by them. */
+  builtin?: McpServerDef[];
 }
 
 /**
@@ -32,9 +34,11 @@ export function effectiveEntries(input: EffectiveInput): McpEffectiveEntry[] {
   const disabledGlobal = new Set(state.disabledGlobal ?? []);
   const enabledRepo = new Set(state.enabledRepo ?? []);
   const liveRepoIds = new Set(repo.filter((d) => enabledRepo.has(d.id)).map((d) => d.id));
+  const builtinIds = new Set((input.builtin ?? []).map((d) => d.id));
 
   const verdict = (def: McpServerDef, scope: 'global' | 'repo'): McpEffectiveEntry => {
     const off = (reason: McpEffectiveEntry['reason']): McpEffectiveEntry => ({ def, scope, enabled: false, reason });
+    if (builtinIds.has(def.id)) return off('shadowed');
     if (scope === 'global') {
       if (def.disabled) return off('disabled');
       if (disabledGlobal.has(def.id)) return off('disabled');
@@ -48,6 +52,19 @@ export function effectiveEntries(input: EffectiveInput): McpEffectiveEntry[] {
   };
 
   return [...repo.map((d) => verdict(d, 'repo')), ...global.map((d) => verdict(d, 'global'))];
+}
+
+/** The built-in servers' verdicts for a session, ahead of the user-defined ones. */
+export function builtinEntries(input: { builtin: McpServerDef[]; state: McpProjectState; harness: HarnessId; support: McpSupport }): McpEffectiveEntry[] {
+  const injectable = input.support === 'inject' || input.support === 'client';
+  const disabled = new Set(input.state.disabledBuiltin ?? []);
+  return input.builtin.map((def) => {
+    const off = (reason: McpEffectiveEntry['reason']): McpEffectiveEntry => ({ def, scope: 'builtin', enabled: false, reason });
+    if (disabled.has(def.id)) return off('disabled');
+    if (def.harnesses?.length && !def.harnesses.includes(input.harness)) return off('harness-filtered');
+    if (!injectable) return off('not-injected');
+    return { def, scope: 'builtin', enabled: true };
+  });
 }
 
 /** Just the servers a session should actually get, repo first. */
