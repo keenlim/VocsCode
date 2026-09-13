@@ -230,4 +230,28 @@ describe('Pi adapter subagent reporting', () => {
     feed(a, { type: 'tool_execution_end', toolCallId: 't2', toolName: 'Agent', isError: false, result: { content: [{ type: 'text', text: 'done' }], details: { agentId: 'fg', modelName: 'claude haiku 4.5', status: 'completed', toolUses: 5, cost: 0.02 } } });
     expect(events.find((e): e is Extract<SessionEvent, { type: 'subagent' }> => e.type === 'subagent')?.completion).toMatchObject({ agentId: 'fg', toolUses: 5, costUsd: 0.02 });
   });
+
+  it('attributes a subagent that reports a qualified name to that provider, not to the first model with the same id', () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    // One slug offered by two providers — an aggregator and the vendor itself. The wrong one is
+    // listed first, so a fuzzy pass alone would attribute the run (and its spend) to the wrong
+    // provider; only an exact match on the qualified name routes it correctly.
+    (a as unknown as { models: unknown[] }).models = [
+      { id: 'claude-opus-5', provider: 'openrouter', displayName: 'Claude Opus 5' },
+      { id: 'claude-opus-5', provider: 'anthropic', displayName: 'Claude Opus 5' }
+    ];
+    feed(a, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'Agent', args: {} });
+    feed(a, {
+      type: 'tool_execution_end',
+      toolCallId: 't1',
+      toolName: 'Agent',
+      isError: false,
+      result: { content: [{ type: 'text', text: 'done' }], details: { agentId: 'fg', modelName: 'anthropic/claude-opus-5', status: 'completed', toolUses: 3, cost: 0.02 } }
+    });
+    const sub = events.find((e): e is Extract<SessionEvent, { type: 'subagent' }> => e.type === 'subagent');
+    expect(sub?.completion.model).toEqual({ provider: 'anthropic', model: 'claude-opus-5' });
+    // The same route the user reads on the subagent's info line.
+    expect(events.some((e) => e.type === 'item.upsert' && e.item.kind === 'info' && e.item.text.includes('anthropic/claude-opus-5'))).toBe(true);
+  });
 });
