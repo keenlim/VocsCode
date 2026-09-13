@@ -776,3 +776,49 @@ describe('legacy day estimation', () => {
     expect(day2.by?.tool.Bash?.calls).toBe(10);
   });
 });
+
+describe('subagent accounting', () => {
+  it('attributes subagent spend to the model the run used, without changing the day total', () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'main-model' } });
+    // The session totals already include the subagent's $0.20 on top of $0.10 of main-model spend.
+    store.recordUsage(m, usage({ inputTokens: 100, costUsd: 0.3, turns: 1 }), t0, [{ provider: 'openrouter', model: 'haiku', costUsd: 0.2 }]);
+    const day = store.summary(30, t0 + 1000).days.find((d) => d.date === dayKey(t0))!;
+    expect(day.usage.costUsd).toBeCloseTo(0.3);
+    expect(day.usage.by!.model['openrouter/main-model'].costUsd).toBeCloseTo(0.1);
+    expect(day.usage.by!.model['openrouter/haiku'].costUsd).toBeCloseTo(0.2);
+  });
+
+  it('carries subagent spend until the session totals cover it', () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'main-model' } });
+    // First window: the totals carry only $0.10, but the completion reports $0.20 of subagent spend.
+    store.recordUsage(m, usage({ costUsd: 0.1, turns: 1 }), t0, [{ provider: 'openrouter', model: 'haiku', costUsd: 0.2 }]);
+    let day = store.summary(30, t0 + 1000).days.find((d) => d.date === dayKey(t0))!;
+    expect(day.usage.by!.model['openrouter/main-model'].costUsd).toBeCloseTo(0);
+    expect(day.usage.by!.model['openrouter/haiku'].costUsd).toBeCloseTo(0.1);
+    // Second window: the drained spend reaches the totals and the remainder moves across.
+    store.recordUsage(m, usage({ costUsd: 0.3, turns: 2 }), t0, []);
+    day = store.summary(30, t0 + 1000).days.find((d) => d.date === dayKey(t0))!;
+    expect(day.usage.costUsd).toBeCloseTo(0.3);
+    expect(day.usage.by!.model['openrouter/main-model'].costUsd).toBeCloseTo(0.1);
+    expect(day.usage.by!.model['openrouter/haiku'].costUsd).toBeCloseTo(0.2);
+  });
+
+  it("counts a subagent's internal tool calls, which never enter the parent transcript", () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'main-model' } });
+    store.recordUsage(m, usage({ turns: 1 }), t0);
+    store.recordSubagent(m, { agentId: 'a1', status: 'completed', toolUses: 37 }, t0);
+    const s = store.summary(30, t0 + 1000);
+    expect(s.tools.find((t) => t.name === 'subagent')?.calls).toBe(37);
+    expect(s.days.find((d) => d.date === dayKey(t0))!.usage.toolCalls).toBe(37);
+    expect(s.harnessTools.find((t) => t.name === 'subagent')?.calls).toBe(37);
+  });
+});

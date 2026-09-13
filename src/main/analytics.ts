@@ -10,6 +10,8 @@ import type {
   ModelRef,
   ModelToolRow,
   SessionMeta,
+  SubagentCompletion,
+  SubagentCost,
   ToolUsage,
   ToolUsageRow,
   TranscriptItem,
@@ -20,7 +22,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -51,6 +53,9 @@ const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions
 
 /** Older calls remain deduped in memory; only this recent window survives restart. */
 const RECENT_TOOL_LIMIT = 10_000;
+
+/** Synthetic tool name for a subagent's internal calls, which pi never puts in the parent transcript. */
+export const SUBAGENT_TOOL = 'subagent';
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
@@ -360,6 +365,8 @@ export class AnalyticsStore {
   private writeQueue: Promise<void> = Promise.resolve();
   /** Tool item ids already counted, so repeated upserts of one call never double-record. */
   private recordedTools = new Set<string>();
+  /** Subagent spend awaiting model re-attribution, keyed by session then `provider/model`. */
+  private readonly pendingSubagentCost = new Map<string, Map<string, SubagentCost>>();
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
     this.file = path.join(userData, 'analytics.json');
@@ -497,7 +504,7 @@ export class AnalyticsStore {
   }
 
   /** Records cumulative usage totals from the harness, adding the delta to today's bucket. */
-  recordUsage(meta: SessionMeta, totals: UsageTotals, now = Date.now()): void {
+  recordUsage(meta: SessionMeta, totals: UsageTotals, now = Date.now(), subagentCostByModel?: SubagentCost[]): void {
     const prev = this.data.recorded[meta.id];
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
@@ -505,7 +512,76 @@ export class AnalyticsStore {
     const day = this.dayFor(dayKey(now));
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
+    if (subagentCostByModel?.length) this.queueSubagentCost(meta.id, subagentCostByModel);
+    this.flushSubagentCost(meta, day);
     this.scheduleWrite();
+  }
+
+  /**
+   * Records a completed subagent's internal tool calls. They never appear in the parent transcript,
+   * so without this the delegated work is invisible to the tool volume and reliability views.
+   */
+  recordSubagent(meta: SessionMeta, completion: SubagentCompletion, now = Date.now()): void {
+    const uses = Math.max(0, Math.floor(completion.toolUses));
+    if (!uses) return;
+    const day = this.dayFor(dayKey(now));
+    addDay(day, { toolCalls: uses });
+    const by = (day.by ??= emptyDimensions());
+    addToolUsage((by.tool[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    addToolUsage((this.data.tools[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    const session = this.data.sessions[meta.id];
+    if (session) session.toolCalls += uses;
+    // Live per-harness outcomes, so the reliability table accounts for delegated work too.
+    addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    this.scheduleWrite();
+  }
+
+  /**
+   * Subagent spend queued for model re-attribution. pi folds it into the session totals (once
+   * `reportUsage` is on) already attributed to the session's active model, so it is moved here
+   * rather than added — day totals keep the money either way; only the model dimension changes.
+   */
+  private queueSubagentCost(sessionId: string, costs: SubagentCost[]): void {
+    const pending = this.pendingSubagentCost.get(sessionId) ?? new Map<string, SubagentCost>();
+    for (const c of costs) {
+      if (!c.provider || !c.model || !(c.costUsd > 0)) continue;
+      const key = `${c.provider}/${c.model}`;
+      const cur = pending.get(key) ?? { provider: c.provider, model: c.model, costUsd: 0 };
+      cur.costUsd += c.costUsd;
+      pending.set(key, cur);
+    }
+    if (pending.size) this.pendingSubagentCost.set(sessionId, pending);
+  }
+
+  /**
+   * Moves queued subagent cost off the session's active model and onto the model each run used.
+   * Bounded by the active model's own slice so a day can never go negative, and whatever cannot be
+   * moved stays queued for a later delta — so the cumulative split converges even when the spend
+   * and the completion land in different turns.
+   */
+  private flushSubagentCost(meta: SessionMeta, day: UsageDay): void {
+    const pending = this.pendingSubagentCost.get(meta.id);
+    const active = meta.activeModel;
+    if (!pending?.size || !active?.provider || !active.model) return;
+    const by = (day.by ??= emptyDimensions());
+    const fromKey = `${active.provider}/${active.model}`;
+    const from = by.model[fromKey];
+    if (!from) return;
+    for (const [key, c] of pending) {
+      if (key === fromKey) {
+        pending.delete(key);
+        continue;
+      }
+      const moved = Math.min(c.costUsd, from.costUsd);
+      if (moved <= 0) continue;
+      from.costUsd -= moved;
+      const to = (by.model[key] ??= emptySlice(c.model));
+      to.costUsd += moved;
+      if (!to.sessions.includes(meta.id)) to.sessions.push(meta.id);
+      c.costUsd -= moved;
+      if (c.costUsd <= 1e-9) pending.delete(key);
+    }
+    if (pending.size === 0) this.pendingSubagentCost.delete(meta.id);
   }
 
   /**

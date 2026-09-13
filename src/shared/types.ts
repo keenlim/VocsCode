@@ -661,7 +661,8 @@ export type SessionEvent =
     }
   | { type: 'approval.request'; request: ApprovalRequest }
   | { type: 'approval.resolved'; requestId: string; decision: ApprovalDecision }
-  | { type: 'usage'; totals: UsageTotals }
+  | { type: 'usage'; totals: UsageTotals; /** Subagent spend in this delta, per model, so it is attributed to the model that ran it. */ subagentCostByModel?: SubagentCost[] }
+  | { type: 'subagent'; completion: SubagentCompletion }
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
@@ -671,6 +672,29 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+}
+
+/** Subagent spend attributed to the model that produced it. */
+export interface SubagentCost {
+  provider: string;
+  model: string;
+  costUsd: number;
+}
+
+/** A finished pi-subagents run, reported to the app so its work is counted and attributed. */
+export interface SubagentCompletion {
+  agentId: string;
+  description?: string;
+  /** Terminal pi-subagents status: completed, error, stopped, aborted. */
+  status: string;
+  /** The model the run actually used, when it could be resolved. */
+  model?: ModelRef;
+  /** Internal tool calls the run made; these never enter the parent transcript. */
+  toolUses: number;
+  costUsd?: number;
+  tokens?: number;
+  durationMs?: number;
+  error?: string;
 }
 
 export interface HarnessAvailability {

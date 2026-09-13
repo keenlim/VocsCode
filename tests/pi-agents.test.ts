@@ -14,6 +14,7 @@ import {
   exploreOverrideMarkdown,
   installAgentOverride,
   installPiAgentOverrides,
+  installPiSubagentsReportUsage,
   piAgentDir
 } from '../src/main/pi-agents';
 
@@ -75,6 +76,8 @@ describe('installPiAgentOverrides', () => {
     expect(res.global?.written).toBe(true);
     expect(res.project?.written).toBe(true);
     expect(await fs.readFile(res.project!.path, 'utf8')).not.toMatch(/^model:/m);
+    // The same pass turns on pi-subagents usage reporting in the global settings.
+    expect(JSON.parse(await fs.readFile(path.join(agentDir, 'subagents.json'), 'utf8'))).toEqual({ reportUsage: true });
   });
 
   it('leaves a project-authored Explore in place so the project keeps its own model', async () => {
@@ -102,6 +105,30 @@ describe('installPiAgentOverrides', () => {
     expect(res.global?.written).toBe(true);
     expect(res.project).toBeNull();
     expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('could not install'));
+  });
+});
+
+describe('installPiSubagentsReportUsage', () => {
+  it('adds reportUsage and preserves existing settings', async () => {
+    const dir = await tmpDir();
+    // An absent key is filled in; the rest of the file is kept.
+    await fs.writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ widgetMode: 'off' }), 'utf8');
+    expect(await installPiSubagentsReportUsage(dir)).toBe(true);
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'subagents.json'), 'utf8'))).toEqual({ widgetMode: 'off', reportUsage: true });
+  });
+
+  it('respects an explicit choice and never clobbers it', async () => {
+    const dir = await tmpDir();
+    await fs.writeFile(path.join(dir, 'subagents.json'), JSON.stringify({ reportUsage: false }), 'utf8');
+    expect(await installPiSubagentsReportUsage(dir)).toBe(false);
+    expect(JSON.parse(await fs.readFile(path.join(dir, 'subagents.json'), 'utf8')).reportUsage).toBe(false);
+  });
+
+  it('leaves a malformed file for pi-subagents to report', async () => {
+    const dir = await tmpDir();
+    await fs.writeFile(path.join(dir, 'subagents.json'), '{ not json', 'utf8');
+    expect(await installPiSubagentsReportUsage(dir)).toBe(false);
+    expect(await fs.readFile(path.join(dir, 'subagents.json'), 'utf8')).toBe('{ not json');
   });
 });
 
