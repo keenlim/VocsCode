@@ -3,6 +3,7 @@
  * range), the chart series derived from it, and the display formatters the tabs share.
  */
 import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, HarnessModelToolRow, HarnessToolRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
+import { modelName } from '../../../../shared/model-names';
 import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
@@ -388,5 +389,6 @@ export function sortSessions(sessions: UsageSessionRecord[], sort: SessionSort):
 export function sessionMatches(s: UsageSessionRecord, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [s.title, s.model ?? '', s.provider ?? '', s.projectRoot, harnessShort(s.harness)].some((v) => v.toLowerCase().includes(q));
+  const model = s.model ? (s.provider ? modelName(s.provider, s.model) : s.model) : '';
+  return [s.title, model, s.model ?? '', s.provider ?? '', s.projectRoot, harnessShort(s.harness)].some((v) => v.toLowerCase().includes(q));
 }

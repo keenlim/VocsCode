@@ -127,7 +127,7 @@ describe('summarize', () => {
       ['anthropic/opus', 'Read', 6],
       ['openai/gpt', 'Bash', 4]
     ]);
-    expect(s.modelTools[0].label).toBe('opus');
+    expect(s.modelTools[0].label).toBe('anthropic/opus');
     expect(s.harnessModelTools.map((r) => [r.harness, r.key, r.name, r.calls])).toEqual([
       ['claude', 'anthropic/opus', 'Read', 6],
       ['codex', 'openai/gpt', 'Bash', 4]
@@ -396,14 +396,14 @@ describe('per-tool-call tracking', () => {
     ]);
     expect(rollupDays(s.days).harnessTools).toEqual(s.harnessTools);
     expect(s.harnessModelTools).toEqual([
-      { harness: 'claude', key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 3, errors: 1, declined: 1, durationMs: 750 },
-      { harness: 'pi', key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 500 }
+      { harness: 'claude', key: 'anthropic/same-model', label: 'anthropic/same-model', name: 'read', calls: 3, errors: 1, declined: 1, durationMs: 750 },
+      { harness: 'pi', key: 'anthropic/same-model', label: 'anthropic/same-model', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 500 }
     ]);
     expect(rollupDays(s.days).harnessModelTools).toEqual(s.harnessModelTools);
     expect(s.toolTotals).toEqual({ calls: 6, errors: 2, declined: 2, durationMs: 1500 });
     expect(s.days.map((d) => [d.date, d.usage.toolCalls])).toEqual([['2025-06-09', 6]]);
     expect(s.sessions.map((x) => x.toolCalls)).toEqual([3, 2]);
-    expect(s.modelTools).toEqual([{ key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 6, errors: 2, declined: 2, durationMs: 1500 }]);
+    expect(s.modelTools).toEqual([{ key: 'anthropic/same-model', label: 'anthropic/same-model', name: 'read', calls: 6, errors: 2, declined: 2, durationMs: 1500 }]);
   });
 
   it.each([false, true])('loads legacy aggregates without inventing harness errors or replaying old calls (existing slices: %s)', async (hasSlices) => {
@@ -445,14 +445,14 @@ describe('per-tool-call tracking', () => {
     const old = toolItem('old-error', { name: 'Read', status: 'error' });
     await store.load([meta('old', 'claude', usage({}), { activeModel: { provider: 'anthropic', model: 'opus' } })], async () => [old]);
     expect(store.summary(0).toolTotals.calls).toBe(1);
-    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
+    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'anthropic/opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
     expect(rollupDays(store.summary(0).days).harnessModelTools).toEqual(store.summary(0).harnessModelTools);
     expect(store.summary(0).harnessTools).toEqual([]);
     expect(rollupDays(store.summary(0).days).harnessTools).toEqual([]);
     store.recordToolCall('old', old);
     await store.flush();
     expect(store.summary(0).toolTotals.calls).toBe(1);
-    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
+    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'anthropic/opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
     expect(store.summary(0).harnessTools).toEqual([]);
   });
 
@@ -603,8 +603,8 @@ describe('per-dimension day slices', () => {
     const by = s.days[0].usage.by;
     expect(by?.harness.claude).toMatchObject({ costUsd: 1.5, turns: 2, inputTokens: 150, durationMs: 2_000, speedTokens: 100, speedMs: 2_000, sessions: ['a'] });
     expect(by?.harness.pi).toMatchObject({ costUsd: 2, turns: 2, toolCalls: 1, sessions: ['b'] });
-    expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 1, label: 'opus' });
-    expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'sonnet', durationMs: 2_000 });
+    expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 1, label: 'anthropic/opus' });
+    expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'anthropic/sonnet', durationMs: 2_000 });
     expect(by?.project['/repo-b']?.toolCalls).toBe(1);
     expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
     expect(by?.modelTool['openrouter/glm']?.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
@@ -617,7 +617,7 @@ describe('per-dimension day slices', () => {
       ['anthropic/sonnet', 'edit', 1],
       ['openrouter/glm', 'bash', 1]
     ]);
-    expect(s.modelTools.find((x) => x.key === 'anthropic/sonnet')).toMatchObject({ label: 'sonnet', errors: 1 });
+    expect(s.modelTools.find((x) => x.key === 'anthropic/sonnet')).toMatchObject({ label: 'anthropic/sonnet', errors: 1 });
     // The all-time harness+model map keeps each pair separate.
     expect(s.harnessModelTools.map((x) => [x.harness, x.key, x.name, x.calls])).toEqual([
       ['claude', 'anthropic/opus', 'bash', 1],
@@ -685,7 +685,7 @@ describe('per-dimension day slices', () => {
     expect(week.previous).toMatchObject({ costUsd: 4, turns: 8 });
     expect(store.summary(0, t0).previous).toBeUndefined();
     const oldDay = store.summary(0, t0).days.find((d) => d.date === '2025-06-10');
-    expect(oldDay?.usage.by?.model['x/m']).toMatchObject({ costUsd: 4, turns: 8, label: 'm', sessions: ['old'] });
+    expect(oldDay?.usage.by?.model['x/m']).toMatchObject({ costUsd: 4, turns: 8, label: 'x/m', sessions: ['old'] });
     expect(oldDay?.usage.by?.project['/repo']?.sessions).toEqual(['old']);
   });
 
@@ -751,7 +751,7 @@ describe('legacy day estimation', () => {
     expect(day.by?.harness.claude).toMatchObject({ costUsd: 2, turns: 4, inputTokens: 200, toolCalls: 8, durationMs: 4000, speedTokens: 60, speedMs: 2000, sessions: ['a'] });
     expect(day.by?.harness.pi).toMatchObject({ costUsd: 1, turns: 2, inputTokens: 100, toolCalls: 2, durationMs: 2000, sessions: ['b'] });
     expect(day.by?.harness.native).toBeUndefined();
-    expect(day.by?.model['anthropic/opus']).toMatchObject({ costUsd: 2, label: 'opus' });
+    expect(day.by?.model['anthropic/opus']).toMatchObject({ costUsd: 2, label: 'anthropic/opus' });
     expect(day.by?.project['/p2']).toMatchObject({ costUsd: 1, turns: 2 });
     // 14 Bash calls all time, 4 recorded live on June 10: the other 10 (and the lone error) land on the legacy day.
     expect(day.by?.tool.Bash).toEqual({ calls: 10, errors: 1, declined: 0, durationMs: 0 });

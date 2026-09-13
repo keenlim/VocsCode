@@ -49,6 +49,20 @@ describe('sidebar session actions', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: true });
   });
 
+  it('names the session model by its provider, whole on hover', () => {
+    useStore.setState({
+      sessions: [session('s_a', { title: 'A', activeModel: { provider: 'openrouter', model: 'deepseek/deepseek-flash' } })],
+      settings,
+      activeId: null,
+      view: 'chat'
+    });
+    const { container } = render(<Sidebar />);
+    const chip = container.querySelector('.session-model') as HTMLElement;
+    // The chip truncates in the row, so the title carries the whole route: provider, vendor, model.
+    expect(chip.textContent).toBe('openrouter/deepseek/deepseek-flash');
+    expect(chip.getAttribute('title')).toBe('openrouter/deepseek/deepseek-flash');
+  });
+
   it('starts renaming from the title without selecting the row', () => {
     const setActive = vi.fn();
     useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat', setActive } as never);

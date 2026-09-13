@@ -70,7 +70,8 @@ describe.runIf(enabled)('vision capability UI', () => {
     await win.click('button:has-text("Start session")');
     await win.waitForSelector('.header', { timeout: 30_000 });
     // start() publishes the model list before the turn fails for the missing key.
-    await win.waitForSelector('.pill:has-text("deepseek-v4-flash")', { timeout: 30_000 });
+    // The pill names the model the same way the picker did: provider first.
+    await win.waitForSelector('.pill:has-text("deepseek/deepseek-v4-flash")', { timeout: 30_000 });
 
     // No attachment, no warning.
     expect(await win.locator('.composer-warn').count()).toBe(0);
@@ -78,7 +79,8 @@ describe.runIf(enabled)('vision capability UI', () => {
     await win.setInputFiles('.composer-actions input[type=file]', imageFile);
     const warn = win.locator('.composer-warn');
     await warn.waitFor({ timeout: 10_000 });
-    expect(await warn.innerText()).toContain('DeepSeek V4 Flash');
+    // The warning names the model the same qualified way, so it says which provider is text-only.
+    expect(await warn.innerText()).toContain('deepseek/deepseek-v4-flash');
     expect(await warn.innerText()).toContain('text-only');
     // The native loop passes attachments through; only Pi strips them itself.
     expect(await warn.innerText()).toContain('may reject');

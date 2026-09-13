@@ -2,6 +2,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
+import { modelRefName } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, harnessTone, relTime } from '../format';
 import { archiveSession } from '../sessionActions';
@@ -490,7 +491,11 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
           <Badge tone={harnessTone(s.config.harness)} title={h?.name}>
             {harnessShort(s.config.harness)}
           </Badge>
-          {s.activeModel && <span className="session-model" title={`${s.activeModel.provider}/${s.activeModel.model}`}>{s.activeModel.model}</span>}
+          {s.activeModel && (
+            <span className="session-model" title={modelRefName(s.activeModel)}>
+              {modelRefName(s.activeModel)}
+            </span>
+          )}
           {s.usage.costUsd > 0 && <span className="session-cost">{fmtCost(s.usage.costUsd)}</span>}
           {s.worktreeBranch && (
             <span className="session-worktree" title={`Worktree · ${s.worktreeBranch}`}>

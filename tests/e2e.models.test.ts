@@ -100,18 +100,20 @@ describe.runIf(enabled)('model picker before the first message', () => {
 
     // Picking one sticks even with no process to tell about it.
     const first = picker.locator('.mp-row .mp-select').first();
+    // The row is named `provider/id`, and that qualified name is what the header pill then shows.
     const picked = (await first.locator('.mp-name').getAttribute('title')) ?? '';
     expect(picked).toContain('/');
     await first.click();
-    await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/').slice(1).join('/')}")`, { timeout: 10_000 });
+    await win.waitForSelector(`.pill[title="Model"]:has-text("${picked}")`, { timeout: 10_000 });
 
-    // A gateway id that no catalog lists can still be typed and sticks.
+    // A gateway id that no catalog lists can still be typed and sticks: a bare id is adopted under
+    // the provider already in use, and the pill names it that way.
     await win.click('.header-controls .pill[title="Model"]');
     const picker2 = win.locator('.model-picker');
     await picker2.waitFor({ timeout: 10_000 });
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
-    await win.waitForSelector('.pill[title="Model"]:has-text("acme-custom-1")', { timeout: 10_000 });
+    await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/')[0]}/acme-custom-1")`, { timeout: 10_000 });
   }, 180_000);
 
   it('offers a configured provider model for the Codex harness', async () => {

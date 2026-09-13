@@ -353,7 +353,7 @@ export interface ToolUsageRow extends ToolUsage {
 export interface ModelToolRow extends ToolUsage {
   /** `provider/model` of the session that made the call. */
   key: string;
-  /** The model name alone. */
+  /** The model's qualified name (`provider/model`), or a harness id where the caller counts those. */
   label: string;
   /** Tool name. */
   name: string;
@@ -419,6 +419,7 @@ export interface UsageBucket {
 
 /** Effective per-model pricing rates, blended from measured usage. */
 export interface ModelRateRow {
+  /** The model's qualified name (`provider/model`), which is also its label. */
   key: string;
   label: string;
   /** Effective blended cost per 1,000,000 tokens (input + output + cache), or undefined when no tokens were measured. */

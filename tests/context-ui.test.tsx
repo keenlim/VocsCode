@@ -41,16 +41,20 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('context window UI', () => {
-  it('shows a context value or an explicit unknown state for every model', () => {
+  it('names each model by its provider and shows a context value or an explicit unknown state', () => {
     const models: ModelInfo[] = [
       { id: 'known', provider: 'test', displayName: 'Known model', contextWindow: 272_000, pricing: { input: 2.5, output: 15 } },
       { id: 'unknown', provider: 'test', displayName: 'Unknown model' },
+      { id: 'hand-added', provider: 'test', displayName: 'hand-added' },
     ];
     render(<ModelPicker models={models} selected={{ provider: 'test', model: 'known' }} onSelect={vi.fn()} />);
 
     expect(screen.getByRole('textbox', { name: 'Search models' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Known model/ }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText('Context 272k · $2.5/$15')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /test\/known/ }).getAttribute('aria-pressed')).toBe('true');
+    // The catalog's own label is a hint beside the context window, not the name.
+    expect(screen.getByText('Known model · Context 272k · $2.5/$15')).toBeTruthy();
+    expect(screen.getByText('Unknown model · Context unknown')).toBeTruthy();
+    // A hand-added model labels itself with its id, so the hint does not repeat the name.
     expect(screen.getByText('Context unknown')).toBeTruthy();
   });
 
@@ -67,10 +71,10 @@ describe('context window UI', () => {
     const groups = [...container.querySelectorAll('.mp-list > .menu-group, .mp-list > div > .menu-group')];
     expect(groups[0]?.textContent).toBe('Selected');
     const firstRow = container.querySelector('.mp-list .mp-row');
-    expect(firstRow?.querySelector('.mp-name')?.textContent).toBe('Gamma');
+    expect(firstRow?.querySelector('.mp-name')?.textContent).toBe('other/gamma');
     expect(firstRow?.querySelector('.mp-select')?.getAttribute('aria-pressed')).toBe('true');
     // The selected model is pinned once, not repeated under its provider group.
-    expect(screen.getAllByText('Gamma')).toHaveLength(1);
+    expect(screen.getAllByText('other/gamma')).toHaveLength(1);
   });
 
   it('pins a selected model that is no longer in the catalog', () => {
@@ -82,7 +86,8 @@ describe('context window UI', () => {
     const rows = [...container.querySelectorAll('.mp-list .mp-row')];
     expect(rows).toHaveLength(2);
     expect(container.querySelector('.mp-list .menu-group')?.textContent).toBe('Selected');
-    expect(rows[0]?.querySelector('.mp-name')?.textContent).toBe('removed-model');
+    // A selection the catalog no longer lists is still named by its provider, not by the bare id.
+    expect(rows[0]?.querySelector('.mp-name')?.textContent).toBe('gone/removed-model');
     expect(rows[0]?.querySelector('.mp-select')?.getAttribute('aria-pressed')).toBe('true');
   });
 

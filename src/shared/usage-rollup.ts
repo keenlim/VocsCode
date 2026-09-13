@@ -115,7 +115,9 @@ function groupedOwnerTools(owners: Record<string, Record<string, ToolUsage>>): {
 export function modelToolUsageRows(modelTools: Record<string, Record<string, ToolUsage>>, modelLabels: ReadonlyMap<string, string> = new Map()): ModelToolRow[] {
   const rows: ModelToolRow[] = [];
   for (const { ownerKey, tools } of groupedOwnerTools(modelTools)) {
-    const label = modelLabels.get(ownerKey) || ownerKey.slice(ownerKey.indexOf('/') + 1);
+    // The key is the model's qualified name; the map only overrides it when a caller counts
+    // something else by the same key (harness tool rows reuse this with harness ids).
+    const label = modelLabels.get(ownerKey) || ownerKey;
     for (const t of tools) rows.push({ key: ownerKey, label, name: t.name, ...t.usage });
   }
   return rows.sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
@@ -131,7 +133,7 @@ export function harnessModelToolUsageRows(harnessModelTools: Record<string, Reco
   const rows: HarnessModelToolRow[] = [];
   for (const { ownerKey, tools } of groupedOwnerTools(harnessModelTools)) {
     const [harness, key] = splitHarnessModelKey(ownerKey);
-    const label = modelLabels.get(key) || key.slice(key.indexOf('/') + 1);
+    const label = modelLabels.get(key) || key;
     for (const t of tools) rows.push({ harness, key, label, name: t.name, ...t.usage });
   }
   return rows.sort((a, b) => b.calls - a.calls || a.harness.localeCompare(b.harness) || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));

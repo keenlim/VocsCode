@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import type { EffortLevel, ImageAttachment, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, SLASH_COMMANDS } from '../../../shared/harness-meta';
+import { modelName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { fmtCost, fmtTokens } from '../format';
 import { useSessionModels } from '../models';
@@ -22,6 +23,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [histIdx, setHistIdx] = useState(-1);
   const ref = useRef<HTMLTextAreaElement>(null);
   const toast = useStore((s) => s.toast);
+  const providers = useStore((s) => s.settings?.providers) ?? [];
   const composerInsert = useStore((s) => s.composerInsert);
   const clearComposerInsert = useStore((s) => s.clearComposerInsert);
   const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
@@ -37,7 +39,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   const visionWarning =
     currentModel && currentInfo?.supportsImages === false
       ? {
-          model: currentInfo.displayName,
+          model: modelName(currentModel.provider, currentModel.model),
           detail: caps.dropsUnsupportedImages
             ? `${harness.name} strips the attachment before it reaches the model, so an override here alone will not help — its own model catalog has to list image input too.`
             : 'The provider may reject the request or silently ignore the image.'
@@ -48,7 +50,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     if (!currentModel) return;
     try {
       await invoke('models:setOverride', { provider: currentModel.provider, model: currentModel.model, supportsImages: true });
-      toast(`${currentInfo?.displayName ?? currentModel.model} is now treated as vision-capable. Undo it under Settings → Providers.`, 'success');
+      toast(`${modelName(currentModel.provider, currentModel.model)} is now treated as vision-capable. Undo it under Settings → Providers.`, 'success');
     } catch (e) {
       toast(`Could not save the override: ${(e as Error).message}`, 'error');
     }
@@ -171,8 +173,8 @@ export function Composer({ session }: { session: SessionMeta }) {
           toast('Usage: /model provider/model', 'error');
           return true;
         }
-        const [provider, ...m] = arg.includes('/') ? arg.split('/') : [session.activeModel?.provider ?? 'anthropic', arg];
-        await invoke('sessions:setModel', { id: session.id, model: { provider, model: m.join('/') } }).catch((e) => toast(String(e.message ?? e), 'error'));
+        const ref = parseTypedModel(arg, providers.map((p) => p.id), session.activeModel?.provider ?? 'anthropic');
+        await invoke('sessions:setModel', { id: session.id, model: ref }).catch((e) => toast(String(e.message ?? e), 'error'));
         return true;
       }
       case 'mode':
