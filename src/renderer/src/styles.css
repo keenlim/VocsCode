@@ -2852,7 +2852,7 @@ body.resizing {
 }
 .pr-cols,
 .pr-row {
-  grid-template-columns: minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
+  grid-template-columns: 48px minmax(0, 1fr) 72px 60px minmax(100px, 112px) 60px;
 }
 /* Issues table: dedicated #number column, tight author + actions, no updated/status columns. */
 .issue-cols,
@@ -2862,10 +2862,12 @@ body.resizing {
 .issue-title {
   font-size: 12px;
 }
-.issue-row {
+.issue-row,
+.pr-row {
   cursor: pointer;
 }
-.issue-open {
+.issue-open,
+.pr-open {
   border: none;
   padding: 0;
   margin: 0;
@@ -2874,12 +2876,14 @@ body.resizing {
   text-align: left;
   cursor: pointer;
 }
-.issue-open:focus-visible {
+.issue-open:focus-visible,
+.pr-open:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
-.issue-dialog-meta {
+.issue-dialog-meta,
+.pr-dialog-meta {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2889,10 +2893,12 @@ body.resizing {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
 }
-.issue-dialog-body {
+.issue-dialog-body,
+.pr-dialog-body {
   padding-top: 8px;
 }
-.issue-dialog-empty {
+.issue-dialog-empty,
+.pr-dialog-empty {
   margin: 20px 0 4px;
 }
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
@@ -3004,25 +3010,23 @@ body.resizing {
 /* Narrow panel: keep the table layout and its column header, just drop the
    Updated, Behind/Ahead and Status columns so the name keeps the width. */
 @container (max-width: 619.9px) {
-  .branches-cols:not(.issue-cols),
-  .branch-row:not(.issue-row),
-  .pr-cols,
-  .pr-row:not(.issue-row) {
+  .branches-cols:not(.issue-cols):not(.pr-cols),
+  .branch-row:not(.issue-row):not(.pr-row) {
     grid-template-columns: minmax(0, 1fr) auto;
   }
-  .branches-cols:not(.issue-cols) > :nth-child(2),
-  .branches-cols:not(.issue-cols) > :nth-child(3),
-  .branches-cols:not(.issue-cols) > :nth-child(4),
-  .branch-row:not(.issue-row) > :nth-child(2),
-  .branch-row:not(.issue-row) > :nth-child(3),
-  .branch-row:not(.issue-row) > :nth-child(4) {
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(2),
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(3),
+  .branches-cols:not(.issue-cols):not(.pr-cols) > :nth-child(4),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(2),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(3),
+  .branch-row:not(.issue-row):not(.pr-row) > :nth-child(4) {
     display: none;
   }
   /* One line of actions even when the name column is squeezed. */
   .branch-actions {
     flex-wrap: nowrap;
   }
-  /* Issues keep their full header table at every width; the fixed columns just give
+  /* Issues and PRs keep their full header table at every width; the fixed columns just give
      back some width (a flexible # column here would misalign rows against each other). */
   .issue-cols,
   .issue-row {
@@ -3030,6 +3034,20 @@ body.resizing {
     gap: 4px;
     padding-left: 8px;
     padding-right: 8px;
+  }
+  /* PRs drop author and updated next, keeping # / title / status / actions. */
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: 40px minmax(0, 1fr) minmax(100px, 112px) 52px;
+    gap: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .pr-cols > :nth-child(3),
+  .pr-cols > :nth-child(4),
+  .pr-row:not(.issue-row) > :nth-child(3),
+  .pr-row:not(.issue-row) > :nth-child(4) {
+    display: none;
   }
 }
 /* Ultra-narrow: same header table, tighter still. */
@@ -3039,6 +3057,17 @@ body.resizing {
     grid-template-columns: 36px minmax(0, 1fr) 44px 44px;
     padding-left: 6px;
     padding-right: 6px;
+  }
+  /* PRs drop status too, leaving # / title / actions. */
+  .pr-cols,
+  .pr-row:not(.issue-row) {
+    grid-template-columns: 36px minmax(0, 1fr) 48px;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+  .pr-cols > :nth-child(5),
+  .pr-row:not(.issue-row) > :nth-child(5) {
+    display: none;
   }
 }
 .num {

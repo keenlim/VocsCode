@@ -74,6 +74,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const [issueFilter, setIssueFilter] = useState<IssueFilter>('open');
   const [issueQuery, setIssueQuery] = useState('');
   const [selectedIssue, setSelectedIssue] = useState<GitIssue | null>(null);
+  const [selectedPr, setSelectedPr] = useState<GitPullRequest | null>(null);
   /** The session this instance belongs to; async responses for other sessions are dropped. */
   const liveId = useRef(session.id);
   /** Inputs the background poll reads; refreshed every render so the interval never acts on stale state. */
@@ -146,6 +147,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     setPrData(null);
     setIssueData(null);
     setSelectedIssue(null);
+    setSelectedPr(null);
     lastPollAt.current = Date.now();
     void refresh();
     void refreshPrs();
@@ -243,15 +245,15 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     void act(invoke('git:merge', { sessionId: session.id, head: b.name }), `Merged ${b.name}`);
   };
 
-  /** Merging from the PR list goes through the same gh path, pinned to the PR's head branch; both lists are refreshed after. */
-  const mergeListedPr = async (pr: GitPullRequest) => {
-    if (!pr.headRefName) return;
+  /** Merging from the PR list goes through the same gh path, pinned to the PR's head branch; both lists are refreshed after. Returns true when a merge was attempted (the user confirmed). */
+  const mergeListedPr = async (pr: GitPullRequest): Promise<boolean> => {
+    if (!pr.headRefName) return false;
     const ok = await askConfirm({
       title: `Merge PR #${pr.number}?`,
       body: `${pr.title}\n\n${pr.headRefName} → ${pr.baseRefName ?? 'its target branch'}, via gh.`.trim(),
       confirmLabel: 'Merge PR'
     });
-    if (!ok) return;
+    if (!ok) return false;
     const r = await invoke('git:merge', { sessionId: session.id, head: pr.headRefName });
     if (!r.ok) toast(r.output ?? 'Failed to merge the PR', 'error');
     else {
@@ -259,6 +261,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
       void refresh();
       void refreshPrs();
     }
+    return true;
   };
 
   /** Prefills the composer with the PR so the agent can review it without leaving the desk. */
@@ -443,6 +446,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           setQuery={setPrQuery}
           isLocal={(name) => localBranches.has(name)}
           onRefresh={() => void refreshPrs()}
+          onOpen={(pr) => setSelectedPr(pr)}
           onView={(pr) => void invoke('app:openExternal', { url: pr.url })}
           onMerge={(pr) => void mergeListedPr(pr)}
           onCopyUrl={(pr) => void navigator.clipboard.writeText(pr.url).then(() => toast(`Copied ${pr.url}`, 'success'))}
@@ -532,6 +536,19 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           onNewSession={() => {
             setSelectedIssue(null);
             startSessionOnIssue(selectedIssue);
+          }}
+        />
+      )}
+      {selectedPr && (
+        <PrDialog
+          pr={selectedPr}
+          onClose={() => setSelectedPr(null)}
+          onViewExternal={() => {
+            setSelectedPr(null);
+            void invoke('app:openExternal', { url: selectedPr.url });
+          }}
+          onMerge={async () => {
+            if (await mergeListedPr(selectedPr)) setSelectedPr(null);
           }}
         />
       )}
@@ -743,6 +760,7 @@ function PrList({
   setQuery,
   isLocal,
   onRefresh,
+  onOpen,
   onView,
   onMerge,
   onCopyUrl,
@@ -757,6 +775,7 @@ function PrList({
   setQuery: (q: string) => void;
   isLocal: (branch: string) => boolean;
   onRefresh: () => void;
+  onOpen: (pr: GitPullRequest) => void;
   onView: (pr: GitPullRequest) => void;
   onMerge: (pr: GitPullRequest) => void;
   onCopyUrl: (pr: GitPullRequest) => void;
@@ -817,6 +836,7 @@ function PrList({
       {data && !data.error && !data.ghMissing && (
         <div className="branches-table">
           <div className="branches-cols pr-cols">
+            <span>#</span>
             <span>Pull request</span>
             <span>Author</span>
             <span>Updated</span>
@@ -828,6 +848,7 @@ function PrList({
               key={pr.number}
               pr={pr}
               local={!!pr.headRefName && isLocal(pr.headRefName)}
+              onOpen={() => onOpen(pr)}
               onView={() => onView(pr)}
               onMerge={() => onMerge(pr)}
               onCopyUrl={() => onCopyUrl(pr)}
@@ -845,6 +866,7 @@ function PrList({
 function PrRow({
   pr,
   local,
+  onOpen,
   onView,
   onMerge,
   onCopyUrl,
@@ -853,6 +875,7 @@ function PrRow({
 }: {
   pr: GitPullRequest;
   local: boolean;
+  onOpen: () => void;
   onView: () => void;
   onMerge: () => void;
   onCopyUrl: () => void;
@@ -862,18 +885,26 @@ function PrRow({
   const open = pr.state === 'OPEN';
   const review = pr.reviewDecision === 'APPROVED' ? 'approved' : pr.reviewDecision === 'CHANGES_REQUESTED' ? 'changes requested' : undefined;
   const diffStat = pr.additions !== undefined || pr.deletions !== undefined ? `+${pr.additions ?? 0} −${pr.deletions ?? 0}` : undefined;
+  // Clicking anywhere but the actions opens the detail dialog, same as an issue row.
+  const onRowClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.branch-actions') || target.closest('.pr-open')) return;
+    onOpen();
+  };
   return (
-    <div className="branch-row pr-row">
-      <div className="pr-title">
-        <div className="pr-head">
-          <span className="mono muted">#{pr.number}</span>
+    <div className="branch-row pr-row" onClick={onRowClick}>
+      <span className="pr-num mono" title={`Pull request #${pr.number}`}>
+        #{pr.number}
+      </span>
+      <button type="button" className="pr-title pr-open" aria-label={`Read pull request #${pr.number}: ${pr.title}`} onClick={onOpen}>
+        <span className="pr-head">
           <span title={pr.title}>{pr.title}</span>
-        </div>
-        <div className="pr-refs mono" title={`${pr.headRefName ?? '?'} → ${pr.baseRefName ?? '?'}`}>
+        </span>
+        <span className="pr-refs mono" title={`${pr.headRefName ?? '?'} → ${pr.baseRefName ?? '?'}`}>
           {pr.headRefName ?? '?'} → {pr.baseRefName ?? '?'}
           {diffStat && <span className="muted"> · {diffStat}</span>}
-        </div>
-      </div>
+        </span>
+      </button>
       <span className="pr-author muted small" title={pr.author}>
         {pr.author ?? '—'}
       </span>
@@ -1147,6 +1178,72 @@ function IssueDialog({
         ))}
       </div>
       {bodyHtml ? <div ref={bodyRef} className="md issue-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted issue-dialog-empty">No description provided.</p>}
+    </Modal>
+  );
+}
+
+function PrDialog({
+  pr,
+  onClose,
+  onViewExternal,
+  onMerge
+}: {
+  pr: GitPullRequest;
+  onClose: () => void;
+  onViewExternal: () => void;
+  onMerge: () => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const bodyHtml = useMemo(() => renderMarkdown(pr.body ?? ''), [pr.body]);
+  useEffect(() => {
+    if (!bodyRef.current || !bodyHtml) return;
+    return installMarkdownHandlers(bodyRef.current, (url) => void invoke('app:openExternal', { url }));
+  }, [bodyHtml]);
+  const stateLabel = pr.state === 'MERGED' ? 'Merged' : pr.state === 'CLOSED' ? 'Closed' : pr.isDraft ? 'Draft' : 'Open';
+  const stateTone = pr.state === 'MERGED' ? 'purple' : pr.state === 'CLOSED' ? 'neutral' : pr.isDraft ? 'neutral' : 'green';
+  const review = pr.reviewDecision === 'APPROVED' ? 'Approved' : pr.reviewDecision === 'CHANGES_REQUESTED' ? 'Changes requested' : undefined;
+  const diffStat = pr.additions !== undefined || pr.deletions !== undefined ? `+${pr.additions ?? 0} −${pr.deletions ?? 0}` : undefined;
+  const mergeable = pr.state === 'OPEN' && !pr.isDraft && !!pr.headRefName;
+
+  return (
+    <Modal
+      title={<><span className="mono muted">#{pr.number}</span> {pr.title}</>}
+      onClose={onClose}
+      width={760}
+      footer={
+        <>
+          <Button variant="ghost" icon="external" onClick={onViewExternal}>
+            Open on GitHub
+          </Button>
+          <Button
+            variant="primary"
+            icon="check"
+            disabled={!mergeable}
+            title={mergeable ? `Merge ${pr.headRefName} into ${pr.baseRefName ?? 'its target branch'}` : pr.isDraft ? 'Draft pull requests cannot be merged' : 'Only open pull requests can be merged'}
+            onClick={onMerge}
+          >
+            Merge PR
+          </Button>
+        </>
+      }
+    >
+      <div className="pr-dialog-meta">
+        <Badge tone={stateTone}>{stateLabel}</Badge>
+        {review && <Badge tone={pr.reviewDecision === 'APPROVED' ? 'green' : 'red'} title={`Review: ${review}`}>{review}</Badge>}
+        {pr.author && <span>Opened by <strong>{pr.author}</strong></span>}
+        {(pr.headRefName || pr.baseRefName) && <span className="mono">{pr.headRefName ?? '?'} → {pr.baseRefName ?? '?'}</span>}
+        {diffStat && <span title="Changed lines">{diffStat}</span>}
+        {pr.comments !== undefined && <span>{pr.comments} comment{pr.comments === 1 ? '' : 's'}</span>}
+        {pr.createdAt !== undefined && <span title={new Date(pr.createdAt).toLocaleString()}>Opened {relTime(pr.createdAt)}</span>}
+        {pr.updatedAt !== undefined && <span title={new Date(pr.updatedAt).toLocaleString()}>Updated {relTime(pr.updatedAt)}</span>}
+        {pr.state === 'MERGED' && pr.mergedAt !== undefined && <span title={new Date(pr.mergedAt).toLocaleString()}>Merged {relTime(pr.mergedAt)}</span>}
+        {pr.labels?.map((label) => (
+          <Badge key={label.name} tone="neutral" title={`Label: ${label.name}`}>
+            {label.name}
+          </Badge>
+        ))}
+      </div>
+      {bodyHtml ? <div ref={bodyRef} className="md pr-dialog-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} /> : <p className="muted pr-dialog-empty">No description provided.</p>}
     </Modal>
   );
 }

@@ -1034,6 +1034,10 @@ export interface GitPullRequest {
   reviewDecision?: string;
   additions?: number;
   deletions?: number;
+  /** Markdown description returned by GitHub. */
+  body?: string;
+  labels?: { name: string; color?: string }[];
+  comments?: number;
 }
 
 /** The PR list pulled from GitHub; `error` carries gh's own words when the pull failed (not logged in, no remote…). */

@@ -15,13 +15,13 @@ const GH_SH = [
   "  'pr create') echo 'https://example.com/acme/repo/pull/7' ;;",
   "  'pr list')",
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
-  '    echo "[{\\"number\\":7,\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"headRefName\\":\\"${GH_HEAD:-harness/test}\\",\\"baseRefName\\":\\"$GH_BASE\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\"}]" ;;',
+  '    echo "[{\\"number\\":7,\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"headRefName\\":\\"${GH_HEAD:-harness/test}\\",\\"baseRefName\\":\\"$GH_BASE\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"title\\":\\"Test PR\\",\\"body\\":\\"Full PR description\\",\\"labels\\":[{\\"name\\":\\"enhancement\\",\\"color\\":\\"00ff00\\"}],\\"comments\\":[{\\"body\\":\\"first comment\\"},{\\"body\\":\\"second comment\\"}]}]" ;;',
   '  \'pr view\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
   '    echo "{\\"state\\":\\"${GH_STATE:-OPEN}\\",\\"url\\":\\"https://example.com/acme/repo/pull/7\\",\\"baseRefName\\":\\"$GH_BASE\\"}" ;;',
   '  \'issue list\')',
   '    [ -n "$GH_VIEW_FAIL" ] && exit 1',
-  '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"body\\\":\\\"Full issue description\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":2,\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
+  '    echo "[{\\\"number\\\":42,\\\"state\\\":\\\"${GH_ISSUE_STATE:-OPEN}\\\",\\\"url\\\":\\\"https://example.com/acme/repo/issues/42\\\",\\\"title\\\":\\\"Test issue\\\",\\\"body\\\":\\\"Full issue description\\\",\\\"labels\\\":[{\\\"name\\\":\\\"bug\\\",\\\"color\\\":\\\"ff0000\\\"}],\\\"comments\\\":[{\\\"body\\\":\\\"first comment\\\"},{\\\"body\\\":\\\"second comment\\\"}],\\\"author\\\":{\\\"login\\\":\\\"octocat\\\"}}]" ;;',
   'esac',
   'exit 0'
 ].join('\n');
@@ -34,11 +34,11 @@ const GH_CMD = [
   'if "%GH_STATE%"=="" set "GH_STATE=OPEN"',
   'if "%GH_HEAD%"=="" set "GH_HEAD=harness/test"',
   'if /i "%~1"=="pr" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
-  'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"state":"%GH_STATE%","headRefName":"%GH_HEAD%","baseRefName":"%GH_BASE%","url":"https://example.com/acme/repo/pull/7","title":"Test PR"}]',
+  'if /i "%~1"=="pr" if /i "%~2"=="list" echo [{"number":7,"state":"%GH_STATE%","headRefName":"%GH_HEAD%","baseRefName":"%GH_BASE%","url":"https://example.com/acme/repo/pull/7","title":"Test PR","body":"Full PR description","labels":[{"name":"enhancement","color":"00ff00"}],"comments":[{"body":"first comment"},{"body":"second comment"}]}]',
   'if /i "%~1"=="pr" if /i "%~2"=="view" echo {"state":"%GH_STATE%","url":"https://example.com/acme/repo/pull/7","baseRefName":"%GH_BASE%"}',
   'if "%GH_ISSUE_STATE%"=="" set "GH_ISSUE_STATE=OPEN"',
   'if /i "%~1"=="issue" if /i "%~2"=="list" if not "%GH_VIEW_FAIL%"=="" exit /b 1',
-  'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","body":"Full issue description","labels":[{"name":"bug","color":"ff0000"}],"comments":2,"author":{"login":"octocat"}}]',
+  'if /i "%~1"=="issue" if /i "%~2"=="list" echo [{"number":42,"state":"%GH_ISSUE_STATE%","url":"https://example.com/acme/repo/issues/42","title":"Test issue","body":"Full issue description","labels":[{"name":"bug","color":"ff0000"}],"comments":[{"body":"first comment"},{"body":"second comment"}],"author":{"login":"octocat"}}]',
   'exit /b 0'
 ].join('\r\n');
 
@@ -168,7 +168,17 @@ describe('git PR flow (/pr, /merge)', () => {
     expect(list.error).toBeUndefined();
     expect(list.fetchedAt).toBeGreaterThanOrEqual(before);
     expect(list.prs).toEqual([
-      { number: 7, title: 'Test PR', state: 'OPEN', headRefName: 'harness/test', baseRefName: 'develop', url: 'https://example.com/acme/repo/pull/7' }
+      {
+        number: 7,
+        title: 'Test PR',
+        state: 'OPEN',
+        headRefName: 'harness/test',
+        baseRefName: 'develop',
+        url: 'https://example.com/acme/repo/pull/7',
+        body: 'Full PR description',
+        labels: [{ name: 'enhancement', color: '00ff00' }],
+        comments: 2
+      }
     ]);
   });
 
