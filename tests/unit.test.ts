@@ -95,6 +95,14 @@ describe('LLM session titles', () => {
     expect(sanitizeLlmTitle('  \n\n  ')).toBeNull();
   });
 
+  it('rejects leaked chat-template control tokens instead of titling with them', () => {
+    // DeepSeek answers a title request with its DSML tool-call marker when the provider fails to
+    // parse the call out; one arrived mangled (` calls>`) in a real session title.
+    expect(sanitizeLlmTitle('<｜DSML｜tool_calls>')).toBeNull();
+    expect(sanitizeLlmTitle('<｜DSML｜ calls>')).toBeNull();
+    expect(sanitizeLlmTitle('<|im_start|>Fix the sidebar flicker')).toBeNull();
+  });
+
   it('returns null when no enabled provider has a usable key', async () => {
     const providers = [{
       id: 'anthropic', kind: 'anthropic', name: 'Anthropic', enabled: true, hasApiKey: false, models: []
@@ -155,6 +163,24 @@ describe('LLM session titles', () => {
       expect(seen.body?.max_tokens).toBeUndefined();
       expect(seen.body?.max_completion_tokens).toBe(1024);
       expect(seen.body?.reasoning_effort).toBe('low');
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('returns null when the reply is leaked DeepSeek tool-call markup, keeping the placeholder', async () => {
+    const seen: { model?: unknown } = {};
+    const server = await listenOnce((_req, res, body) => {
+      seen.model = (JSON.parse(body ?? '{}') as Record<string, unknown>).model;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: '<｜DSML｜ calls>' }, finish_reason: 'stop' }] }));
+    });
+    try {
+      const provider = { id: 'fake', kind: 'openai-compatible' as const, name: 'Fake', enabled: true, hasApiKey: true, baseUrl: server.url, models: [] };
+      const title = await generateSessionTitle('Fix the bug', [provider] as never, getSecret, { provider: 'fake', model: 'cheap-flash' });
+      // The call really reached the endpoint: null is the rejection, not an unusable provider.
+      expect(seen.model).toBe('cheap-flash');
+      expect(title).toBeNull();
     } finally {
       await server.close();
     }
