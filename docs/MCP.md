@@ -449,27 +449,43 @@ Not in P0, by design: the native loop still runs without MCP tools (its capabili
 ## 13. Built-in GitNexus, strictly repo-scoped
 
 **Status: shipped.** GitNexus is an app-shipped server, so every repo has it without anyone
-adding it, and each session is confined to its own repo's index.
+adding it, and each session is confined to its own repo's index. Two serving modes are chosen
+globally on the MCP page (`AppSettings.gitnexus.mode`); the default is **per-repo**.
 
 GitNexus keeps all indexes in one global registry (`~/.gitnexus/registry.json`) and its `mcp`
-command serves every entry, with no scoping flag. Isolation is therefore the app's job:
-before a session starts, `src/main/mcp/gitnexus.ts` writes a per-project `GITNEXUS_HOME` under
-`userData/gitnexus-homes/<hash(projectRoot)>` whose `registry.json` contains only the session
-repo (matched against `projectRoot` and `cwd`) plus any repo the user has promoted. The built-in
-definition is injected with that env, so a session in repo Y can never query repo X's graph.
+command serves every entry, with no scoping flag. Isolation is therefore the app's job, and the
+two modes achieve it differently.
 
-**Global scope** is a per-repo switch, not a move to the global list: `mcpProjectState[root].gitnexusGlobal`
-adds repo X's registry entry to every other repo's private home. It is the one place a repo's
-index leaves its own boundary, and the toggle sits next to the built-in row on the repo's MCP tab.
+**Per-repo mode (default).** `src/main/mcp/gitnexus.ts` writes a per-project `GITNEXUS_HOME`
+under `userData/gitnexus-homes/<hash(projectRoot)>` whose `registry.json` contains only the
+session repo (matched against `projectRoot` and `cwd`) plus any repo the user has promoted. Each
+session spawns its own `gitnexus mcp`, so a session in repo Y can never query repo X's graph.
+The repo's MCP tab shows an on/off switch (`disabledBuiltin`).
+
+**Shared mode.** `src/main/mcp/shared-server.ts` starts one `gitnexus serve` process for the app
+(MCP over Streamable HTTP at `POST /api/mcp`, from the global registry), lazily on the first
+shared-mode session and stopped on quit. Sessions do not talk to it directly: the app injects a
+stdio **scope proxy** (`resources/mcp/gitnexus-scope.mjs`), which forwards to the shared server
+while enforcing the session's allow-list — it pins the `repo` argument to the session repo,
+rejects calls that name a repo outside the allow-list, hides the cross-repo `group_*` tools,
+filters `list_repos`, and filters resources. `gitnexusGlobal` extends that allow-list. This is
+the only mode where isolation is policy rather than construction, so the proxy is the security
+boundary and must cover every cross-repo surface GitNexus exposes.
+
+**Global scope** (either mode) is a per-repo switch, not a move to the global list:
+`mcpProjectState[root].gitnexusGlobal` adds repo X's registry entry to every other repo's
+allow-list. It is the one place a repo's index leaves its own boundary, and the toggle sits next
+to the built-in row on the repo's MCP tab.
 
 Rules:
 
 - The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
   `gitnexus` server is shadowed, not injected twice).
-- It is on by default, injects into every harness whose `mcp` support is `inject` or `client`,
-  and is switched off for one repo with `disabledBuiltin`.
+- It injects into every harness whose `mcp` support is `inject` or `client`. In per-repo mode it
+  is on by default per repo and switched off with `disabledBuiltin`; a shared server is on
+  everywhere, and the per-repo switch is ignored.
 - Prefer the installed `gitnexus` binary (via `which`) over `npx -y gitnexus@latest`.
-- Indexing is still the user's action: an unindexed repo gets an empty registry, and the tab
+- Indexing is still the user's action: an unindexed repo is not injected at all, and the tab
   says to run `gitnexus analyze` rather than failing the session.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
   matches an index built in the worktree.

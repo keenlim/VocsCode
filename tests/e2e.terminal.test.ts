@@ -99,6 +99,21 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
       expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally
 
+      // The MCP page chooses between one shared server and per-repo servers; the repo tab follows.
+      await win.click('.sidebar-link:has-text("MCP")');
+      await win.waitForSelector('.mcp-page', { timeout: 20_000 });
+      await win.click('.mcp-page button:has-text("One shared server")');
+      await win.locator('[data-testid="session-row"]').first().click();
+      await win.click('.panel-tab:has-text("MCP")');
+      await expect
+        .poll(async () => builtin.innerText(), { timeout: 20_000 })
+        .toContain('shared server');
+      // Restore the default so the rest of the run is unaffected.
+      await win.click('.sidebar-link:has-text("MCP")');
+      await win.waitForSelector('.mcp-page', { timeout: 20_000 });
+      await win.click('.mcp-page button:has-text("Per-repo servers")');
+      await win.locator('[data-testid="session-row"]').first().click();
+
       // The project is a brand-new folder, so the Git tab guides setup. Initializing turns the
       // guide into the branches view with the GitHub continuation; the first commit runs through
       // real git, proving the panel's actions reach the repository rather than only its own state.

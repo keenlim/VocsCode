@@ -41,7 +41,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
 
   useEffect(() => {
     void load();
-  }, [load, settings?.mcpServers, settings?.mcpProjectState]);
+  }, [load, settings?.mcpServers, settings?.mcpProjectState, settings?.gitnexus]);
 
   const support = info?.support ?? HARNESS_BY_ID[session.config.harness].capabilities.mcp;
   const harnessName = HARNESS_BY_ID[session.config.harness].name;
@@ -146,17 +146,23 @@ export function McpTab({ session }: { session: SessionMeta }) {
         <section className="mcp-section">
           <div className="mcp-section-head">
             <h3>Built-in</h3>
+            <span className="spacer" />
+            <Badge tone="neutral">{info.mode === 'shared' ? 'shared server' : 'per-repo server'}</Badge>
           </div>
           {info.builtin.map((b) => (
             <div key={b.def.id} className="mcp-card compact">
               <div className="mcp-row-head">
-                <Toggle checked={b.enabled} onChange={(v) => void setBuiltinEnabled(b.def.id, v)} />
+                {info.mode === 'per-repo' ? <Toggle checked={b.enabled} onChange={(v) => void setBuiltinEnabled(b.def.id, v)} /> : <Icon name="server" size={12} />}
                 <span className="mcp-name">{b.def.id}</span>
                 <Badge tone="blue">built-in</Badge>
                 <span className="spacer" />
                 {b.enabled && !b.indexed && <Badge tone="amber">not indexed</Badge>}
               </div>
-              <code className="mcp-cmd mono">{serverSummary(b.def)}</code>
+              {info.mode === 'per-repo' ? (
+                <code className="mcp-cmd mono">{serverSummary(b.def)}</code>
+              ) : (
+                <div className="muted small">Served by the one shared GitNexus server. This session sees only this repo's graph, plus any repo you share.</div>
+              )}
               <div className="mcp-row-head pad-t">
                 <Toggle checked={b.shared} onChange={(v) => void setGitnexusShared(v)} />
                 <span className="muted small">Share this repo's code graph with other repos</span>

@@ -145,6 +145,9 @@ export interface McpProjectState {
 
 export type McpScope = 'global' | 'repo' | 'builtin';
 
+/** How the built-in GitNexus is served: one shared process, or one per repo. */
+export type GitnexusMode = 'shared' | 'per-repo';
+
 /** How a harness takes MCP servers: nothing, injected by us, run by us, or its own store. */
 export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
 
@@ -185,6 +188,8 @@ export interface McpBuiltinInfo {
 /** Everything the right-panel MCP tab needs for one session. */
 export interface McpProjectInfo {
   projectRoot: string;
+  /** The built-in GitNexus serving mode this session runs under. */
+  mode: GitnexusMode;
   /** Absolute path of the repo file, whether or not it exists yet. */
   file: string;
   display: string;
@@ -823,6 +828,8 @@ export interface AppSettings {
   mcpServers: McpServerDef[];
   /** Per-user MCP switches keyed by project root; see McpProjectState. */
   mcpProjectState?: Record<string, McpProjectState>;
+  /** How the app-shipped GitNexus server is served (see GitnexusMode). */
+  gitnexus: { mode: GitnexusMode };
   providers: ProviderConfig[];
   /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
   modelOverrides: Record<string, ModelOverride>;
