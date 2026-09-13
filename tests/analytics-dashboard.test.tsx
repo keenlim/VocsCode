@@ -246,11 +246,11 @@ describe('analytics dashboard', () => {
       fireEvent.click(ui.getByRole('radio', { name: 'All time' }));
       await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '10', '3', '4', '50%']));
       expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 0 });
-      // Both sibling tables retain upstream's errors/calls math, unlike harness/tool's executed-call rate.
-      expect(ui.getAllByText('(3/10) 30%')).toHaveLength(2);
+      // Both sibling tables keep upstream's errors/calls math: a Total cell and one per tool.
+      expect(ui.getAllByText('(3/10) 30%')).toHaveLength(4);
       const modelTable = ui.getByRole('columnheader', { name: 'Harness · model' }).closest('table')!;
       expect(within(modelTable).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual([
-        ['Claude · same', '(3/10) 30%']
+        ['Claude · same', '(3/10) 30%', '(3/10) 30%']
       ]);
       fireEvent.click(ui.getByRole('radio', { name: '30 days' }));
       await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '6', '2', '2', '50%']));
