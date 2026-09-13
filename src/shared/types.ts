@@ -832,6 +832,8 @@ export interface GitSetupStatus {
   remote?: string;
   /** True once the current branch exists on origin (a remote-tracking ref). */
   pushed: boolean;
+  /** Git author identity (`user.name` / `user.email`, local or global); a commit fails while either is missing. */
+  identity: { name?: string; email?: string };
   /** GitHub CLI availability, which powers one-click repository creation and credential setup. */
   gh: { installed: boolean; authenticated: boolean; account?: string };
 }

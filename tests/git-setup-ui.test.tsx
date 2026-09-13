@@ -41,7 +41,7 @@ const session: SessionMeta = {
 const noGh: GitSetupStatus['gh'] = { installed: false, authenticated: false };
 const ghReady: GitSetupStatus['gh'] = { installed: true, authenticated: true, account: 'octocat' };
 
-const status = (patch: Partial<GitSetupStatus>): GitSetupStatus => ({ isRepo: false, hasCommits: false, pushed: false, gh: noGh, ...patch });
+const status = (patch: Partial<GitSetupStatus>): GitSetupStatus => ({ isRepo: false, hasCommits: false, pushed: false, identity: {}, gh: noGh, ...patch });
 
 /** A fresh-per-test stateful backend: the guide must advance only because an action changed it. */
 let setup: GitSetupStatus;
@@ -50,7 +50,7 @@ beforeEach(() => {
   invokeMock.mockReset();
   setup = status({});
   useStore.setState({ panelTab: 'branches', toasts: [], settings: null });
-  invokeMock.mockImplementation((channel: string, req: { url?: string; name?: string; private?: boolean; message?: string }) => {
+  invokeMock.mockImplementation((channel: string, req: { url?: string; name?: string; private?: boolean; message?: string; email?: string; global?: boolean }) => {
     switch (channel) {
       case 'git:branchesOverview':
         return Promise.resolve({ isRepo: setup.isRepo, base: 'main', branches: [], worktrees: [] });
@@ -70,6 +70,11 @@ beforeEach(() => {
       case 'git:initialCommit':
         setup = { ...setup, hasCommits: true };
         return Promise.resolve({ ok: true, output: '' });
+      case 'git:setIdentity':
+        setup = { ...setup, identity: { name: req.name, email: req.email } };
+        return Promise.resolve({ ok: true });
+      case 'git:githubIdentity':
+        return Promise.resolve({ ok: true, login: 'octocat', name: 'Mona Lisa', email: '42+octocat@users.noreply.github.com' });
       case 'git:setRemote':
         setup = { ...setup, remote: req.url };
         return Promise.resolve({ ok: true });
@@ -105,10 +110,13 @@ describe('guided git setup', () => {
     expect(query('Commit')).toBeNull();
 
     click('Initialize repository');
-    expect(await screen.findByRole('button', { name: 'Commit' })).toBeTruthy();
+    // A fresh machine has no git identity, so the commit step asks for one before it can commit.
+    fireEvent.change(await screen.findByLabelText('Your name'), { target: { value: 'Mona Lisa' } });
+    fireEvent.change(screen.getByLabelText('Your email'), { target: { value: 'mona@example.com' } });
     expect(invokeMock).toHaveBeenCalledWith('git:init', { sessionId: 's1' });
 
-    click('Commit');
+    click('Save and commit');
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('git:setIdentity', { sessionId: 's1', name: 'Mona Lisa', email: 'mona@example.com', global: false }));
     expect(await screen.findByText('Connect a GitHub repository')).toBeTruthy();
     expect(invokeMock).toHaveBeenCalledWith('git:initialCommit', { sessionId: 's1', message: 'Initial commit' });
 
@@ -144,6 +152,51 @@ describe('guided git setup', () => {
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('git:createGitHubRepo', { sessionId: 's1', name: 'a', private: true }));
     // Creating the repository sets origin and pushes, so the banner has nothing left to say.
     await waitFor(() => expect(screen.queryByText('Publish this repository to GitHub')).toBeNull());
+  });
+
+  it('fills the identity from the signed-in GitHub account', async () => {
+    setup = status({ isRepo: true, root: 'G:/proj/a', branch: 'main', gh: ghReady });
+    render(<RightPanel session={session} />);
+    expect(await screen.findByText('Publish this repository to GitHub')).toBeTruthy();
+    click(/Use my GitHub account/);
+    await waitFor(() => expect((screen.getByLabelText('Your name') as HTMLInputElement).value).toBe('Mona Lisa'));
+    expect((screen.getByLabelText('Your email') as HTMLInputElement).value).toBe('42+octocat@users.noreply.github.com');
+  });
+
+  it('reveals the identity form when git rejects the commit for a missing identity', async () => {
+    setup = status({ isRepo: true, root: 'G:/proj/a', branch: 'main', identity: { name: 'Mona', email: 'mona@example.com' } });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'git:branchesOverview') return Promise.resolve({ isRepo: true, base: 'main', branches: [], worktrees: [] });
+      if (channel === 'git:pullRequests') return Promise.resolve({ prs: [], fetchedAt: 1 });
+      if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: 1 });
+      if (channel === 'git:setupStatus') return Promise.resolve(setup);
+      if (channel === 'git:initialCommit') return Promise.resolve({ ok: false, output: 'Author identity unknown\n\n*** Please tell me who you are.' });
+      return Promise.resolve({});
+    });
+    render(<RightPanel session={session} />);
+    expect(await screen.findByText('Publish this repository to GitHub')).toBeTruthy();
+    // The probe says the identity is set, so the plain Commit button shows…
+    click('Commit');
+    // …but git's rejection swaps in the form so the user can fix it, without the raw error dump.
+    expect(await screen.findByLabelText('Your name')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/Please tell me who you are/)).toBeNull());
+  });
+
+  it('offers the credential fix when a push fails on auth', async () => {
+    setup = status({ isRepo: true, root: 'G:/proj/a', branch: 'main', hasCommits: true, remote: 'https://github.com/me/a.git', gh: ghReady });
+    invokeMock.mockImplementation((channel: string) => {
+      if (channel === 'git:branchesOverview') return Promise.resolve({ isRepo: true, base: 'main', branches: [], worktrees: [] });
+      if (channel === 'git:pullRequests') return Promise.resolve({ prs: [], fetchedAt: 1 });
+      if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: 1 });
+      if (channel === 'git:setupStatus') return Promise.resolve(setup);
+      if (channel === 'git:push') return Promise.resolve({ ok: false, output: "fatal: could not read Username for 'https://github.com': terminal prompts disabled" });
+      return Promise.resolve({});
+    });
+    render(<RightPanel session={session} />);
+    expect(await screen.findByText('Publish this repository to GitHub')).toBeTruthy();
+    click('Push to GitHub');
+    // Authenticated gh means the precise fix is setup-git, not another login.
+    expect(await screen.findByText('gh auth setup-git')).toBeTruthy();
   });
 
   it('is hidable so it does not nag', async () => {

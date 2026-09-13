@@ -2718,6 +2718,11 @@ body.resizing {
   border-top: 1px dashed var(--border);
   padding-top: 10px;
 }
+.setup-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .setup-how {
   margin: 0;
   padding-left: 18px;

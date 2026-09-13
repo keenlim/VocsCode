@@ -187,6 +187,10 @@ export interface IpcContract {
   'git:push': [{ sessionId: string }, { ok: boolean; output: string }];
   /** Creates a GitHub repository with gh, sets origin and pushes (needs an authenticated gh). */
   'git:createGitHubRepo': [{ sessionId: string; name: string; private: boolean }, { ok: boolean; url?: string; output?: string }];
+  /** Sets the git author identity so the first commit can be created; `global` writes the machine-wide config. */
+  'git:setIdentity': [{ sessionId: string; name: string; email: string; global: boolean }, { ok: boolean; error?: string }];
+  /** Reads the signed-in GitHub account's name and email (noreply when private) to prefill the identity. */
+  'git:githubIdentity': [{ sessionId: string }, { ok: boolean; login?: string; name?: string; email?: string; error?: string }];
   'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
   /** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
   'git:updateBranch': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];

@@ -415,20 +415,78 @@ async function ghAuthStatus(): Promise<GitSetupStatus['gh']> {
 export async function gitSetupStatus(cwd: string): Promise<GitSetupStatus> {
   const gh = await ghAuthStatus();
   const root = await gitRoot(cwd);
-  if (!root) return { isRepo: false, hasCommits: false, pushed: false, gh };
-  const [branch, head, remote] = await Promise.all([
+  if (!root) return { isRepo: false, hasCommits: false, pushed: false, identity: {}, gh };
+  const [branch, head, remote, nameCfg, emailCfg] = await Promise.all([
     git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
     git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']),
-    git(cwd, ['remote', 'get-url', 'origin'])
+    git(cwd, ['remote', 'get-url', 'origin']),
+    git(cwd, ['config', '--get', 'user.name']),
+    git(cwd, ['config', '--get', 'user.email'])
   ]);
   const branchName = branch.stdout.trim() || undefined;
   const hasCommits = head.code === 0;
   const remoteUrl = remote.code === 0 ? remote.stdout.trim() || undefined : undefined;
+  const name = nameCfg.code === 0 ? nameCfg.stdout.trim() || undefined : undefined;
+  const email = emailCfg.code === 0 ? emailCfg.stdout.trim() || undefined : undefined;
   let pushed = false;
   if (branchName && hasCommits && remoteUrl) {
     pushed = (await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchName}`])).code === 0;
   }
-  return { isRepo: true, root, ...(branchName ? { branch: branchName } : {}), hasCommits, ...(remoteUrl ? { remote: remoteUrl } : {}), pushed, gh };
+  return {
+    isRepo: true,
+    root,
+    ...(branchName ? { branch: branchName } : {}),
+    hasCommits,
+    ...(remoteUrl ? { remote: remoteUrl } : {}),
+    pushed,
+    identity: { ...(name ? { name } : {}), ...(email ? { email } : {}) },
+    gh
+  };
+}
+
+/** A value safe to pass to `git config <key> <value>`: non-empty, single-line, never option-looking. */
+const validConfigValue = (v: string): boolean => v.length > 0 && !/[\r\n\0]/.test(v) && !v.startsWith('-');
+
+/** Sets the git author identity on this repository (or the machine), so the first commit can be created. */
+export async function gitSetIdentity(cwd: string, name: string, email: string, global: boolean): Promise<{ ok: boolean; error?: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, error: 'Initialize git first.' };
+  const n = name.trim();
+  const e = email.trim();
+  if (!validConfigValue(n)) return { ok: false, error: 'Enter your name (one line, no leading dash).' };
+  if (!/^[^\s@]+@[^\s@]+$/.test(e) || !validConfigValue(e)) return { ok: false, error: 'Enter an email address like you@example.com.' };
+  const scope = global ? '--global' : '--local';
+  const entries: [string, string][] = [
+    ['user.name', n],
+    ['user.email', e]
+  ];
+  for (const [key, value] of entries) {
+    const r = await git(root, ['config', scope, key, value]);
+    if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() || `git config ${key} failed` };
+  }
+  return { ok: true };
+}
+
+/** The signed-in GitHub account's name and email (a noreply address when the profile email is private). */
+export async function gitGithubIdentity(cwd: string): Promise<{ ok: boolean; login?: string; name?: string; email?: string; error?: string }> {
+  if (!ghBin()) return { ok: false, error: 'GitHub CLI (gh) is not installed.' };
+  const auth = await ghAuthStatus();
+  if (!auth.authenticated) return { ok: false, error: 'Sign in to GitHub first — run `gh auth login`.' };
+  const r = await gh(cwd, ['api', 'user'], 20_000);
+  if (r.truncated) return { ok: false, error: 'GitHub profile response was truncated.' };
+  if (r.code !== 0) return { ok: false, error: (r.stderr || r.stdout).trim() || 'Could not read your GitHub profile.' };
+  try {
+    const u = JSON.parse(r.stdout) as { login?: string; name?: string | null; email?: string | null; id?: number };
+    const login = u.login?.trim() || undefined;
+    const name = u.name?.trim() || login;
+    let email = u.email?.trim() || undefined;
+    // GitHub hides the profile email when it is private; the ID-based noreply address is what GitHub
+    // itself suggests, and commits authored with it are attributed to the account.
+    if (!email && login && u.id) email = `${u.id}+${login}@users.noreply.github.com`;
+    return { ok: true, ...(login ? { login } : {}), ...(name ? { name } : {}), ...(email ? { email } : {}) };
+  } catch {
+    return { ok: false, error: 'GitHub returned something that is not JSON.' };
+  }
 }
 
 /** `git init` on the default branch `main`, with a fallback for git builds that predate `-b`. */

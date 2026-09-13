@@ -10,7 +10,7 @@ import { PUSH_CHANNELS } from '../shared/ipc';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
@@ -544,6 +544,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
+  handle('git:setIdentity', ({ sessionId, name, email, global }) => gitSetIdentity(cwdOf(sessionId), name, email, !!global));
+  handle('git:githubIdentity', ({ sessionId }) => gitGithubIdentity(cwdOf(sessionId)));
   handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
   handle('git:updateBranch', ({ sessionId, branch }) => gitUpdateBranch(cwdOf(sessionId), branch));
   // Only registered worktrees may be removed; `path` must match one git reports so the
