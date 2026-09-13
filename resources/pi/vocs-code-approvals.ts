@@ -44,6 +44,20 @@ interface PiLike {
   on(event: string, handler: (event: ToolCallEventLike, ctx: CtxLike) => Promise<unknown> | unknown): void;
 }
 
+interface ProviderRequestEventLike {
+  payload?: { reasoning?: { effort?: string } } & Record<string, unknown>;
+}
+
+interface EffortCtxLike {
+  model?: { provider?: string; id?: string };
+}
+
+interface EffortChoice {
+  provider?: string;
+  model?: string;
+  effort?: string;
+}
+
 const MARKER = 'VCODE_APPROVAL::';
 // Structured RPC notification, never inferred from model-visible error prose.
 const BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
@@ -132,6 +146,7 @@ async function isOutsideCwd(cwd: string | undefined, target: unknown): Promise<b
 }
 
 export default function vocsCodeApprovals(pi: PiLike): void {
+  installEffortOverride(pi);
   let mode: Mode = readModeFromEnv();
   const sessionAllowed = new Set<string>();
   const modeFile = process.env.VOCS_CODE_MODE_FILE;
@@ -197,6 +212,32 @@ export default function vocsCodeApprovals(pi: PiLike): void {
       return undefined;
     }
     return decline('The user declined this action in Vocs Code.');
+  });
+}
+
+/**
+ * Forward the host's reasoning effort to OpenRouter. pi clamps a level against the model's bundled
+ * thinking map first, and that map can lag OpenRouter's live catalog, so the host writes the level
+ * it wants here and this rewrites the provider payload for the matching model.
+ */
+function installEffortOverride(pi: PiLike): void {
+  const file = process.env.VOCS_CODE_EFFORT_FILE;
+  if (!file) return;
+  // `before_provider_request` is newer than the tool_call event typed above; pi accepts any event name.
+  const on = pi.on as unknown as (event: string, handler: (event: ProviderRequestEventLike, ctx: EffortCtxLike) => unknown) => void;
+  on('before_provider_request', async (event, ctx) => {
+    const reasoning = event.payload?.reasoning;
+    const model = ctx.model;
+    if (!reasoning || !model?.provider || !model.id) return undefined;
+    let choice: EffortChoice | null = null;
+    try {
+      const fs = await import('node:fs/promises');
+      choice = JSON.parse(await fs.readFile(file, 'utf8')) as EffortChoice | null;
+    } catch {
+      return undefined;
+    }
+    if (!choice?.effort || choice.provider !== model.provider || choice.model !== model.id) return undefined;
+    return { ...event.payload, reasoning: { ...reasoning, effort: choice.effort } };
   });
 }
 

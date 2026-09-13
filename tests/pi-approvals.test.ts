@@ -2,11 +2,11 @@
  * Offline tests for the pi approvals extension. When the host has no approval UI attached the
  * extension must fail closed and block the gated action (issue #126).
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
-import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
 
 type ToolCallHandler = (event: { toolName: string; toolCallId?: string; input: Record<string, unknown> }, ctx: object) => Promise<unknown>;
 
@@ -28,6 +28,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   delete process.env.VOCS_CODE_PERMISSION_MODE;
   delete process.env.VOCS_CODE_MODE_FILE;
+  delete process.env.VOCS_CODE_EFFORT_FILE;
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
@@ -143,5 +144,51 @@ describe('pi approval extension with a UI', () => {
       block: true,
       reason: expect.stringContaining('declined')
     });
+  });
+});
+
+type EffortHandler = (
+  event: { payload?: { reasoning?: { effort?: string } } & Record<string, unknown> },
+  ctx: { model?: { provider?: string; id?: string } }
+) => Promise<unknown>;
+
+function registerEffort(): EffortHandler {
+  let handler: EffortHandler | undefined;
+  const pi: Parameters<typeof vocsCodeApprovals>[0] = {
+    on: (event, h) => {
+      if (event === 'before_provider_request') handler = h as unknown as EffortHandler;
+    }
+  };
+  vocsCodeApprovals(pi);
+  if (!handler) throw new Error('before_provider_request handler was not registered');
+  return handler;
+}
+
+describe('pi reasoning-effort override', () => {
+  it('rewrites the effort only for the model the host chose', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-effort-'));
+    const file = path.join(dir, 'reasoning-effort.json');
+    await fs.writeFile(file, JSON.stringify({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', effort: 'max' }));
+    process.env.VOCS_CODE_EFFORT_FILE = file;
+    try {
+      const handler = registerEffort();
+      const event = { payload: { model: 'deepseek/deepseek-v4.1-flash', reasoning: { effort: 'xhigh' } } };
+      // pi clamped `max` to `xhigh`; the host's choice wins for the matching model.
+      await expect(handler(event, { model: { provider: 'openrouter', id: 'deepseek/deepseek-v4.1-flash' } })).resolves.toEqual({
+        model: 'deepseek/deepseek-v4.1-flash',
+        reasoning: { effort: 'max' }
+      });
+      // A different model, or a different provider, keeps pi's own mapping.
+      await expect(handler(event, { model: { provider: 'openrouter', id: 'openai/gpt-5' } })).resolves.toBeUndefined();
+      await expect(handler(event, { model: { provider: 'deepseek', id: 'deepseek/deepseek-v4.1-flash' } })).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the payload untouched when the host has no choice on disk', async () => {
+    process.env.VOCS_CODE_EFFORT_FILE = path.join(os.tmpdir(), 'pi-effort-missing.json');
+    const handler = registerEffort();
+    await expect(handler({ payload: { reasoning: { effort: 'high' } } }, { model: { provider: 'openrouter', id: 'x' } })).resolves.toBeUndefined();
   });
 });

@@ -103,6 +103,7 @@ export class PiAdapter implements HarnessAdapter {
   private extensionNonce = '';
   private extensionCapabilities = new Set<string>();
   private extensionFailure: string | null = null;
+  private effortFile: string | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -119,6 +120,7 @@ export class PiAdapter implements HarnessAdapter {
     this.exited = false;
     const meta = this.ctx.session();
     const s = this.ctx.settings();
+    const intendedEffort = this.ctx.effort();
     const bin = this.ctx.runtime.resolve('pi');
     if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
     const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
@@ -139,7 +141,7 @@ export class PiAdapter implements HarnessAdapter {
       if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
       args.push('--model', meta.config.model.model);
     }
-    const level = piThinkingLevel(this.ctx.effort());
+    const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
     // Pi accumulates this flag; separate arguments avoid introducing newlines into Windows cmd shims.
     if (meta.config.appendSystemPrompt) args.push('--append-system-prompt', meta.config.appendSystemPrompt);
@@ -148,7 +150,9 @@ export class PiAdapter implements HarnessAdapter {
 
     this.modeFile = path.join(sessionDir, 'permission-mode.txt');
     await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE: '1' };
+    this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
+    await this.writeEffortConfig(intendedEffort, meta.config.model);
+    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE: '1' };
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
       if (!env[envKey]) {
         const key = await this.ctx.getApiKey(pid);
@@ -185,6 +189,9 @@ export class PiAdapter implements HarnessAdapter {
     }
     if (state.sessionFile) this.ctx.updateRef({ piSessionFile: state.sessionFile });
     if (state.model) this.ctx.updateMeta({ activeModel: { provider: state.model.provider, model: state.model.id }, activeEffort: isEffortLevel(state.thinkingLevel) ? state.thinkingLevel : undefined });
+    // A resumed session can report a different model than the one on the session config; keep the
+    // effort file pointed at whatever pi actually loaded.
+    await this.writeEffortConfig(intendedEffort, state.model ? { provider: state.model.provider, model: state.model.id } : meta.config.model);
     this.ctx.emit({ type: 'status', status: 'idle' });
     void this.listModels().then((models) => models.length && this.ctx.emit({ type: 'models', models }));
   }
@@ -621,11 +628,32 @@ export class PiAdapter implements HarnessAdapter {
   async setModel(model: ModelRef): Promise<void> {
     await this.request('set_model', { provider: model.provider, modelId: model.model });
     this.ctx.updateMeta({ activeModel: model });
+    await this.writeEffortConfig(this.ctx.effort(), model);
   }
 
   async setEffort(effort: EffortLevel): Promise<void> {
     await this.request('set_thinking_level', { level: piThinkingLevel(effort) });
     this.ctx.updateMeta({ activeEffort: effort });
+    await this.writeEffortConfig(effort, this.ctx.session().activeModel);
+  }
+
+  /**
+   * Persist the effort the user chose so the bundled extension can forward it to OpenRouter. pi
+   * clamps a level against the model's bundled map before each request, and that map can lag
+   * OpenRouter's live catalog (it hides `low`/`max` and promotes `max` to `xhigh` for DeepSeek).
+   * Only levels the live catalog advertises are written; anything else clears the file so pi's own
+   * mapping stands.
+   */
+  private async writeEffortConfig(effort: EffortLevel | undefined, model: ModelRef | undefined): Promise<void> {
+    if (!this.effortFile) return;
+    const provider = model ? this.ctx.settings().providers.find((p) => p.kind === 'openrouter' && p.id === model.provider) : undefined;
+    const supported = provider?.models.find((m) => m.id === model?.model)?.supportedEfforts;
+    const payload = model && effort && supported?.includes(effort) ? { provider: model.provider, model: model.model, effort } : null;
+    try {
+      await fs.writeFile(this.effortFile, JSON.stringify(payload), 'utf8');
+    } catch (e) {
+      this.ctx.log('warn', `failed to write pi reasoning effort file: ${errorMessage(e)}`);
+    }
   }
 
   async setPermissionMode(mode: PermissionMode): Promise<void> {
