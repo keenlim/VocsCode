@@ -252,8 +252,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       let item = this.items.get(n.itemId);
       if (!item) {
         item = { id: n.itemId, kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, phase: 'commentary' };
-        this.items.set(n.itemId, item);
-        this.ctx.emit({ type: 'item.upsert', item });
+        this.upsert(item);
       }
       if (item.kind === 'assistant') {
         item.thinking = (item.thinking ?? '') + n.delta;
@@ -571,10 +570,17 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       default:
         out = { id: item.id, kind: 'info', ts, level: 'info', text: `${item.type}: ${truncate(JSON.stringify(item), 500, '…')}` };
     }
-    if (out) {
-      this.items.set(item.id, out);
-      this.ctx.emit({ type: 'item.upsert', item: out });
-    }
+    if (out) this.upsert(out);
+  }
+
+  /**
+   * Keep the adapter's live item locally and emit a snapshot of it. The session manager owns the
+   * emitted item and mutates it as deltas stream, so handing it this map's object would apply
+   * every delta (reasoning text, command output) twice.
+   */
+  private upsert(item: TranscriptItem): void {
+    this.items.set(item.id, item);
+    this.ctx.emit({ type: 'item.upsert', item: { ...item } });
   }
 
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
