@@ -191,7 +191,7 @@ export class RelayClient {
     const sealed = await sealFrame(this.session.key, this.session.salt, ++this.outCounter, inner);
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.socket?.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
+        this.socket?.send(JSON.stringify({ t: 'd', seq: sealed.seq, payload: sealed }));
       setTimeout(() => {
         if (this.pending.delete(id)) reject(new Error('invoke timed out'));
       }, 30_000);

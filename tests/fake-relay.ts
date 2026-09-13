@@ -120,7 +120,9 @@ export class FakeRelay {
     }
     if (meta.role === 'host') {
       for (const [peer, peerMeta] of this.sockets) {
-        if (peerMeta.role === 'client' && peerMeta.id === msg.to) peer.send(JSON.stringify({ t: msg.t, from: meta.id, seq: msg.seq, payload: msg.payload }));
+        if (peerMeta.role === 'client' && peerMeta.id === msg.to) {
+          peer.send(JSON.stringify({ t: msg.t, from: meta.id, seq: msg.seq, payload: msg.payload }));
+        }
       }
       return;
     }

@@ -9,7 +9,9 @@ import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
 import type { Logger } from '../log';
 
-/** Channels a paired web client may invoke (§5; terminal joins in P3.5, mutations stay local). */
+/** Channels a paired web client may invoke (docs/REMOTE-ACCESS.md §5). Interactive P3:
+ *  chat send/interrupt/stop, session lifecycle and per-session model controls are in;
+ *  the terminal joins in P3.5 and destructive git stays desktop-only. */
 export const REMOTE_CHANNELS = new Set<string>([
   'app:info',
   'settings:get',
@@ -19,6 +21,14 @@ export const REMOTE_CHANNELS = new Set<string>([
   'sessions:get',
   'sessions:transcript',
   'sessions:search',
+  'sessions:send',
+  'sessions:interrupt',
+  'sessions:stop',
+  'sessions:create',
+  'sessions:rename',
+  'sessions:setModel',
+  'sessions:setEffort',
+  'sessions:setPermissionMode',
   'approvals:respond',
   'analytics:summary',
   'skills:list',
