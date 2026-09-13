@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
 import { PUSH_CHANNELS } from '../src/shared/ipc';
+import { agentChannels } from '../src/shared/agent-manifest';
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SecretStore } from '../src/main/secrets';
@@ -129,6 +130,14 @@ describe('handler registry', () => {
     for (const c of ['sessions:list', 'settings:get', 'terminal:input', 'git:summary', 'fs:read', 'approvals:respond', 'analytics:summary', 'window:zoom']) {
       expect(channels).toContain(c);
     }
+  });
+
+  it('serves every channel Agatho is allowed to reach', () => {
+    // A capability naming a channel that does not exist would fail silently at runtime,
+    // as a tool the model keeps calling and that always errors.
+    const { registry } = stubDeps();
+    const channels = registry.channels();
+    for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
   });
 
   it('round-trips settings and pushes settingsChanged', async () => {

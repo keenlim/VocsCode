@@ -218,7 +218,25 @@ export function defaultSettings(): AppSettings {
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
+    agent: { enabled: true },
     gitSetupSkipped: []
+  };
+}
+
+function normalizeModelRef(stored: unknown): ModelRef | undefined {
+  const m = stored as Partial<ModelRef> | undefined;
+  return m && typeof m.provider === 'string' && typeof m.model === 'string' ? { provider: m.provider, model: m.model } : undefined;
+}
+
+/** Agatho's panel placement; a hand-edited or stale position must not push it off screen. */
+function normalizeAgentSettings(stored: unknown): AppSettings['agent'] {
+  const a = (stored ?? {}) as Record<string, unknown>;
+  const coord = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : undefined);
+  return {
+    enabled: a.enabled === false ? false : true,
+    x: coord(a.x),
+    y: coord(a.y),
+    collapsed: a.collapsed !== false
   };
 }
 
@@ -344,10 +362,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     favoriteModels: Array.isArray(stored.favoriteModels)
       ? stored.favoriteModels.filter((m): m is ModelRef => !!m && typeof m.provider === 'string' && typeof m.model === 'string')
       : [],
-    utilityModel:
-      stored.utilityModel && typeof stored.utilityModel.provider === 'string' && typeof stored.utilityModel.model === 'string'
-        ? { provider: stored.utilityModel.provider, model: stored.utilityModel.model }
-        : undefined,
+    utilityModel: normalizeModelRef(stored.utilityModel),
+    agentModel: normalizeModelRef(stored.agentModel),
+    agent: normalizeAgentSettings(stored.agent),
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     mcpServers: normalizeMcpServers(stored.mcpServers),
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),

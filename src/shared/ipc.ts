@@ -40,6 +40,7 @@ import type {
   TranscriptItem,
   UserInput
 } from './types';
+import type { AgentClientContext, AgentState } from './agent';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
@@ -149,6 +150,15 @@ export interface IpcContract {
     SessionMeta
   ];
 
+  /** Agatho, the in-app assistant. Its reach is the allowlist in shared/agent-manifest.ts, not this contract. */
+  'agent:state': [void, AgentState];
+  /** Sends a message; the reply streams back over `push:agentState`. */
+  'agent:send': [{ text: string; context?: AgentClientContext }, void];
+  'agent:cancel': [void, void];
+  /** Applies or declines a pending proposal (a batch of gated capability calls). */
+  'agent:resolve': [{ proposalId: string; approve: boolean }, void];
+  'agent:reset': [void, void];
+
   'analytics:summary': [{ days?: number } | void, AnalyticsSummary];
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
@@ -235,6 +245,7 @@ export const PUSH_CHANNELS = {
   focusSession: 'push:focusSession',
   terminalData: 'push:terminalData',
   terminalsChanged: 'push:terminalsChanged',
+  agentState: 'push:agentState',
   remoteState: 'push:remoteState'
 } as const;
 
@@ -246,6 +257,8 @@ export type PushPayloads = {
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
   'push:terminalData': { terminalId: string; seq: number; data: string };
   'push:terminalsChanged': TerminalInfo[];
+  /** Agatho's whole transcript; the list is short, so state is replaced rather than patched. */
+  'push:agentState': AgentState;
   'push:remoteState': RemoteState;
 };
 

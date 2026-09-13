@@ -31,6 +31,13 @@ export interface WebServerOptions {
 
 type InvokeFrame = { type: 'invoke'; id: number; channel: string; request: unknown };
 
+/** Channels a remote client may not reach, whatever the transport allows locally.
+ *  `agent:*` drives Agatho, which invokes the registry on the model's behalf: forwarding it
+ *  would let a browser client launch app actions through an LLM. Exported for the tests. */
+export function isRemoteBlocked(channel: string): boolean {
+  return channel.startsWith('agent:');
+}
+
 export class WebServer {
   private readonly opts: WebServerOptions;
   private server: Server | null = null;
@@ -167,6 +174,11 @@ export class WebServer {
       }
       if (!frame || frame.type !== 'invoke' || typeof frame.channel !== 'string' || typeof frame.id !== 'number') {
         this.opts.log('debug', `web client: dropped a malformed frame (type=${String((frame as { type?: unknown } | null)?.type)})`);
+        return;
+      }
+      if (isRemoteBlocked(frame.channel)) {
+        this.opts.log('warn', `web client blocked from ${frame.channel}`);
+        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'result', id: frame.id, ok: false, error: `Channel ${frame.channel} is not available to remote clients` }));
         return;
       }
       void this.opts.registry

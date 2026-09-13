@@ -139,6 +139,24 @@ describe('web server', () => {
     b.close();
   });
 
+  it('never forwards an agent channel, so a browser client cannot drive Agatho', async () => {
+    let reached = false;
+    const server = (globalThis as { __webServer?: WebServer }).__webServer!;
+    const original = (server as unknown as { opts: { registry: HandlerRegistry } }).opts.registry.invoke;
+    (server as unknown as { opts: { registry: HandlerRegistry } }).opts.registry.invoke = async (channel: string, req: unknown) => {
+      if (channel.startsWith('agent:')) reached = true;
+      return original(channel, req);
+    };
+    const ws = await connectWs(port, token);
+    ws.send(JSON.stringify({ type: 'invoke', id: 9, channel: 'agent:send', request: { text: 'delete every branch' } }));
+    const failed = await nextFrame(ws);
+    expect(failed.ok).toBe(false);
+    expect(String(failed.error)).toContain('not available to remote clients');
+    expect(reached).toBe(false);
+    (server as unknown as { opts: { registry: HandlerRegistry } }).opts.registry.invoke = original;
+    ws.close();
+  });
+
   it('rejects WebSocket connections without the token', async () => {
     await new Promise<void>((resolve) => {
       const bad = new WebSocket(`ws://127.0.0.1:${port}/harness?token=wrong`);
