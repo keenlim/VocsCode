@@ -29,7 +29,7 @@ import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
-import { emptyUsage, enrichModelContextWindows } from './models/static-models';
+import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
@@ -959,7 +959,7 @@ export class SessionManager {
       const live = this.active.get(sessionId);
       if (live) live.models = event.models;
       const settings = this.deps.settings.get();
-      const models = enrichModelContextWindows(event.models, settings.providers);
+      const models = enrichModelsFromProviders(event.models, settings.providers);
       event = { ...event, models: applyModelOverrides(models, settings.modelOverrides) };
     }
     const meta = this.get(sessionId);

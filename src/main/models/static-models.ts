@@ -74,13 +74,26 @@ function m(provider: string, id: string, displayName: string, contextWindow: num
   };
 }
 
-/** Fill sparse harness catalogs from the matching provider cache or the built-in catalog. */
-export function enrichModelContextWindows(models: ModelInfo[], providers: ProviderConfig[]): ModelInfo[] {
-  const providerModels = new Map(providers.map((p) => [p.id, p.models]));
+/**
+ * Fill sparse harness catalogs from the matching provider cache or the built-in catalog. Context
+ * windows fall back to any provider; reasoning levels come from OpenRouter, whose live API advertises
+ * the exact levels a model accepts and can be newer than a harness's bundled `thinkingLevelMap`.
+ */
+export function enrichModelsFromProviders(models: ModelInfo[], providers: ProviderConfig[]): ModelInfo[] {
+  const byId = new Map(providers.map((p) => [p.id, p]));
+  const routers = new Set(providers.filter((p) => p.kind === 'openrouter').map((p) => p.id));
   return models.map((model) => {
-    if (validContextWindow(model.contextWindow)) return model;
-    const contextWindow = findContextWindow(model.provider, model.id, providerModels.get(model.provider));
-    return contextWindow ? { ...model, contextWindow } : model;
+    const provider = byId.get(model.provider);
+    let enriched = model;
+    if (!validContextWindow(enriched.contextWindow)) {
+      const contextWindow = findContextWindow(enriched.provider, enriched.id, provider?.models);
+      if (contextWindow) enriched = { ...enriched, contextWindow };
+    }
+    if (routers.has(enriched.provider)) {
+      const live = provider?.models.find((m) => m.id === enriched.id);
+      if (live?.supportedEfforts?.length) enriched = { ...enriched, supportedEfforts: live.supportedEfforts, defaultEffort: live.defaultEffort ?? enriched.defaultEffort };
+    }
+    return enriched;
   });
 }
 
