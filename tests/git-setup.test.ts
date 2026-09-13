@@ -11,7 +11,7 @@ const { which, runCapture } = vi.hoisted(() => ({ which: vi.fn(), runCapture: vi
 
 vi.mock('../src/main/runtime', () => ({ which, runCapture }));
 
-import { gitCreateGitHubRepo, gitInit, gitInitialCommit, gitPush, gitSetRemote, gitSetupStatus, isRemoteUrl } from '../src/main/git';
+import { gitCreateGitHubRepo, gitGithubIdentity, gitInit, gitInitialCommit, gitPush, gitSetIdentity, gitSetRemote, gitSetupStatus, isRemoteUrl } from '../src/main/git';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
 
 const GIT = '/usr/bin/git';
@@ -63,6 +63,7 @@ describe('gitSetupStatus', () => {
       isRepo: false,
       hasCommits: false,
       pushed: false,
+      identity: {},
       gh: { installed: true, authenticated: true, account: 'octocat' }
     });
   });
@@ -79,6 +80,7 @@ describe('gitSetupStatus', () => {
       branch: 'main',
       hasCommits: false,
       pushed: false,
+      identity: {},
       gh: { installed: true, authenticated: false }
     });
   });
@@ -105,6 +107,17 @@ describe('gitSetupStatus', () => {
     gitReply(['remote', 'get-url', 'origin'], { code: 0, stdout: 'git@github.com:you/project.git' });
     gitReply(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/main'], { code: 1 });
     expect((await gitSetupStatus('C:/project')).pushed).toBe(false);
+  });
+
+  it('reports the configured identity so the commit step can skip asking', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project' });
+    ghReply(['auth', 'status'], { code: 1 });
+    gitReply(['symbolic-ref', '--quiet', '--short', 'HEAD'], { code: 0, stdout: 'main' });
+    gitReply(['rev-parse', '--verify', '--quiet', 'HEAD'], { code: 0, stdout: 'abc' });
+    gitReply(['remote', 'get-url', 'origin'], { code: 2 });
+    gitReply(['config', '--get', 'user.name'], { code: 0, stdout: 'Mona Lisa\n' });
+    gitReply(['config', '--get', 'user.email'], { code: 0, stdout: 'mona@example.com\n' });
+    expect((await gitSetupStatus('C:/project')).identity).toEqual({ name: 'Mona Lisa', email: 'mona@example.com' });
   });
 
   it('reports gh as missing without probing auth', async () => {
@@ -293,6 +306,68 @@ describe('gitCreateGitHubRepo', () => {
     const r = await gitCreateGitHubRepo('C:/project', 'project', false);
     expect(r.ok).toBe(false);
     expect(r.output).toMatch(/already exists/);
+  });
+});
+
+describe('gitSetIdentity', () => {
+  it('refuses outside a repository and validates the values', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 128 });
+    expect(await gitSetIdentity('/project', 'Mona', 'mona@example.com', false)).toEqual({ ok: false, error: 'Initialize git first.' });
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project' });
+    expect((await gitSetIdentity('C:/project', '', 'mona@example.com', false)).ok).toBe(false);
+    expect((await gitSetIdentity('C:/project', '-rf', 'mona@example.com', false)).ok).toBe(false);
+    expect((await gitSetIdentity('C:/project', 'Mona', 'not-an-email', false)).ok).toBe(false);
+    expect(runCapture).not.toHaveBeenCalledWith(GIT, ['config', '--local', 'user.name', '-rf'], expect.anything());
+  });
+
+  it('writes the identity locally by default and globally on request', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project' });
+    gitReply(['config', '--local', 'user.name', 'Mona Lisa'], { code: 0 });
+    gitReply(['config', '--local', 'user.email', 'mona@example.com'], { code: 0 });
+    expect(await gitSetIdentity('C:/project', 'Mona Lisa', 'mona@example.com', false)).toEqual({ ok: true });
+
+    replies.clear();
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project' });
+    gitReply(['config', '--global', 'user.name', 'Mona Lisa'], { code: 0 });
+    gitReply(['config', '--global', 'user.email', 'mona@example.com'], { code: 0 });
+    expect(await gitSetIdentity('C:/project', 'Mona Lisa', 'mona@example.com', true)).toEqual({ ok: true });
+    expect(runCapture).toHaveBeenCalledWith(GIT, ['config', '--global', 'user.email', 'mona@example.com'], expect.anything());
+  });
+
+  it('surfaces a failing git config', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project' });
+    gitReply(['config', '--local', 'user.name', 'Mona Lisa'], { code: 128, stderr: 'could not lock config file' });
+    expect(await gitSetIdentity('C:/project', 'Mona Lisa', 'mona@example.com', false)).toEqual({ ok: false, error: 'could not lock config file' });
+  });
+});
+
+describe('gitGithubIdentity', () => {
+  it('needs gh and a signed-in account', async () => {
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : null));
+    expect((await gitGithubIdentity('/project')).error).toMatch(/not installed/);
+    which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? GH : null));
+    ghReply(['auth', 'status'], { code: 1 });
+    expect((await gitGithubIdentity('/project')).error).toMatch(/Sign in/);
+  });
+
+  it('returns the profile name and email', async () => {
+    ghReply(['auth', 'status'], { code: 0, stdout: 'Logged in to github.com account octocat' });
+    ghReply(['api', 'user'], { code: 0, stdout: JSON.stringify({ login: 'octocat', name: 'Mona Lisa', email: 'mona@example.com', id: 1 }) });
+    expect(await gitGithubIdentity('/project')).toEqual({ ok: true, login: 'octocat', name: 'Mona Lisa', email: 'mona@example.com' });
+  });
+
+  it('falls back to the ID-based noreply address when the profile email is private', async () => {
+    ghReply(['auth', 'status'], { code: 0, stdout: 'Logged in to github.com account octocat' });
+    ghReply(['api', 'user'], { code: 0, stdout: JSON.stringify({ login: 'octocat', name: null, email: null, id: 42 }) });
+    expect(await gitGithubIdentity('/project')).toEqual({ ok: true, login: 'octocat', name: 'octocat', email: '42+octocat@users.noreply.github.com' });
+  });
+
+  it('surfaces a non-JSON or failing profile response', async () => {
+    ghReply(['auth', 'status'], { code: 0, stdout: 'Logged in to github.com account octocat' });
+    ghReply(['api', 'user'], { code: 0, stdout: 'not json' });
+    expect((await gitGithubIdentity('/project')).error).toMatch(/not JSON/);
+    ghReply(['api', 'user'], { code: 1, stderr: 'HTTP 401' });
+    expect((await gitGithubIdentity('/project')).error).toMatch(/401/);
   });
 });
 

@@ -9,7 +9,7 @@ import type { GitSetupStatus, SessionMeta } from '../../../shared/types';
 import { invoke, platform } from '../api';
 import { useStore } from '../store';
 import * as host from '../terminal/host';
-import { Badge, Button, Icon, Spinner } from './ui';
+import { Badge, Button, Icon, Spinner, Toggle } from './ui';
 
 /** Stable fallback so the zustand selector never returns a fresh array. */
 const EMPTY: string[] = [];
@@ -20,6 +20,9 @@ const GH_INSTALL: Record<string, string> = {
   darwin: 'brew install gh',
   linux: 'sudo apt install gh'
 };
+
+/** git's own words when `user.name`/`user.email` are unset; the commit step replaces them with a form. */
+const IDENTITY_ERROR = /author identity unknown|unable to auto-detect email address|please tell me who you are|empty ident name|no email was given/i;
 
 const ghInstallCommand = (): string | undefined => GH_INSTALL[platform];
 
@@ -62,6 +65,14 @@ export function GitSetup({
   const [repoName, setRepoName] = useState(() => repoNameFor(session.cwd));
   const [isPrivate, setIsPrivate] = useState(true);
   const [remoteUrl, setRemoteUrl] = useState('');
+  /** Git author identity, collected here because a fresh machine has no user.name/user.email set. */
+  const [identName, setIdentName] = useState('');
+  const [identEmail, setIdentEmail] = useState('');
+  const [globalIdentity, setGlobalIdentity] = useState(false);
+  /** Set when git rejects a commit for a missing identity, so the form appears even if the probe missed it. */
+  const [identityFallback, setIdentityFallback] = useState(false);
+  /** True when the user chose to change an identity that is already configured. */
+  const [editIdentity, setEditIdentity] = useState(false);
   /** The session this instance belongs to; responses from other sessions are dropped. */
   const liveId = useRef(session.id);
 
@@ -86,8 +97,20 @@ export function GitSetup({
     setCommitMsg('Initial commit');
     setRepoName(repoNameFor(session.cwd));
     setRemoteUrl('');
+    setIdentName('');
+    setIdentEmail('');
+    setGlobalIdentity(false);
+    setIdentityFallback(false);
+    setEditIdentity(false);
     void load();
   }, [session.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The identity is machine/repo state that arrives with the status; keep whatever the user typed.
+  useEffect(() => {
+    if (!status?.isRepo) return;
+    setIdentName((v) => v || status.identity.name || '');
+    setIdentEmail((v) => v || status.identity.email || '');
+  }, [status]);
 
   const root = status?.root ?? session.cwd;
   const dismissed = skipped.includes(root);
@@ -99,10 +122,21 @@ export function GitSetup({
     try {
       const r = await fn();
       if (!r.ok) {
-        const message = r.error ?? r.output ?? 'Something went wrong';
-        setProblem(message);
-        toast(message, 'error');
+        const raw = r.error ?? r.output ?? '';
+        if (IDENTITY_ERROR.test(raw)) {
+          setIdentityFallback(true);
+          setProblem(null);
+          toast('Git needs a name and email before it can commit — fill them in below.', 'info');
+        } else {
+          const message = raw || 'Something went wrong';
+          setProblem(message);
+          toast(message, 'error');
+        }
       } else {
+        if (key === 'commit' || key === 'identity') {
+          setIdentityFallback(false);
+          setEditIdentity(false);
+        }
         toast(success, 'success');
         await load();
         onChanged?.();
@@ -117,6 +151,44 @@ export function GitSetup({
   };
 
   const copy = (text: string, label = 'Copied') => void navigator.clipboard.writeText(text).then(() => toast(label, 'success')).catch(() => undefined);
+
+  /** Fills the identity fields from the signed-in GitHub account (a noreply address when the email is private). */
+  const fillFromGitHub = async () => {
+    setBusy('identity');
+    try {
+      const r = await invoke('git:githubIdentity', { sessionId: session.id });
+      if (!r.ok) {
+        toast(r.error ?? 'Could not read your GitHub profile', 'error');
+        return;
+      }
+      if (r.name) setIdentName(r.name);
+      if (r.email) setIdentEmail(r.email);
+      toast('Filled from your GitHub account', 'success');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      if (liveId.current === session.id) setBusy(null);
+    }
+  };
+
+  /** Saves the identity first when it is missing (or being changed), then creates the first commit. */
+  const doCommit = () => {
+    const message = commitMsg.trim();
+    if (!message) return;
+    if (identityForm) {
+      void run(
+        'identity',
+        async () => {
+          const set = await invoke('git:setIdentity', { sessionId: session.id, name: identName, email: identEmail, global: globalIdentity });
+          if (!set.ok) return set;
+          return invoke('git:initialCommit', { sessionId: session.id, message });
+        },
+        'Author saved and first commit created'
+      );
+    } else {
+      void run('commit', () => invoke('git:initialCommit', { sessionId: session.id, message }), 'Initial commit created');
+    }
+  };
 
   /** Opens a terminal and types the command in, for steps that are interactive (gh login, installers). */
   const runInTerminal = (command: string) => {
@@ -149,6 +221,10 @@ export function GitSetup({
   const open = done.findIndex((d) => !d);
   const webUrl = remote ? remoteWebUrl(remote) : undefined;
   const showManual = manualOpen || !status.gh.authenticated;
+  const hasIdentity = !!status.identity.name && !!status.identity.email;
+  const identityForm = identityFallback || !hasIdentity || editIdentity;
+  /** git's credential failures get a one-command fix rather than a wall of stderr. */
+  const credentialProblem = !!problem && /could not read Username|authentication failed|terminal prompts disabled|Permission denied \(publickey\)|\b403\b/i.test(problem);
 
   return (
     <div className={`git-setup ${variant === 'banner' ? 'git-setup-banner' : ''}`}>
@@ -187,22 +263,48 @@ export function GitSetup({
       </Step>
 
       <Step n={2} title="Create the first commit" state={done[1] ? 'done' : open === 1 ? 'active' : 'pending'}>
-        <p className="setup-note">Commits everything currently in the folder, so there is something to push.</p>
+        {identityForm ? (
+          <div className="setup-identity">
+            <p className="setup-note">
+              Git signs every commit with a name and email, and this machine has none set yet — that is what stopped the first commit. Tell git who you are (only a
+              name and address are stored locally; nothing is uploaded).
+            </p>
+            <div className="setup-row">
+              <input aria-label="Your name" placeholder="Your name" value={identName} onChange={(e) => setIdentName(e.target.value)} />
+              <input aria-label="Your email" placeholder="you@example.com" value={identEmail} onChange={(e) => setIdentEmail(e.target.value)} />
+            </div>
+            {status.gh.authenticated && (
+              <div className="setup-actions">
+                <Button size="sm" variant="ghost" icon="sparkles" disabled={busy !== null} onClick={() => void fillFromGitHub()}>
+                  {busy === 'identity' ? <Spinner size={12} /> : `Use my GitHub account${status.gh.account ? ` (@${status.gh.account})` : ''}`}
+                </Button>
+              </div>
+            )}
+            <Toggle checked={globalIdentity} onChange={setGlobalIdentity} label="Use for all repositories on this machine" />
+          </div>
+        ) : (
+          <p className="setup-note">
+            Commits everything in the folder as <strong>{status.identity.name}</strong> &lt;{status.identity.email}&gt;.{' '}
+            <button type="button" className="link-btn" onClick={() => setEditIdentity(true)}>
+              Change
+            </button>
+          </p>
+        )}
         <div className="setup-row">
           <input
             value={commitMsg}
             placeholder="Commit message"
             aria-label="Commit message"
             onChange={(e) => setCommitMsg(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && commitMsg.trim() && void run('commit', () => invoke('git:initialCommit', { sessionId: session.id, message: commitMsg }), 'Initial commit created')}
+            onKeyDown={(e) => e.key === 'Enter' && doCommit()}
           />
           <Button
             variant="primary"
             icon="check"
-            disabled={busy !== null || !commitMsg.trim()}
-            onClick={() => void run('commit', () => invoke('git:initialCommit', { sessionId: session.id, message: commitMsg }), 'Initial commit created')}
+            disabled={busy !== null || !commitMsg.trim() || (identityForm && (!identName.trim() || !identEmail.trim()))}
+            onClick={doCommit}
           >
-            {busy === 'commit' ? <Spinner size={12} /> : 'Commit'}
+            {busy === 'identity' || busy === 'commit' ? <Spinner size={12} /> : identityForm ? 'Save and commit' : 'Commit'}
           </Button>
         </div>
       </Step>
@@ -306,6 +408,7 @@ export function GitSetup({
               Pushes <code>{branch}</code> to <code>origin</code> and remembers it as the upstream branch.
             </p>
             <CommandRow command={`git push -u origin ${branch}`} onCopy={copy} />
+            {credentialProblem && <CommandRow command={status.gh.authenticated ? 'gh auth setup-git' : 'gh auth login'} onCopy={copy} onRun={runInTerminal} />}
             <div className="setup-actions">
               <Button variant="primary" icon="cloud" disabled={busy !== null} onClick={() => void run('push', () => invoke('git:push', { sessionId: session.id }), 'Pushed to GitHub')}>
                 {busy === 'push' ? <Spinner size={12} /> : pushed ? 'Push again' : 'Push to GitHub'}
@@ -316,9 +419,18 @@ export function GitSetup({
                 </Button>
               )}
             </div>
-            {!pushed && !status.gh.authenticated && (
+            {!pushed && (
               <p className="setup-note">
-                If git asks for credentials, run <code>gh auth login</code> in the terminal first — it signs git in too.
+                If git asks for credentials,{' '}
+                {status.gh.authenticated ? (
+                  <>
+                    run <code>gh auth setup-git</code> — it tells git to use your GitHub login.
+                  </>
+                ) : (
+                  <>
+                    run <code>gh auth login</code> in the terminal first — it signs git in too.
+                  </>
+                )}
               </p>
             )}
           </>

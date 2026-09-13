@@ -198,7 +198,9 @@ describe('handler registry', () => {
       ['git:initialCommit', { message: 'Initial commit' }],
       ['git:setRemote', { url: 'https://github.com/you/project.git' }],
       ['git:push', {}],
-      ['git:createGitHubRepo', { name: 'project', private: true }]
+      ['git:createGitHubRepo', { name: 'project', private: true }],
+      ['git:setIdentity', { name: 'Mona', email: 'mona@example.com', global: false }],
+      ['git:githubIdentity', {}]
     ];
     for (const [channel, extra] of guided) {
       await expect(registry.invoke(channel, { sessionId: 's_nope', ...extra })).rejects.toThrow('Session not found');

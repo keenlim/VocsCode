@@ -55,9 +55,10 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
     env.VOCS_CODE_USER_DATA = userData;
     env.VOCS_CODE_DEBUG = '1';
-    // The guided setup's first commit must work on a machine with no global git identity, like CI.
-    env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = 'Vocs Code E2E';
-    env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = 'e2e@example.com';
+    // Isolate git's global/system config so the guided "tell git who you are" step is deterministic
+    // even on a machine that already has a user.name (CI runners, dev boxes).
+    env.GIT_CONFIG_GLOBAL = path.join(tmp, 'gitconfig');
+    env.GIT_CONFIG_NOSYSTEM = '1';
 
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
@@ -99,7 +100,12 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.waitForSelector('.git-setup-banner', { timeout: 20_000 });
       expect(await win.locator('.git-setup-banner .git-setup-title').innerText()).toBe('Publish this repository to GitHub');
       await fs.stat(path.join(project, '.git')); // the repository exists on disk, not just in the UI
-      await win.click('.git-setup-banner button:has-text("Commit")');
+
+      // With no global git identity, the commit step must ask for a name and email instead of
+      // surfacing git's "Author identity unknown" — and the commit must carry them.
+      await win.getByLabel('Your name').fill('Vocs Code E2E');
+      await win.getByLabel('Your email').fill('e2e@example.com');
+      await win.click('.git-setup-banner button:has-text("Save and commit")');
       await expect
         .poll(
           () => {
@@ -112,6 +118,7 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
           { timeout: 20_000 }
         )
         .toBe(true);
+      expect(execFileSync('git', ['-C', project, 'log', '-1', '--format=%an <%ae>'], { stdio: 'pipe' }).toString().trim()).toBe('Vocs Code E2E <e2e@example.com>');
       expect(await win.locator('.git-setup-banner').innerText()).toContain('Connect a GitHub repository');
 
       // A `!` draft with no terminal yet opens one and runs the command there; the agent is not involved.
