@@ -2,9 +2,11 @@
 
 Status: **P0 shipped.** Global MCP servers have a sidebar page ("MCP", beside Skills);
 repo-level servers have a right-panel tab reading `<repo>/.mcp.json`. The effective set is
-injected into Claude, both Codex adapters and ACP agents; Cursor gets import/export; pi is
-marked unsupported. "Test connection" runs the app's own MCP client. §10 lists what P1 and
-P2 still hold — the native loop's client mode, live status, write-back to harness stores.
+injected into Claude, both Codex adapters, ACP agents and pi (through the bundled
+`vocs-code-mcp` extension); Cursor gets import/export. "Test connection" runs the app's own
+MCP client. GitNexus ships as a built-in server, on by default in every repo and scoped
+strictly to that repo's index (§13). §10 lists what P1 and P2 still hold — the native loop's
+client mode, live status, write-back to harness stores.
 
 ## 1. The idea
 
@@ -89,7 +91,7 @@ An inventory of the seams, so the plan can be sized honestly.
 | Codex exec SDK | `new Codex({...})` in `codex-exec.ts:57` | `CodexOptions.config: CodexConfigObject` — flattened to `--config key=value`; `ThreadOptions` has no MCP field |
 | ACP | the two `mcpServers: []` literals | `McpServerStdio { name, command, args, env: [{name,value}] }`, `McpServerHttp`/`McpServerSse` if `agentCapabilities.mcpCapabilities.http/sse` |
 | Native loop | `NATIVE_TOOLS` at `native/index.ts:154,241` | a plain `NativeToolDef[]` whose `parameters` is JSON Schema — the same shape as an MCP tool's `inputSchema` |
-| Pi | `pi.ts:96` argv | pi 0.85.1 has no MCP flag or config; extensions (`resources/pi/`) can register tools |
+| Pi | `pi.ts` argv + bundled extensions | pi 0.85.1 has no MCP flag or config; the bundled `vocs-code-mcp` extension connects to each server and registers its tools with pi |
 | Cursor | none | `@cursor/sdk` has no MCP option; the Cursor runtime reads `~/.cursor/mcp.json` and `<repo>/.cursor/mcp.json` itself |
 
 ## 4. Data model
@@ -126,6 +128,10 @@ mcpProjectState?: Record<string, {
   disabledGlobal?: string[];
   /** Repo-file server ids the user has enabled here (off until enabled, §8). */
   enabledRepo?: string[];
+  /** Built-in server ids switched off for this repo. */
+  disabledBuiltin?: string[];
+  /** GitNexus only: share this repo's index with sessions in other repos (§13). */
+  gitnexusGlobal?: boolean;
 }>;
 ```
 
@@ -224,12 +230,13 @@ through the existing `gateAction` permission gate, and reports `hint: 'mcp'`. El
 and sampling requests from servers route to `ctx.requestApproval`. The same client
 powers "Test connection" on both UI surfaces, so it is worth building first (§10).
 
-**Pi** (`none` → P2) — pi has no MCP support, but our approvals extension shows the
-shape: a `resources/pi/vocs-code-mcp.ts` extension that reads a JSON file path from env,
-connects with the MCP SDK client and registers each tool with pi. The catch is module
-resolution — the extension must import the SDK from the app's (asar-unpacked)
-`node_modules`, which the approvals extension does not need today. Until then the MCP
-page marks pi "not supported" and the user's `pi.extraArgs` remains the escape hatch.
+**Pi** (`inject`) — `resources/pi/vocs-code-mcp.ts`, a second bundled extension alongside the
+approvals one. The adapter writes the session's resolved servers to `<sessionDir>/pi/mcp.json`,
+points `VOCS_CODE_MCP_CONFIG` at it and loads the extension with `-e`. The extension speaks the
+MCP protocol itself (stdio + streamable HTTP, no SDK import, so nothing has to resolve out of the
+asar), lists each server's tools and calls `pi.registerTool()` for every one as
+`mcp__<server>__<tool>`. The approvals extension gates every `mcp__*` tool, since a server tool's
+blast radius is unknown; only full-auto lets it through unprompted.
 
 **Cursor** (`inherit`) — nothing is injected. The tab shows what Cursor will read
 (`.cursor/mcp.json`) and offers "Export repo servers to .cursor/mcp.json"; the MCP page
@@ -346,7 +353,7 @@ MCP SDK's OAuth provider and a loopback redirect; deferred to P2 (§10).
 | --- | --- | --- |
 | **P0** | types + settings + `normalizeSettings`; `.mcp.json` read/write; `effective.ts` with `${VAR}` + shim normalisation; `mcp:*` IPC; injection for Claude, Codex app-server, Codex exec, ACP; MCP page (Vocs Code tab + read-only Claude/Codex/Cursor tabs); right-panel tab (banner, repo, global, detected-read-only); `Test connection` via `src/main/mcp/client.ts`; unit tests | 2 PRs: main + shared + tests, then renderer |
 | **P1** | native loop `client` mode (tools merged, gate, hint, killTree); Claude live status + `setMcpServers` hot-apply; Codex elicitation → approval; import/export to harness-native files (write side); `/mcp`, shortcut, palette; smoke coverage per harness | 2–3 PRs |
-| **P2** | pi extension bridge; OAuth for the native client; per-server tool allow/deny (Claude `tools` policy, Codex `enabled_tools`); Codex status if the app-server exposes it | opportunistic |
+| **P2** | OAuth for the native client; per-server tool allow/deny (Claude `tools` policy, Codex `enabled_tools`); Codex status if the app-server exposes it | opportunistic |
 
 P0 deliberately ships the MCP client for "Test connection" only. It is the same code the
 native loop needs, so P1's native work is mostly the tool-list merge and the gate.
@@ -438,3 +445,31 @@ Not in P0, by design: the native loop still runs without MCP tools (its capabili
 `client`, and `resolveForSession` returns the list, but the tool merge is P1); Claude's
 `mcpServerStatus()` is not read yet, so the panel's "In this session" section says
 "configured, not probed"; the Codex app-server still hard-declines elicitation requests.
+
+## 13. Built-in GitNexus, strictly repo-scoped
+
+**Status: shipped.** GitNexus is an app-shipped server, so every repo has it without anyone
+adding it, and each session is confined to its own repo's index.
+
+GitNexus keeps all indexes in one global registry (`~/.gitnexus/registry.json`) and its `mcp`
+command serves every entry, with no scoping flag. Isolation is therefore the app's job:
+before a session starts, `src/main/mcp/gitnexus.ts` writes a per-project `GITNEXUS_HOME` under
+`userData/gitnexus-homes/<hash(projectRoot)>` whose `registry.json` contains only the session
+repo (matched against `projectRoot` and `cwd`) plus any repo the user has promoted. The built-in
+definition is injected with that env, so a session in repo Y can never query repo X's graph.
+
+**Global scope** is a per-repo switch, not a move to the global list: `mcpProjectState[root].gitnexusGlobal`
+adds repo X's registry entry to every other repo's private home. It is the one place a repo's
+index leaves its own boundary, and the toggle sits next to the built-in row on the repo's MCP tab.
+
+Rules:
+
+- The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
+  `gitnexus` server is shadowed, not injected twice).
+- It is on by default, injects into every harness whose `mcp` support is `inject` or `client`,
+  and is switched off for one repo with `disabledBuiltin`.
+- Prefer the installed `gitnexus` binary (via `which`) over `npx -y gitnexus@latest`.
+- Indexing is still the user's action: an unindexed repo gets an empty registry, and the tab
+  says to run `gitnexus analyze` rather than failing the session.
+- A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
+  matches an index built in the worktree.

@@ -23,7 +23,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
-      mcp: 'none',
+      // Injected through the bundled vocs-code-mcp extension, which registers each MCP tool with pi.
+      mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }

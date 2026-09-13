@@ -114,6 +114,27 @@ describe('pi approval extension without a UI', () => {
       reason: expect.stringContaining('Plan mode')
     });
   });
+
+  it('gates an MCP tool in auto mode, where no classification is possible', async () => {
+    const handler = register('auto');
+    await expect(handler({ toolName: 'mcp__gitnexus__query', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining('approval UI is unavailable')
+    });
+  });
+
+  it('blocks every MCP tool in plan mode', async () => {
+    const handler = register('plan');
+    await expect(handler({ toolName: 'mcp__gitnexus__context', input: {} }, { cwd: process.cwd() })).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining('Plan mode')
+    });
+  });
+
+  it('allows an MCP tool in full-auto', async () => {
+    const handler = register('full-auto');
+    await expect(handler({ toolName: 'mcp__gitnexus__query', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toBeUndefined();
+  });
 });
 
 describe('pi approval extension with a UI', () => {

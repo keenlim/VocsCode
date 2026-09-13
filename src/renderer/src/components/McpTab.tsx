@@ -67,6 +67,13 @@ export function McpTab({ session }: { session: SessionMeta }) {
     return patchState({ ...info?.state, disabledGlobal: on ? cur.filter((x) => x !== id) : [...new Set([...cur, id])] });
   };
 
+  const setBuiltinEnabled = (id: string, on: boolean) => {
+    const cur = info?.state.disabledBuiltin ?? [];
+    return patchState({ ...info?.state, disabledBuiltin: on ? cur.filter((x) => x !== id) : [...new Set([...cur, id])] });
+  };
+
+  const setGitnexusShared = (on: boolean) => patchState({ ...info?.state, gitnexusGlobal: on });
+
   const saveRepo = async (servers: McpServerDef[]) => {
     const r = await invoke('mcp:project:save', { sessionId: session.id, servers });
     if (!r.ok) {
@@ -133,6 +140,35 @@ export function McpTab({ session }: { session: SessionMeta }) {
             </div>
           ))}
         </div>
+      )}
+
+      {info.builtin.length > 0 && (
+        <section className="mcp-section">
+          <div className="mcp-section-head">
+            <h3>Built-in</h3>
+          </div>
+          {info.builtin.map((b) => (
+            <div key={b.def.id} className="mcp-card compact">
+              <div className="mcp-row-head">
+                <Toggle checked={b.enabled} onChange={(v) => void setBuiltinEnabled(b.def.id, v)} />
+                <span className="mcp-name">{b.def.id}</span>
+                <Badge tone="blue">built-in</Badge>
+                <span className="spacer" />
+                {b.enabled && !b.indexed && <Badge tone="amber">not indexed</Badge>}
+              </div>
+              <code className="mcp-cmd mono">{serverSummary(b.def)}</code>
+              <div className="mcp-row-head pad-t">
+                <Toggle checked={b.shared} onChange={(v) => void setGitnexusShared(v)} />
+                <span className="muted small">Share this repo's code graph with other repos</span>
+              </div>
+              {!b.indexed && (
+                <div className="muted small">
+                  No index for this repo yet. Run <span className="mono">gitnexus analyze</span> in the repo root, then a session here can query it.
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
       )}
 
       <section className="mcp-section">

@@ -298,8 +298,15 @@ export function normalizeMcpProjectState(stored: unknown): Record<string, McpPro
     const s = raw as Record<string, unknown>;
     const disabledGlobal = ids(s.disabledGlobal);
     const enabledRepo = ids(s.enabledRepo);
-    if (disabledGlobal.length || enabledRepo.length) {
-      out[root] = { ...(disabledGlobal.length ? { disabledGlobal } : {}), ...(enabledRepo.length ? { enabledRepo } : {}) };
+    const disabledBuiltin = ids(s.disabledBuiltin);
+    const gitnexusGlobal = s.gitnexusGlobal === true;
+    if (disabledGlobal.length || enabledRepo.length || disabledBuiltin.length || gitnexusGlobal) {
+      out[root] = {
+        ...(disabledGlobal.length ? { disabledGlobal } : {}),
+        ...(enabledRepo.length ? { enabledRepo } : {}),
+        ...(disabledBuiltin.length ? { disabledBuiltin } : {}),
+        ...(gitnexusGlobal ? { gitnexusGlobal: true } : {})
+      };
     }
   }
   return out;
