@@ -1,6 +1,6 @@
 /** Tools & files: call volume and reliability per tool, and the files the agents touched most. */
 import React, { useState } from 'react';
-import type { AnalyticsSummary, HarnessModelToolRow, ModelToolRow } from '../../../../shared/types';
+import type { AnalyticsSummary, HarnessModelToolRow, HarnessToolRow, ModelToolRow } from '../../../../shared/types';
 import { harnessShort } from '../../format';
 import { Button } from '../ui';
 import { BarList, ChartCard, ColumnChart, DataTable, Legend, Meter, Segmented, seriesTable, StackedBar, type TableSpec } from './charts';
@@ -17,21 +17,28 @@ function rateTone(rate: number): string | undefined {
 interface RateCell {
   calls: number;
   errors: number;
+  declined: number;
 }
 
-function rateCell(cell: RateCell | undefined): { text: string; tone?: string; title: string } {
+/**
+ * `(errors/calls) rate` for one cell. With `executed` the denominator counts only calls that ran,
+ * so a row whose calls were all declined reads `—` instead of a misleading 0%.
+ */
+function rateCell(cell: RateCell | undefined, executed = false): { text: string; tone?: string; title: string } {
   if (!cell || !(cell.calls > 0)) return { text: '—', tone: undefined, title: 'No calls' };
-  const rate = cell.errors / cell.calls;
-  return { text: `(${cell.errors}/${cell.calls}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(cell.errors, 'error')} in ${plural(cell.calls, 'call')}` };
+  const denominator = executed ? cell.calls - cell.declined : cell.calls;
+  if (denominator <= 0) return { text: '—', tone: undefined, title: 'No executed calls' };
+  const rate = cell.errors / denominator;
+  return { text: `(${cell.errors}/${denominator}) ${fmtPct(rate)}`, tone: rateTone(rate), title: `${plural(cell.errors, 'error')} in ${plural(denominator, executed ? 'executed call' : 'call')}` };
 }
 
 interface RateMatrixRow extends RateCell {
   name: string;
 }
 
-/** `(errors/calls) rate` in its tone, or a dash when there were no calls. */
-function rateCellNode(cell: RateCell | undefined, key: string) {
-  const { text, tone, title } = rateCell(cell);
+/** `(errors/calls) rate` in its tone, or a dash when there were no calls (or none executed). */
+function rateCellNode(cell: RateCell | undefined, key: string, executed = false) {
+  const { text, tone, title } = rateCell(cell, executed);
   return (
     <span key={key} title={title} style={tone ? { color: tone } : undefined}>
       {text}
@@ -40,23 +47,26 @@ function rateCellNode(cell: RateCell | undefined, key: string) {
 }
 
 /**
- * Groups per-owner tool rows into a matrix: one row per owner (a model, or a harness and model), one
- * column per tool, plus a leading Total column that sums the row. Owners are sorted alphabetically
- * by label; case-insensitive tool names merge across harnesses. Cells read `(errors/calls) rate`.
+ * Groups per-owner tool rows into a matrix: one row per owner (a model, a harness, or a harness and
+ * model), one column per tool, plus a leading Total column that sums the row. Owners are sorted
+ * alphabetically by label; case-insensitive tool names merge across harnesses. Cells read
+ * `(errors/calls) rate`, or `(errors/executed) rate` when `executed` is set.
  */
-function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner: (r: T) => { key: string; label: string }): TableSpec | null {
-  const owners = new Map<string, { label: string; calls: number; errors: number; tools: Map<string, RateCell> }>();
+function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner: (r: T) => { key: string; label: string }, executed = false): TableSpec | null {
+  const owners = new Map<string, { label: string; calls: number; errors: number; declined: number; tools: Map<string, RateCell> }>();
   const tools = new Map<string, { label: string; calls: number }>();
   for (const r of rows) {
     const { key, label } = owner(r);
     const nameKey = r.name.toLocaleLowerCase();
-    const m = owners.get(key) ?? { label, calls: 0, errors: 0, tools: new Map() };
-    const cell = m.tools.get(nameKey) ?? { calls: 0, errors: 0 };
+    const m = owners.get(key) ?? { label, calls: 0, errors: 0, declined: 0, tools: new Map() };
+    const cell = m.tools.get(nameKey) ?? { calls: 0, errors: 0, declined: 0 };
     cell.calls += r.calls;
     cell.errors += r.errors;
+    cell.declined += r.declined;
     m.tools.set(nameKey, cell);
     m.calls += r.calls;
     m.errors += r.errors;
+    m.declined += r.declined;
     owners.set(key, m);
     const t = tools.get(nameKey) ?? { label: r.name, calls: 0 };
     // Prefer an all-lowercase spelling when one harness supplies it.
@@ -73,8 +83,8 @@ function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner
       <span key={key} className="mono" title={m.label}>
         {m.label || key}
       </span>,
-      rateCellNode(m, 'total'),
-      ...cols.map(([nameKey]) => rateCellNode(m.tools.get(nameKey), nameKey))
+      rateCellNode(m, 'total', executed),
+      ...cols.map(([nameKey]) => rateCellNode(m.tools.get(nameKey), nameKey, executed))
     ])
   };
 }
@@ -82,6 +92,11 @@ function rateMatrix<T extends RateMatrixRow>(rows: T[], rowHeader: string, owner
 /** One row per model, one column per tool. */
 function errorRateTable(modelTools: ModelToolRow[]): TableSpec | null {
   return rateMatrix(modelTools, 'Model', (r) => ({ key: r.key, label: r.label || r.key }));
+}
+
+/** One row per harness, one column per tool; its Total column is the harness's error rate. */
+function harnessRateTable(harnessTools: HarnessToolRow[]): TableSpec | null {
+  return rateMatrix(harnessTools, 'Harness', (r) => ({ key: r.key, label: harnessShort(r.key) }), true);
 }
 
 /** The same matrix, one row per harness and model pair. */
@@ -158,31 +173,13 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
           )}
         </ChartCard>
       </div>
-      <ChartCard title="Harness/tool reliability" subtitle={`${scope.label} · ${dates[0]} – ${dates[dates.length - 1]}`}>
+      <ChartCard title="Error rate by harness" subtitle={`${scope.label} · ${dates[0]} – ${dates[dates.length - 1]}`}>
         <p className="muted small">Recorded since update; historical calls are not backfilled. Compare harnesses only with the same model and workload.</p>
-        <p className="muted small">Error rate = errors ÷ executed calls (calls − declined). No executed calls shows —. Tool names are grouped by casing, not aliases.</p>
+        <p className="muted small">Error rate = errors ÷ executed calls (calls − declined); no executed calls shows —. Tool names are grouped by casing, not aliases.</p>
         {scope.harnessTools.length === 0 ? (
           <div className="chart-empty">No per-harness tool calls recorded in this range.</div>
         ) : (
-          <DataTable
-            ariaLabel="Harness/tool reliability"
-            compact
-            table={{
-              columns: [{ label: 'Harness' }, { label: 'Tool' }, { label: 'Calls', numeric: true }, { label: 'Errors', numeric: true }, { label: 'Declined', numeric: true }, { label: 'Error rate', numeric: true }],
-              rows: scope.harnessTools.map((r) => {
-                const executed = r.calls - r.declined;
-                const rate = executed > 0 ? r.errors / executed : null;
-                return [
-                  harnessShort(r.key),
-                  <span className="mono" title={r.name}>{r.name || '(unnamed)'}</span>,
-                  String(r.calls),
-                  String(r.errors),
-                  String(r.declined),
-                  <span title={`${r.errors} errors / ${executed} executed calls`} style={rate === null ? undefined : { color: rateTone(rate) }}>{fmtPct(rate)}</span>
-                ];
-              })
-            }}
-          />
+          <DataTable ariaLabel="Error rate by harness" table={harnessRateTable(scope.harnessTools)!} compact />
         )}
       </ChartCard>
       <ChartCard title="Error rate by model" subtitle={`Errors ÷ calls for each tool, by the model that made it · ${scope.label}`}>

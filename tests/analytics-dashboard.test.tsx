@@ -203,7 +203,7 @@ describe('analytics dashboard', () => {
     ]);
   });
 
-  it('shows exact harness/tool outcomes and executed-call rates for the selected dates and all time', async () => {
+  it('shows per-harness error rates by tool, counting only executed calls, for the selected dates and all time', async () => {
     reset();
     const old = sliced(10, [{ id: 's1', harness: 'claude', model: 'same', project: '/p', costUsd: 0, turns: 0 }]);
     const recent = sliced(1, [
@@ -229,32 +229,35 @@ describe('analytics dashboard', () => {
     invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
     const view = render(<AnalyticsDashboard />);
     const ui = within(view.container);
-    const cells = () => within(ui.getByRole('table', { name: 'Harness/tool reliability' })).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent));
+    const table = () => ui.getByRole('table', { name: 'Error rate by harness' });
+    const cells = () => within(table()).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent));
     try {
       fireEvent.click(ui.getByRole('tab', { name: 'Tools & files' }));
+      // One row per harness, one column per tool, Total first; the denominator is executed calls, so
+      // Pi's all-declined bash column reads — rather than a 0% that would imply it ran clean.
       await waitFor(() => expect(cells()).toEqual([
-        ['Claude', 'read', '6', '2', '2', '50%'],
-        ['Pi', 'read', '2', '0', '1', '0%'],
-        ['Pi', 'bash', '1', '0', '1', '—']
+        ['Claude', '(2/4) 50%', '(2/4) 50%', '—'],
+        ['Pi', '(0/1) 0%', '(0/1) 0%', '—']
       ]));
+      expect(within(table()).getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Harness', 'Total', 'read', 'bash']);
       expect(ui.getByText(/Recorded since update/).textContent).toContain('same model and workload');
       expect(ui.getByText(/Error rate = errors/).textContent).toContain('executed calls (calls − declined)');
       fireEvent.click(ui.getByRole('radio', { name: '7 days' }));
-      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '3', '1', '1', '50%']));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', '(1/2) 50%', '(1/2) 50%', '—']));
       expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 7 });
       expect(ui.getByText(`last 7 days · ${dateOf(6)} – ${dateOf(0)}`)).toBeTruthy();
       fireEvent.click(ui.getByRole('radio', { name: 'All time' }));
-      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '10', '3', '4', '50%']));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', '(3/6) 50%', '(3/6) 50%', '—']));
       expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 0 });
-      // Both sibling tables retain upstream's errors/calls math, unlike harness/tool's executed-call rate.
-      // Each matrix shows the rate twice per row: once in Total and once in its only tool column.
+      // The sibling matrices keep upstream's errors/calls math, unlike this executed-call one.
+      // Each sibling row shows the rate twice: once in Total and once in its only tool column.
       expect(ui.getAllByText('(3/10) 30%')).toHaveLength(4);
       const modelTable = ui.getByRole('columnheader', { name: 'Harness · model' }).closest('table')!;
       expect(within(modelTable).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual([
         ['Claude · same', '(3/10) 30%', '(3/10) 30%']
       ]);
       fireEvent.click(ui.getByRole('radio', { name: '30 days' }));
-      await waitFor(() => expect(cells()[0]).toEqual(['Claude', 'read', '6', '2', '2', '50%']));
+      await waitFor(() => expect(cells()[0]).toEqual(['Claude', '(2/4) 50%', '(2/4) 50%', '—']));
     } finally {
       view.unmount();
       invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
