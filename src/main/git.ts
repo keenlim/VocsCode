@@ -686,13 +686,29 @@ export async function gitPrMap(cwd: string): Promise<{ prs?: Record<string, GitP
   }
 }
 
-const PR_LIST_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions';
+const PR_LIST_FIELDS = 'number,title,state,isDraft,headRefName,baseRefName,url,author,createdAt,updatedAt,mergedAt,reviewDecision,additions,deletions,body,labels,comments';
 
 const isoMs = (v: unknown): number | undefined => {
   if (typeof v !== 'string' || !v) return undefined;
   const t = Date.parse(v);
   return Number.isFinite(t) ? t : undefined;
 };
+
+/** `gh` reports labels as objects; keep the named ones, dropping the colour key when GitHub did not send one. */
+function ghLabels(v: unknown): { name: string; color?: string }[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const labels = v
+    .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')
+    .map((l) => ({ name: typeof l.name === 'string' ? l.name : '', color: typeof l.color === 'string' ? l.color : undefined }))
+    .filter((l) => l.name);
+  return labels.length > 0 ? labels.map((l) => (l.color ? l : { name: l.name })) : undefined;
+}
+
+/** `gh <x> list --json comments` sends the comment array; tolerate a plain count so old fakes and payloads keep working. */
+function ghCommentCount(v: unknown): number | undefined {
+  if (Array.isArray(v)) return v.length;
+  return typeof v === 'number' ? v : undefined;
+}
 
 /** Pulls the repo's pull requests from GitHub (`gh pr list`, every state, newest first) for the Git panel's PR view. */
 export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> {
@@ -721,6 +737,11 @@ export async function gitPullRequests(cwd: string): Promise<GitPullRequestList> 
       if (typeof p.reviewDecision === 'string' && p.reviewDecision) pr.reviewDecision = p.reviewDecision;
       if (typeof p.additions === 'number') pr.additions = p.additions;
       if (typeof p.deletions === 'number') pr.deletions = p.deletions;
+      if (typeof p.body === 'string') pr.body = p.body;
+      const labels = ghLabels(p.labels);
+      if (labels) pr.labels = labels;
+      const comments = ghCommentCount(p.comments);
+      if (comments !== undefined) pr.comments = comments;
       prs.push(pr);
     }
     prs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0) || b.number - a.number);
@@ -750,14 +771,10 @@ export async function gitIssues(cwd: string): Promise<GitIssueList> {
       const issue: GitIssue = { number: p.number, title: typeof p.title === 'string' ? p.title : '', state, url: p.url };
       if (author?.login || author?.name) issue.author = author.login || author.name;
       if (typeof p.body === 'string') issue.body = p.body;
-      if (Array.isArray(p.labels)) {
-        const labels = p.labels
-          .filter((l): l is { name?: string; color?: string } => !!l && typeof l === 'object')
-          .map((l) => ({ name: typeof l.name === 'string' ? l.name : '', color: typeof l.color === 'string' ? l.color : undefined }))
-          .filter((l) => l.name);
-        if (labels.length > 0) issue.labels = labels.map((l) => (l.color ? l : { name: l.name }));
-      }
-      if (typeof p.comments === 'number') issue.comments = p.comments;
+      const labels = ghLabels(p.labels);
+      if (labels) issue.labels = labels;
+      const comments = ghCommentCount(p.comments);
+      if (comments !== undefined) issue.comments = comments;
       const created = isoMs(p.createdAt), updated = isoMs(p.updatedAt), closed = isoMs(p.closedAt);
       if (created !== undefined) issue.createdAt = created;
       if (updated !== undefined) issue.updatedAt = updated;
