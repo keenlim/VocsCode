@@ -368,11 +368,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           trigger={() => <Button variant="ghost" size="sm" icon="more" title="Housekeeping" aria-label="Housekeeping actions" />}
         >
           {(close) => {
-            const root = setup?.root ?? session.cwd;
+            const root = setup?.mainRoot ?? setup?.root ?? session.cwd;
             const skipped = useStore.getState().settings?.gitSetupSkipped ?? [];
             return (
               <>
-                {setup?.isRepo && !setup.pushed && skipped.includes(root) && (
+                {setup?.isRepo && !setup.published && skipped.includes(root) && (
                   <MenuItem
                     onClick={() => {
                       close();

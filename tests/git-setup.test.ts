@@ -63,6 +63,7 @@ describe('gitSetupStatus', () => {
       isRepo: false,
       hasCommits: false,
       pushed: false,
+      published: false,
       identity: {},
       gh: { installed: true, authenticated: true, account: 'octocat' }
     });
@@ -80,6 +81,7 @@ describe('gitSetupStatus', () => {
       branch: 'main',
       hasCommits: false,
       pushed: false,
+      published: false,
       identity: {},
       gh: { installed: true, authenticated: false }
     });
@@ -118,6 +120,23 @@ describe('gitSetupStatus', () => {
     gitReply(['config', '--get', 'user.name'], { code: 0, stdout: 'Mona Lisa\n' });
     gitReply(['config', '--get', 'user.email'], { code: 0, stdout: 'mona@example.com\n' });
     expect((await gitSetupStatus('C:/project')).identity).toEqual({ name: 'Mona Lisa', email: 'mona@example.com' });
+  });
+
+  it('marks a repo published from any remote-tracking branch, even when this branch has no upstream', async () => {
+    gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/project/.vocs-code/worktrees/wip' });
+    ghReply(['auth', 'status'], { code: 1 });
+    gitReply(['symbolic-ref', '--quiet', '--short', 'HEAD'], { code: 0, stdout: 'vocscode/wip' });
+    gitReply(['rev-parse', '--verify', '--quiet', 'HEAD'], { code: 0, stdout: 'abc' });
+    gitReply(['remote', 'get-url', 'origin'], { code: 0, stdout: 'https://github.com/you/project.git' });
+    gitReply(['config', '--get', 'user.name'], { code: 0, stdout: 'Mona' });
+    gitReply(['config', '--get', 'user.email'], { code: 0, stdout: 'mona@example.com' });
+    gitReply(['rev-parse', '--git-common-dir'], { code: 0, stdout: 'C:/project/.git' });
+    gitReply(['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes'], { code: 0, stdout: 'refs/remotes/origin/develop\n' });
+    gitReply(['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/vocscode/wip'], { code: 1 });
+    const s = await gitSetupStatus('C:/project/.vocs-code/worktrees/wip');
+    // This branch has no upstream, but the repo is already on GitHub: the guide must stay away.
+    expect(s.published).toBe(true);
+    expect(s.pushed).toBe(false);
   });
 
   it('reports gh as missing without probing auth', async () => {

@@ -415,19 +415,24 @@ async function ghAuthStatus(): Promise<GitSetupStatus['gh']> {
 export async function gitSetupStatus(cwd: string): Promise<GitSetupStatus> {
   const gh = await ghAuthStatus();
   const root = await gitRoot(cwd);
-  if (!root) return { isRepo: false, hasCommits: false, pushed: false, identity: {}, gh };
-  const [branch, head, remote, nameCfg, emailCfg] = await Promise.all([
+  if (!root) return { isRepo: false, hasCommits: false, pushed: false, published: false, identity: {}, gh };
+  const [branch, head, remote, nameCfg, emailCfg, commonDir, remotes] = await Promise.all([
     git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
     git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']),
     git(cwd, ['remote', 'get-url', 'origin']),
     git(cwd, ['config', '--get', 'user.name']),
-    git(cwd, ['config', '--get', 'user.email'])
+    git(cwd, ['config', '--get', 'user.email']),
+    git(cwd, ['rev-parse', '--git-common-dir']),
+    git(cwd, ['for-each-ref', '--count=1', '--format=%(refname)', 'refs/remotes'])
   ]);
   const branchName = branch.stdout.trim() || undefined;
   const hasCommits = head.code === 0;
   const remoteUrl = remote.code === 0 ? remote.stdout.trim() || undefined : undefined;
   const name = nameCfg.code === 0 ? nameCfg.stdout.trim() || undefined : undefined;
   const email = emailCfg.code === 0 ? emailCfg.stdout.trim() || undefined : undefined;
+  // A linked worktree's common dir is the main repo's .git; dismissing the guide there must stick for every worktree.
+  const mainRoot = commonDir.code === 0 && commonDir.stdout.trim() ? path.dirname(path.resolve(cwd, commonDir.stdout.trim())) : undefined;
+  const published = remotes.code === 0 && remotes.stdout.trim().length > 0;
   let pushed = false;
   if (branchName && hasCommits && remoteUrl) {
     pushed = (await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchName}`])).code === 0;
@@ -435,10 +440,12 @@ export async function gitSetupStatus(cwd: string): Promise<GitSetupStatus> {
   return {
     isRepo: true,
     root,
+    ...(mainRoot ? { mainRoot } : {}),
     ...(branchName ? { branch: branchName } : {}),
     hasCommits,
     ...(remoteUrl ? { remote: remoteUrl } : {}),
     pushed,
+    published,
     identity: { ...(name ? { name } : {}), ...(email ? { email } : {}) },
     gh
   };
