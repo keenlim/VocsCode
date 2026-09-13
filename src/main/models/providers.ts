@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelInfo, ProviderConfig } from '../../shared/types';
+import { isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage } from '../util/async';
 import { cursorModelToInfo } from './static-models';
 import { STATIC_MODELS_BY_PROVIDER, findPricing } from './static-models';
@@ -63,18 +64,36 @@ export async function fetchProviderModels(provider: ProviderConfig, apiKey: stri
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
     });
     if (!res.ok) throw new Error(`OpenRouter /models failed: ${res.status}`);
-    const json = (await res.json()) as { data: { id: string; name?: string; context_length?: number; pricing?: { prompt?: string; completion?: string; input_cache_read?: string }; architecture?: { input_modalities?: string[] }; supported_parameters?: string[] }[] };
+    const json = (await res.json()) as {
+      data: {
+        id: string;
+        name?: string;
+        context_length?: number;
+        pricing?: { prompt?: string; completion?: string; input_cache_read?: string };
+        architecture?: { input_modalities?: string[] };
+        supported_parameters?: string[];
+        reasoning?: { supported_efforts?: string[]; default_effort?: string };
+      }[];
+    };
     return json.data
       .filter((m) => !NON_CHAT.test(m.id))
-      .map((m) => ({
-        id: m.id,
-        provider: provider.id,
-        displayName: m.name ?? m.id,
-        contextWindow: m.context_length,
-        supportsImages: (m.architecture?.input_modalities ?? []).includes('image'),
-        supportsReasoning: (m.supported_parameters ?? []).includes('reasoning'),
-        pricing: m.pricing ? { input: Number(m.pricing.prompt ?? 0) * 1_000_000, output: Number(m.pricing.completion ?? 0) * 1_000_000, cacheRead: m.pricing.input_cache_read ? Number(m.pricing.input_cache_read) * 1_000_000 : undefined } : undefined
-      }))
+      .map((m) => {
+        // OpenRouter normalizes reasoning_effort per upstream and advertises the exact levels it
+        // accepts (e.g. max/high/low). Keep only our levels; `none` and unknown values are dropped.
+        const supportedEfforts = (m.reasoning?.supported_efforts ?? []).filter(isEffortLevel);
+        const defaultEffort = m.reasoning?.default_effort;
+        return {
+          id: m.id,
+          provider: provider.id,
+          displayName: m.name ?? m.id,
+          contextWindow: m.context_length,
+          supportsImages: (m.architecture?.input_modalities ?? []).includes('image'),
+          supportsReasoning: (m.supported_parameters ?? []).includes('reasoning'),
+          supportedEfforts: supportedEfforts.length ? supportedEfforts : undefined,
+          defaultEffort: isEffortLevel(defaultEffort) && supportedEfforts.includes(defaultEffort) ? defaultEffort : undefined,
+          pricing: m.pricing ? { input: Number(m.pricing.prompt ?? 0) * 1_000_000, output: Number(m.pricing.completion ?? 0) * 1_000_000, cacheRead: m.pricing.input_cache_read ? Number(m.pricing.input_cache_read) * 1_000_000 : undefined } : undefined
+        };
+      })
       .sort((a, b) => a.id.localeCompare(b.id));
   }
   // Generic OpenAI-compatible /models

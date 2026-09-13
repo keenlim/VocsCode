@@ -20,12 +20,14 @@ import { generateSessionTitle, sanitizeLlmTitle, titleFromPrompt } from '../src/
 import type { RuntimeResolver } from '../src/main/runtime';
 import { piHasCredentials } from '../src/main/runtime';
 import { estimateCostUsd, findPricing } from '../src/main/models/static-models';
+import { fetchProviderModels } from '../src/main/models/providers';
+import { openaiStep } from '../src/main/harness/native/drivers';
 import { piModelToInfo } from '../src/main/harness/pi';
 import type { AnalyticsStore } from '../src/main/analytics';
 import { codexModelToInfo } from '../src/main/harness/codex-app-server';
 import { applyModelOverrides, modelOverrideKey, parseModelOverrideKey, pruneModelOverrides } from '../src/shared/model-overrides';
 import { HARNESSES } from '../src/shared/harness-meta';
-import type { AppSettings, ModelInfo, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
+import type { AppSettings, EffortLevel, ModelInfo, ProviderConfig, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { SecretStore } from '../src/main/secrets';
 import { SessionStore } from '../src/main/store';
 import { branchGitState, gitBranches, gitCheckout, gitWorktrees, removeWorktree, restoreWorktree, WorktreeDirtyError } from '../src/main/git';
@@ -373,6 +375,86 @@ describe('model mapping', () => {
     const m = codexModelToInfo({ id: 'x', model: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol', description: '', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }, { reasoningEffort: 'high', description: '' }, { reasoningEffort: 'ultra', description: '' }], defaultReasoningEffort: 'ultra', inputModalities: ['text'], isDefault: false });
     expect(m.supportedEfforts).toEqual(['low', 'high']);
     expect(m.defaultEffort).toBeUndefined();
+  });
+});
+
+describe('OpenRouter reasoning effort', () => {
+  it('reads the exact levels and default from the OpenRouter catalog', async () => {
+    const server = await listenOnce((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ data: [
+        {
+          id: 'deepseek/deepseek-v4.1-flash',
+          name: 'DeepSeek: DeepSeek V4.1 Flash',
+          context_length: 1_048_576,
+          supported_parameters: ['reasoning', 'reasoning_effort'],
+          reasoning: { supported_efforts: ['max', 'high', 'low', 'none'], default_effort: 'high' }
+        },
+        { id: 'vendor/plain-chat', name: 'Plain Chat', supported_parameters: ['temperature'] }
+      ] }));
+    });
+    try {
+      const provider: ProviderConfig = { id: 'openrouter', kind: 'openrouter', name: 'OpenRouter', baseUrl: server.url, hasApiKey: false, models: [], enabled: true };
+      const models = await fetchProviderModels(provider, undefined);
+      const deepseek = models.find((m) => m.id === 'deepseek/deepseek-v4.1-flash');
+      // `none` is not an app level, so it is dropped; the rest survive in catalog order.
+      expect(deepseek?.supportedEfforts).toEqual(['max', 'high', 'low']);
+      expect(deepseek?.defaultEffort).toBe('high');
+      const plain = models.find((m) => m.id === 'vendor/plain-chat');
+      expect(plain?.supportedEfforts).toBeUndefined();
+      expect(plain?.defaultEffort).toBeUndefined();
+    } finally {
+      await server.close();
+    }
+  });
+
+  async function sendOpenRouterStep(model: string, effort: EffortLevel, supportedEfforts: EffortLevel[]): Promise<Record<string, unknown>> {
+    let body: Record<string, unknown> = {};
+    const server = await listenOnce((_req, res, raw) => {
+      body = JSON.parse(raw ?? '{}') as Record<string, unknown>;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta: Record<string, unknown>, finish: string | null) => `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.write(chunk({ content: 'hi' }, null));
+      res.write(chunk({}, 'stop'));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const provider: ProviderConfig = {
+        id: 'openrouter',
+        kind: 'openrouter',
+        name: 'OpenRouter',
+        baseUrl: server.url,
+        hasApiKey: true,
+        models: [{ id: model, provider: 'openrouter', displayName: model, supportedEfforts }],
+        enabled: true
+      };
+      await openaiStep({
+        provider,
+        apiKey: 'sk-test',
+        model,
+        system: '',
+        history: [],
+        tools: [],
+        effort,
+        signal: AbortSignal.timeout(5_000),
+        onText: () => undefined,
+        onReasoning: () => undefined
+      });
+      return body;
+    } finally {
+      await server.close();
+    }
+  }
+
+  it('forwards max to an OpenRouter DeepSeek model instead of clamping it to high', async () => {
+    const body = await sendOpenRouterStep('deepseek/deepseek-v4.1-flash', 'max', ['max', 'high', 'low']);
+    expect(body.reasoning_effort).toBe('max');
+  });
+
+  it('omits reasoning_effort for an OpenRouter model that does not advertise it', async () => {
+    const body = await sendOpenRouterStep('vendor/plain-chat', 'high', []);
+    expect(body.reasoning_effort).toBeUndefined();
   });
 });
 

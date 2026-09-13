@@ -16,7 +16,7 @@ import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
-import { enrichModelContextWindows } from './models/static-models';
+import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import { which } from './runtime';
@@ -237,7 +237,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('providers:list', () => {
     const s = settings.get();
     return s.providers.map((p) => {
-      const models = enrichModelContextWindows(p.models.length ? p.models : fallbackModels(p), s.providers);
+      const models = enrichModelsFromProviders(p.models.length ? p.models : fallbackModels(p), s.providers);
       return { ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(models, s.modelOverrides) };
     });
   });
@@ -268,10 +268,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       deps.push(PUSH_CHANNELS.settingsChanged, next);
-      return { models: applyModelOverrides(enrichModelContextWindows(models, next.providers), next.modelOverrides) };
+      return { models: applyModelOverrides(enrichModelsFromProviders(models, next.providers), next.modelOverrides) };
     } catch (e) {
       deps.log('warn', `model list refresh failed for ${id}: ${errorMessage(e)}`);
-      const models = enrichModelContextWindows(fallbackModels(p), s.providers);
+      const models = enrichModelsFromProviders(fallbackModels(p), s.providers);
       return { models: applyModelOverrides(models, s.modelOverrides), error: errorMessage(e) };
     }
   });
@@ -316,7 +316,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('harness:models', async ({ harness }) => {
     const current = settings.get();
     const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
-    return { ...result, models: enrichModelContextWindows(result.models, current.providers) };
+    return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
     deps.log('info', `installing ${id} into the app runtime directory`);

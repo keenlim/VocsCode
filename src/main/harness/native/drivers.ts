@@ -195,7 +195,12 @@ export async function openaiStep(p: StepParams): Promise<StepResult> {
   // Only reasoning models accept reasoning_effort; gpt-4.x and most third-party models reject it.
   const reasoningCapable = /^(o\d|gpt-5)/.test(p.model);
   if (p.effort && reasoningCapable) body.reasoning_effort = p.effort === 'xhigh' || p.effort === 'max' ? 'high' : p.effort;
-  if (isDeepSeek && p.effort) body.reasoning_effort = p.effort === 'xhigh' || p.effort === 'max' ? 'high' : p.effort === 'minimal' ? 'low' : p.effort;
+  // OpenRouter normalizes reasoning_effort across upstreams and advertises the exact levels a model
+  // takes (often max/high/low), so forward the level untouched instead of clamping max down to high.
+  const routerEfforts = p.provider.kind === 'openrouter' ? p.provider.models.find((m) => m.id === p.model)?.supportedEfforts : undefined;
+  if (p.effort && routerEfforts?.includes(p.effort)) body.reasoning_effort = p.effort;
+  // DeepSeek's own endpoints (and copies of them) use a narrower scale; clamp the app's wider list.
+  if (isDeepSeek && p.provider.kind !== 'openrouter' && p.effort) body.reasoning_effort = p.effort === 'xhigh' || p.effort === 'max' ? 'high' : p.effort === 'minimal' ? 'low' : p.effort;
   if (p.provider.kind === 'openrouter') body.usage = { include: true };
 
   const stream = await client.chat.completions.create(body, { signal: p.signal });
