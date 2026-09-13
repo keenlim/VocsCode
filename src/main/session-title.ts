@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import type { ModelRef, ProviderConfig } from '../shared/types';
-import { STATIC_MODELS_BY_PROVIDER } from './models/static-models';
+import { selectBackgroundModel } from './agents/model';
 import { resolveProviderApiKey } from './models/providers';
 import { isAnthropicProvider } from './harness/native/drivers';
 import { errorMessage } from './util/async';
@@ -61,21 +61,12 @@ export async function generateSessionTitle(
   preferred?: ModelRef,
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
 ): Promise<string | null> {
-  const usable = providers.filter((p) => p.enabled && (p.hasApiKey || (p.envKey && process.env[p.envKey]) || p.kind === 'ollama' || p.kind === 'lmstudio'));
-  let provider: ProviderConfig | undefined;
-  let model: string | null = null;
-  const pref = preferred && usable.find((p) => p.id === preferred.provider);
-  if (pref) {
-    provider = pref;
-    model = preferred.model;
-  } else {
-    provider = usable.find((p) => modelFor(p));
-    model = provider ? modelFor(provider)! : null;
-  }
-  if (!provider || !model) {
+  const picked = selectBackgroundModel(providers, preferred);
+  if (!picked) {
     log?.('debug', 'session title: no usable provider, keeping placeholder');
     return null;
   }
+  const { provider, model } = picked;
   log?.('debug', `session title: asking ${provider.id}/${model}`);
   const apiKey = await resolveProviderApiKey(provider, getSecret);
   const sample = prompt.trim().slice(0, PROMPT_SAMPLE_CHARS);
@@ -105,9 +96,4 @@ export async function generateSessionTitle(
     log?.('warn', `session title failed, keeping placeholder: ${errorMessage(e)}`);
     return null;
   }
-}
-
-function modelFor(p: ProviderConfig): string | null {
-  const models = p.models.length ? p.models : STATIC_MODELS_BY_PROVIDER[p.id] ?? [];
-  return (models.find((m) => m.isDefault) ?? models[0])?.id ?? null;
 }

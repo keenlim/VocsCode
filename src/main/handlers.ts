@@ -7,6 +7,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
+import { Agatho } from './agents';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
@@ -90,6 +91,18 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   function handle<K extends IpcChannel>(channel: K, fn: (req: IpcRequest<K>) => Promise<IpcResponse<K>> | IpcResponse<K>): void {
     handlers.set(channel, fn as (req: never) => unknown);
+  }
+
+  async function invokeChannel(channel: string, req: unknown): Promise<unknown> {
+    const fn = handlers.get(channel as IpcChannel);
+    if (!fn) throw new Error(`Unknown channel: ${channel}`);
+    const t0 = Date.now();
+    try {
+      return await fn(req as never);
+    } finally {
+      const ms = Date.now() - t0;
+      if (ms >= SLOW_HANDLER_MS) deps.log('warn', `slow ipc ${channel}: ${ms}ms`);
+    }
   }
 
   handle('app:info', () => ({ version: deps.desktop.appVersion(), platform: process.platform, userData: deps.desktop.userDataPath(), isPackaged: deps.desktop.isPackaged() }));
@@ -418,6 +431,26 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
 
+  // Agatho reaches the app through this same registry, but only via the capability allowlist in
+  // shared/agent-manifest.ts — the registry itself serves keychain writes and raw PTY input.
+  const agatho = new Agatho({
+    getSettings: () => settings.get(),
+    listSessions: () => sessions.list(),
+    getSession: (id) => sessions.get(id),
+    getSecret: (providerId) => secrets.get(providerId),
+    invoke: invokeChannel,
+    push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
+    log: deps.log
+  });
+  handle('agent:state', () => agatho.state());
+  // A turn streams over push:agentState, so the invoke returns as soon as it is accepted.
+  handle('agent:send', ({ text, context }) => {
+    void agatho.send(String(text ?? ''), context).catch((e: unknown) => deps.log('warn', `agatho send failed: ${errorMessage(e)}`));
+  });
+  handle('agent:cancel', () => agatho.cancel());
+  handle('agent:resolve', ({ proposalId, approve }) => agatho.resolveProposal(String(proposalId ?? ''), approve === true));
+  handle('agent:reset', () => agatho.reset());
+
   // `days: 0` is all time; only an absent request falls back to the 30-day default.
   handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));
 
@@ -533,17 +566,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   return {
     channels: () => Array.from(handlers.keys()),
-    async invoke(channel: string, req: unknown): Promise<unknown> {
-      const fn = handlers.get(channel as IpcChannel);
-      if (!fn) throw new Error(`Unknown channel: ${channel}`);
-      const t0 = Date.now();
-      try {
-        return await fn(req as never);
-      } finally {
-        const ms = Date.now() - t0;
-        if (ms >= SLOW_HANDLER_MS) deps.log('warn', `slow ipc ${channel}: ${ms}ms`);
-      }
-    }
+    invoke: invokeChannel
   };
 }
 

@@ -152,7 +152,7 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
         </select>
       </Field>
       <Toggle checked={settings.notifications} onChange={(v) => update({ notifications: v })} label="Desktop notifications when a turn finishes or approval is needed (only while the window is unfocused)" />
-      <UtilityModelField settings={settings} update={update} />
+      <BackgroundModelFields settings={settings} update={update} />
       <h3>Goal defaults</h3>
       <Toggle checked={settings.goalDefaults.autoContinue} onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, autoContinue: v } })} label="Auto-continue goals after each turn" />
       <Field label="Iteration guard">
@@ -169,8 +169,8 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
 const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 
-/** General → Utility model: the cheap model used for background chores like session titles. */
-function UtilityModelField({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+/** General → the two background models: chores (session titles) and Agatho, plus its on/off switch. */
+function BackgroundModelFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -180,17 +180,35 @@ function UtilityModelField({ settings, update }: { settings: AppSettings; update
   }, []);
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
-    <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
-      {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
-      <div className="onboarding-model-picker">
-        <ModelPicker
-          models={models}
-          selected={settings.utilityModel}
-          clearOption={{ label: 'Use the session model' }}
-          onSelect={(m) => update({ utilityModel: m ? { provider: m.provider, model: m.id } : undefined })}
-        />
-      </div>
-    </Field>
+    <>
+      <Field label="Utility model" hint="A cheap, fast model (e.g. a flash tier) for background tasks like naming sessions. Falls back to the session's own model when unset.">
+        {error && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>Provider list unavailable: {error}</span></div>}
+        <div className="onboarding-model-picker">
+          <ModelPicker
+            models={models}
+            selected={settings.utilityModel}
+            clearOption={{ label: 'Use the session model' }}
+            onSelect={(m) => update({ utilityModel: m ? { provider: m.provider, model: m.id } : undefined })}
+          />
+        </div>
+      </Field>
+      <h3>Agatho</h3>
+      <p className="muted small">
+        The floating assistant. It sets up MCP servers, starts sessions and tidies branches by driving the app itself — every change it wants to make is
+        shown as a proposal you approve first. Drag it anywhere; click it to collapse.
+      </p>
+      <Toggle checked={settings.agent?.enabled !== false} onChange={(v) => update({ agent: { ...(settings.agent ?? {}), enabled: v } })} label="Show Agatho" />
+      <Field label="Agatho's model" hint="Choosing among its capabilities is harder than naming a session, so a flash-tier model may struggle. Falls back to the utility model when unset.">
+        <div className="onboarding-model-picker">
+          <ModelPicker
+            models={models}
+            selected={settings.agentModel}
+            clearOption={{ label: 'Use the utility model' }}
+            onSelect={(m) => update({ agentModel: m ? { provider: m.provider, model: m.id } : undefined })}
+          />
+        </div>
+      </Field>
+    </>
   );
 }
 

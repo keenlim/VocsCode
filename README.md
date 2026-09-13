@@ -42,6 +42,7 @@ Everything technical lives here:
 | [Testing & verification](docs/TESTING.md) | Dev commands, offline and live test suites |
 | [Operations](docs/OPERATIONS.md) | Log locations, environment variables |
 | [MCP servers](docs/MCP.md) | Global and per-repo MCP servers: storage, per-harness injection, UI, trust model, phasing |
+| [Agatho](docs/AGATHO.md) | The in-app assistant: its capability allowlist, risk tiers and how to add one |
 
 ## Requirements
 

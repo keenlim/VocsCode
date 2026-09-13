@@ -1,5 +1,7 @@
 /** zustand store for session state, panel selection and toasts. Selectors must return stable references. */
 import { create } from 'zustand';
+import type { AgentState } from '../../shared/agent';
+import { EMPTY_AGENT_STATE } from '../../shared/agent';
 import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
@@ -79,6 +81,10 @@ interface State {
   /** Pending jump-to-match: Transcript scrolls to the item once its session is loaded. */
   searchJump: { sessionId: string; itemId: string; n: number } | null;
   showThinking: boolean;
+  /** Agatho's transcript, mirrored from the main process. */
+  agent: AgentState;
+  /** Text another part of the UI wants Agatho's composer to start from. */
+  agentPrefill: { text: string; nonce: number } | null;
   toasts: Toast[];
   changesVersion: number;
   history: NavEntry[];
@@ -109,6 +115,9 @@ interface State {
   /** Closes the search modal, activates the session and scrolls to the matched item. */
   jumpToSearchMatch(sessionId: string, itemId?: string): void;
   toggleThinking(): void;
+  setAgentState(s: AgentState): void;
+  /** Expands Agatho and seeds its composer; used by the "Set up with Agatho" entry points. */
+  openAgatho(prefill?: string): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
@@ -210,6 +219,8 @@ export const useStore = create<State>((set, get) => ({
   searchOpen: false,
   searchJump: null,
   showThinking: true,
+  agent: EMPTY_AGENT_STATE,
+  agentPrefill: null,
   toasts: [],
   changesVersion: 0,
   history: [],
@@ -230,7 +241,9 @@ export const useStore = create<State>((set, get) => ({
           on('push:sessionEvent', (env) => get().applyEvent(env));
           on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
           on('push:terminalsChanged', (list) => get().setTerminals(list));
+          on('push:agentState', (s) => get().setAgentState(s));
         }
+        void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
         const first = sessions.find((s) => !s.archived);
         if (first) await get().setActive(first.id);
         void get().refreshAvailability();
@@ -492,6 +505,14 @@ export const useStore = create<State>((set, get) => ({
   },
   toggleThinking() {
     set((s) => ({ showThinking: !s.showThinking }));
+  },
+  setAgentState(agent) {
+    set({ agent });
+  },
+  openAgatho(prefill) {
+    const current = get().settings?.agent ?? {};
+    set((s) => ({ agentPrefill: prefill ? { text: prefill, nonce: (s.agentPrefill?.nonce ?? 0) + 1 } : null }));
+    void invoke('settings:update', { agent: { ...current, enabled: true, collapsed: false } }).catch(toastError);
   },
   toast(text, kind = 'info') {
     const id = `t${++toastCounter}`;

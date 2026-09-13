@@ -771,6 +771,11 @@ export interface AppSettings {
   terminal: TerminalSettings;
   /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
   utilityModel?: ModelRef;
+  /** Model for Agatho, the in-app assistant. Falls back to utilityModel, which needs a model good
+   *  enough to pick correctly among its capabilities. */
+  agentModel?: ModelRef;
+  /** Agatho's floating panel: where it sits and whether it is collapsed to its avatar. */
+  agent?: { enabled?: boolean; x?: number; y?: number; collapsed?: boolean };
   /** Set once the first-run setup guide has been completed. */
   onboardingDone?: boolean;
 }

@@ -5195,3 +5195,198 @@ body.resizing {
     min-height: 34px;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Agatho: the floating in-app assistant                              */
+/* ------------------------------------------------------------------ */
+
+.agatho {
+  position: fixed;
+  z-index: 60;
+  font-size: 12.5px;
+  touch-action: none;
+}
+
+.agatho-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-fg);
+  cursor: grab;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
+  transition: transform 0.12s ease;
+}
+.agatho-avatar:hover {
+  transform: scale(1.06);
+}
+.agatho-avatar:active {
+  cursor: grabbing;
+}
+.agatho-avatar.busy {
+  animation: agatho-pulse 1.4s ease-in-out infinite;
+}
+@keyframes agatho-pulse {
+  0%,
+  100% {
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
+  }
+  50% {
+    box-shadow: 0 6px 26px var(--accent);
+  }
+}
+
+.agatho-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: 460px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 14px 44px rgb(0 0 0 / 0.32);
+  overflow: hidden;
+}
+
+.agatho-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
+  cursor: grab;
+  user-select: none;
+}
+.agatho-head:active {
+  cursor: grabbing;
+}
+.agatho-head .spacer {
+  flex: 1;
+}
+.agatho-model {
+  font-size: 10px;
+  color: var(--fg-muted);
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agatho-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+}
+
+.agatho-empty {
+  display: flex;
+  gap: 8px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+.agatho-empty em {
+  font-style: normal;
+  color: var(--fg);
+}
+
+.agatho-msg {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.agatho-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+.agatho-err {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--red);
+}
+
+.agatho-tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.agatho-tool.failed {
+  color: var(--red);
+}
+
+.agatho-proposal {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--bg-sunken);
+}
+.agatho-proposal.danger {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+.agatho-proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.agatho-proposal ul,
+.agatho-confirm-list {
+  margin: 0 0 8px;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.agatho-proposal li em {
+  font-style: normal;
+  margin-left: 6px;
+  font-size: 11px;
+}
+.agatho-proposal li em.ok {
+  color: var(--green);
+}
+.agatho-proposal li em.bad {
+  color: var(--red);
+}
+.agatho-proposal-actions {
+  display: flex;
+  gap: 6px;
+}
+.agatho-proposal-status {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: capitalize;
+}
+
+.agatho-compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.agatho-compose textarea {
+  flex: 1;
+  resize: none;
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+.agatho-compose .icon-btn.danger {
+  color: var(--red);
+}
