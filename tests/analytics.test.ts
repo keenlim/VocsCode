@@ -6,7 +6,7 @@ import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { addDay, AnalyticsStore, apportion, dayKey, emptyDay, summarize, tokensPerSecond, toolCallFromItem, turnSpeed, usageDelta } from '../src/main/analytics';
 import { emptyUsage } from '../src/main/models/static-models';
-import { emptyDimensions, rollupDays } from '../src/shared/usage-rollup';
+import { dimensionSeries, emptyDimensions, rollupDays } from '../src/shared/usage-rollup';
 import type { SessionMeta, TranscriptItem, UsageSessionRecord, UsageTotals } from '../src/shared/types';
 
 const dirs: string[] = [];
@@ -774,6 +774,33 @@ describe('legacy day estimation', () => {
     expect(day2.by?.estimated).toBe(true);
     expect(day2.by?.harness.claude?.costUsd).toBeCloseTo(2);
     expect(day2.by?.tool.Bash?.calls).toBe(10);
+  });
+
+  it('names a model stored without a provider by its bare id in the summary and the rollups', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    // A record written before the provider was part of the name: the model alone, so the key it is
+    // filed under starts with the separator and the stored label has no provider to show either.
+    const stored = { id: 'old', title: 'old', harness: 'pi', model: 'glm', projectRoot: '/p1', createdAt: t0, updatedAt: t0, usage: usage({ costUsd: 2, turns: 4 }), toolCalls: 1 };
+    const slice = { ...emptyDay(), costUsd: 2, turns: 4, toolCalls: 1, label: 'glm', sessions: ['old'] };
+    const file = {
+      version: 1,
+      days: { '2025-06-09': { ...emptyDay(), costUsd: 2, turns: 4, toolCalls: 1, by: { ...emptyDimensions(), model: { '/glm': slice } } } },
+      sessions: { old: stored },
+      modelTools: { '/glm': { bash: { calls: 1, errors: 0, declined: 0, durationMs: 0 } } },
+      harnessModelTools: { 'pi|/glm': { bash: { calls: 1, errors: 0, declined: 0, durationMs: 0 } } }
+    };
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify(file));
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([]);
+
+    const s = store.summary(0, t0);
+    expect(s.byModel.map((b) => [b.key, b.label])).toEqual([['/glm', 'glm']]);
+    expect(s.modelRates.map((r) => [r.key, r.label])).toEqual([['/glm', 'glm']]);
+    expect(s.modelTools.map((r) => [r.key, r.label])).toEqual([['/glm', 'glm']]);
+    expect(s.harnessModelTools.map((r) => [r.harness, r.key, r.label])).toEqual([['pi', '/glm', 'glm']]);
+    expect(rollupDays(s.days).byModel.map((b) => [b.key, b.label])).toEqual([['/glm', 'glm']]);
+    expect(dimensionSeries(s.days, 'model', (c) => c.costUsd, 5).series.map((x) => [x.key, x.label])).toEqual([['/glm', 'glm']]);
   });
 });
 

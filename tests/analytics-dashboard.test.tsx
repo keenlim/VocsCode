@@ -57,7 +57,7 @@ const summary: AnalyticsSummary = {
   byHarness: [],
   byModel: [],
   byProject: [],
-  modelRates: [{ key: 'p/opus', label: 'opus', usdPerMTok: 2, usdPerCall: 0.5, costUsd: 5, tokens: 2_500_000, calls: 10 }],
+  modelRates: [{ key: 'p/opus', label: 'p/opus', usdPerMTok: 2, usdPerCall: 0.5, costUsd: 5, tokens: 2_500_000, calls: 10 }],
   toolTotals: { calls: 8, errors: 0, declined: 0, durationMs: 0 },
   tools: [{ name: 'Bash', calls: 8, errors: 0, declined: 0, durationMs: 0 }],
   modelTools: [],
@@ -142,15 +142,15 @@ describe('analytics dashboard', () => {
   it("shows each model's per-tool error rates on the tools tab", async () => {
     reset();
     summary.modelTools = [
-      { key: 'p/sol', label: 'sol', name: 'bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
-      { key: 'p/glm', label: 'glm', name: 'bash', calls: 9, errors: 1, declined: 0, durationMs: 0 },
-      { key: 'p/luna', label: 'luna', name: 'bash', calls: 8, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'p/deepseek', label: 'deepseek', name: 'bash', calls: 7, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'p/fable', label: 'fable-5-1', name: 'Bash', calls: 6, errors: 1, declined: 0, durationMs: 0 },
-      { key: 'p/astra', label: 'astra', name: 'bash', calls: 5, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'p/terra', label: 'terra', name: 'bash', calls: 2, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 1, errors: 0, declined: 0, durationMs: 0 },
-      { key: 'p/fable', label: 'fable-5-1', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 }
+      { key: 'p/sol', label: 'p/sol', name: 'bash', calls: 10, errors: 2, declined: 0, durationMs: 0 },
+      { key: 'p/glm', label: 'p/glm', name: 'bash', calls: 9, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/luna', label: 'p/luna', name: 'bash', calls: 8, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/deepseek', label: 'p/deepseek', name: 'bash', calls: 7, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/fable', label: 'p/fable', name: 'Bash', calls: 6, errors: 1, declined: 0, durationMs: 0 },
+      { key: 'p/astra', label: 'p/astra', name: 'bash', calls: 5, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/terra', label: 'p/terra', name: 'bash', calls: 2, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'anthropic/opus', label: 'anthropic/opus', name: 'Bash', calls: 1, errors: 0, declined: 0, durationMs: 0 },
+      { key: 'p/fable', label: 'p/fable', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 }
     ];
     const { container } = render(<AnalyticsDashboard />);
     await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
@@ -164,12 +164,13 @@ describe('analytics dashboard', () => {
     // Models are the rows in alphabetical order and Total leads the tool columns.
     expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Model', 'Total', 'bash', 'Read']);
     expect(table.querySelectorAll('tbody tr')).toHaveLength(8);
-    expect(Array.from(table.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td')?.textContent)).toEqual(['astra', 'deepseek', 'fable-5-1', 'glm', 'luna', 'opus', 'sol', 'terra']);
+    // Rows are named by the qualified key each model was filed under, so they sort provider first.
+    expect(Array.from(table.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td')?.textContent)).toEqual(['anthropic/opus', 'p/astra', 'p/deepseek', 'p/fable', 'p/glm', 'p/luna', 'p/sol', 'p/terra']);
     // Built-in names from Claude use title case, while Pi/native use lower case. They share columns.
-    const solRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('sol')) as HTMLTableRowElement;
-    expect(Array.from(solRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['sol', '(2/10) 20%', '(2/10) 20%', '—']);
-    const fableRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('fable-5-1')) as HTMLTableRowElement;
-    expect(Array.from(fableRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['fable-5-1', '(1/9) 11%', '(1/6) 17%', '(0/3) 0%']);
+    const solRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('p/sol')) as HTMLTableRowElement;
+    expect(Array.from(solRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['p/sol', '(2/10) 20%', '(2/10) 20%', '—']);
+    const fableRow = Array.from(table.querySelectorAll('tr')).find((tr) => tr.textContent?.startsWith('p/fable')) as HTMLTableRowElement;
+    expect(Array.from(fableRow.querySelectorAll('td')).map((cell) => cell.textContent)).toEqual(['p/fable', '(1/9) 11%', '(1/6) 17%', '(0/3) 0%']);
     expect(Array.from(table.querySelectorAll('tr')).filter((tr) => tr.textContent?.toLowerCase().startsWith('bash'))).toHaveLength(0);
     // No harness+model data in this stub: the sibling card says so instead of rendering an empty table.
     expect(container.textContent).toContain('No per-harness tool calls recorded yet');
@@ -178,12 +179,12 @@ describe('analytics dashboard', () => {
   it('shows the error rate by harness and model in the same matrix as the model table', async () => {
     reset();
     summary.harnessModelTools = [
-      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 8, errors: 2, declined: 0, durationMs: 0 },
-      { harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 4, errors: 0, declined: 0, durationMs: 0 },
-      { harness: 'pi', key: 'openrouter/glm', label: 'glm', name: 'bash', calls: 5, errors: 2, declined: 0, durationMs: 0 },
-      { harness: 'codex', key: 'openai/gpt', label: 'gpt', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 },
+      { harness: 'claude', key: 'anthropic/opus', label: 'anthropic/opus', name: 'Bash', calls: 8, errors: 2, declined: 0, durationMs: 0 },
+      { harness: 'claude', key: 'anthropic/opus', label: 'anthropic/opus', name: 'Read', calls: 4, errors: 0, declined: 0, durationMs: 0 },
+      { harness: 'pi', key: 'openrouter/glm', label: 'openrouter/glm', name: 'bash', calls: 5, errors: 2, declined: 0, durationMs: 0 },
+      { harness: 'codex', key: 'openai/gpt', label: 'openai/gpt', name: 'Read', calls: 3, errors: 0, declined: 0, durationMs: 0 },
       // The same model in another harness is its own row, not merged into the first.
-      { harness: 'pi', key: 'anthropic/opus', label: 'opus', name: 'Bash', calls: 2, errors: 0, declined: 0, durationMs: 0 }
+      { harness: 'pi', key: 'anthropic/opus', label: 'anthropic/opus', name: 'Bash', calls: 2, errors: 0, declined: 0, durationMs: 0 }
     ];
     const { container } = render(<AnalyticsDashboard />);
     await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
@@ -196,10 +197,10 @@ describe('analytics dashboard', () => {
     expect(Array.from(table.querySelectorAll('th')).map((th) => th.textContent)).toEqual(['Harness · model', 'Total', 'bash', 'Read']);
     const rows = Array.from(table.querySelectorAll('tbody tr')).map((tr) => Array.from(tr.querySelectorAll('td')).map((cell) => cell.textContent));
     expect(rows).toEqual([
-      ['Claude · opus', '(2/12) 17%', '(2/8) 25%', '(0/4) 0%'],
-      ['Codex · gpt', '(0/3) 0%', '—', '(0/3) 0%'],
-      ['Pi · glm', '(2/5) 40%', '(2/5) 40%', '—'],
-      ['Pi · opus', '(0/2) 0%', '(0/2) 0%', '—']
+      ['Claude · anthropic/opus', '(2/12) 17%', '(2/8) 25%', '(0/4) 0%'],
+      ['Codex · openai/gpt', '(0/3) 0%', '—', '(0/3) 0%'],
+      ['Pi · anthropic/opus', '(0/2) 0%', '(0/2) 0%', '—'],
+      ['Pi · openrouter/glm', '(2/5) 40%', '(2/5) 40%', '—']
     ]);
   });
 
@@ -218,8 +219,8 @@ describe('analytics dashboard', () => {
     const response: AnalyticsSummary = {
       ...summary,
       days: [old, recent],
-      modelTools: [{ key: 'p/same', label: 'same', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 }],
-      harnessModelTools: [{ harness: 'claude', key: 'p/same', label: 'same', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 }],
+      modelTools: [{ key: 'p/same', label: 'p/same', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 }],
+      harnessModelTools: [{ harness: 'claude', key: 'p/same', label: 'p/same', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 }],
       harnessTools: [
         { key: 'claude', label: 'claude', name: 'read', calls: 10, errors: 3, declined: 4, durationMs: 0 },
         { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 0 },
@@ -254,7 +255,7 @@ describe('analytics dashboard', () => {
       expect(ui.getAllByText('(3/10) 30%')).toHaveLength(4);
       const modelTable = ui.getByRole('columnheader', { name: 'Harness · model' }).closest('table')!;
       expect(within(modelTable).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual([
-        ['Claude · same', '(3/10) 30%', '(3/10) 30%']
+        ['Claude · p/same', '(3/10) 30%', '(3/10) 30%']
       ]);
       fireEvent.click(ui.getByRole('radio', { name: '30 days' }));
       await waitFor(() => expect(cells()[0]).toEqual(['Claude', '(2/4) 50%', '(2/4) 50%', '—']));
@@ -278,5 +279,20 @@ describe('analytics dashboard', () => {
     const table = container.querySelector('.atable');
     expect(table).toBeTruthy();
     expect(table?.querySelector('th')?.textContent).toBe('Day');
+  });
+
+  it('names models by the key they were filed under, not the bare label recorded with them', async () => {
+    reset();
+    const { container } = render(<AnalyticsDashboard />);
+    await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+    // The stub days store the bare model id as the slice label, the way analytics.json did before
+    // the provider became part of the name; every surface names them from the key instead.
+    const legend = () => Array.from(container.querySelectorAll('.legend-item')).map((b) => b.textContent);
+    await waitFor(() => expect(legend()).toEqual(['p/opus', 'p/glm', 'Unattributed']));
+    fireEvent.click(container.querySelector("[data-tab='spend']") as HTMLButtonElement);
+    const byModel = Array.from(container.querySelectorAll('.acard')).find((c) => c.querySelector('.acard-title')?.textContent === 'By model') as HTMLElement;
+    expect(Array.from(byModel.querySelectorAll('.hbar-name')).map((n) => n.textContent)).toEqual(['p/opus', 'p/glm']);
+    // The rates table names the same model the same way.
+    expect(container.querySelector('.atable .mono')?.textContent).toBe('p/opus');
   });
 });

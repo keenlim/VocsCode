@@ -177,6 +177,12 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       await win.getByRole('radio', { name: '30 days', exact: true }).click();
       await win.getByText(`last 30 days · ${dateOf(29)} – ${dateOf(0)}`).waitFor();
       await expect.poll(rows).toEqual(expected(['Claude', '(1/3) 33%', '(1/3) 33%', '—']));
+      // A bounded range rebuilds its model rows from the stored day slices, whose labels were just
+      // rewritten to the bare id: both matrices still name the model by its qualified key.
+      const modelTable = win.locator('.atable').filter({ has: win.getByRole('columnheader', { name: 'Model', exact: true }) });
+      await expect.poll(() => modelTable.locator('tbody tr').first().locator('td').first().innerText()).toBe('anthropic/claude-sonnet-4-6');
+      const harnessModelTable = win.locator('.atable').filter({ has: win.getByRole('columnheader', { name: 'Harness · model' }) });
+      await expect.poll(() => harnessModelTable.locator('tbody tr').first().locator('td').first().innerText()).toBe('Claude · anthropic/claude-sonnet-4-6');
       // A real process restart with the same userData must preserve exact counters.
       await app.close();
       app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });

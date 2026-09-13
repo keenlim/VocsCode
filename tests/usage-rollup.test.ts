@@ -1,7 +1,7 @@
 /** Unit tests for the shared usage rollups: range buckets from day slices, the unattributed remainder and chart series. */
 import { describe, expect, it } from 'vitest';
 import type { AnalyticsDayPoint, UsageDay } from '../src/shared/types';
-import { addCounters, addSlice, dimensionSeries, emptyCounters, emptyDimensions, fillDays, harnessModelToolUsageRows, rollupDays, speedTps } from '../src/shared/usage-rollup';
+import { addCounters, addSlice, dimensionSeries, emptyCounters, emptyDimensions, fillDays, harnessModelToolUsageRows, modelToolUsageRows, rollupDays, speedTps } from '../src/shared/usage-rollup';
 
 interface Row {
   id: string;
@@ -67,8 +67,8 @@ describe('rollupDays', () => {
     expect(r.totals.turns).toBe(8);
     expect(r.sessionIds.sort()).toEqual(['a', 'b']);
     expect(r.byModel.map((b) => [b.key, b.label, b.usage.costUsd, b.sessions])).toEqual([
-      ['p/opus', 'opus', 5, 1],
-      ['p/glm', 'glm', 1, 1]
+      ['p/opus', 'p/opus', 5, 1],
+      ['p/glm', 'p/glm', 1, 1]
     ]);
     expect(r.byHarness[0]).toMatchObject({ key: 'claude', toolCalls: 6, durationMs: 9000, speed: { tokens: 200, ms: 10_000 } });
     // Average turn time per model: 9000ms of wall time over 6 turns.
@@ -85,12 +85,12 @@ describe('rollupDays', () => {
     ]);
     expect(r.toolTotals).toEqual({ calls: 9, errors: 1, declined: 1, durationMs: 300 });
     expect(r.modelTools.map((t) => [t.key, t.label, t.name, t.calls, t.errors])).toEqual([
-      ['p/opus', 'opus', 'bash', 5, 1],
-      ['p/glm', 'glm', 'Read', 1, 1]
+      ['p/opus', 'p/opus', 'bash', 5, 1],
+      ['p/glm', 'p/glm', 'Read', 1, 1]
     ]);
     expect(r.harnessModelTools.map((t) => [t.harness, t.key, t.label, t.name, t.calls, t.errors])).toEqual([
-      ['claude', 'p/opus', 'opus', 'bash', 5, 1],
-      ['pi', 'p/glm', 'glm', 'Read', 1, 1]
+      ['claude', 'p/opus', 'p/opus', 'bash', 5, 1],
+      ['pi', 'p/glm', 'p/glm', 'Read', 1, 1]
     ]);
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);
   });
@@ -130,6 +130,34 @@ describe('rollupDays', () => {
     expect(rollupDays(days).estimatedDays).toBe(1);
     delete days[0].usage.by!.estimated;
   });
+
+  it('names a model from the key it was filed under rather than the label stored with it', () => {
+    const usage = day();
+    const by = emptyDimensions();
+    // Slices recorded before the name carried a provider keep the bare id as their label, and the
+    // earliest ones have no provider at all, so their key starts with the separator.
+    addSlice(by.model, 'anthropic/opus', 'opus', { costUsd: 2, turns: 1 }, 'a');
+    addSlice(by.model, '/glm', 'glm', { costUsd: 1, turns: 1 }, 'b');
+    by.modelTool = { 'anthropic/opus': { Bash: { calls: 1, errors: 0, declined: 0, durationMs: 0 } }, '/glm': { Bash: { calls: 2, errors: 0, declined: 0, durationMs: 0 } } };
+    by.harnessModelTool = { 'claude|/glm': { Bash: { calls: 2, errors: 0, declined: 0, durationMs: 0 } } };
+    usage.by = by;
+    const stored: AnalyticsDayPoint = { date: '2025-06-01', usage };
+
+    const r = rollupDays([stored]);
+    expect(r.byModel.map((b) => [b.key, b.label])).toEqual([
+      ['anthropic/opus', 'anthropic/opus'],
+      ['/glm', 'glm']
+    ]);
+    expect(r.modelTools.map((t) => [t.key, t.label])).toEqual([
+      ['/glm', 'glm'],
+      ['anthropic/opus', 'anthropic/opus']
+    ]);
+    expect(r.harnessModelTools.map((t) => [t.harness, t.key, t.label])).toEqual([['claude', '/glm', 'glm']]);
+    expect(dimensionSeries([stored], 'model', (c) => c.costUsd, 5).series.map((x) => [x.key, x.label])).toEqual([
+      ['anthropic/opus', 'anthropic/opus'],
+      ['/glm', 'glm']
+    ]);
+  });
 });
 
 describe('harnessModelToolUsageRows', () => {
@@ -144,6 +172,12 @@ describe('harnessModelToolUsageRows', () => {
       ['pi', 'openrouter/anthropic/claude-3.5-sonnet', 'openrouter/anthropic/claude-3.5-sonnet', 'bash', 2],
       ['claude', 'anthropic/claude-3.5-sonnet', 'anthropic/claude-3.5-sonnet', 'bash', 1]
     ]);
+  });
+
+  it('names rows from their key when the caller counts without a label map', () => {
+    const rows = modelToolUsageRows({ '/glm': { Bash: { calls: 2, errors: 1, declined: 0, durationMs: 0 } } });
+    // No provider was recorded for this slice, so the name is the bare id rather than a lone slash.
+    expect(rows).toEqual([{ key: '/glm', label: 'glm', name: 'Bash', calls: 2, errors: 1, declined: 0, durationMs: 0 }]);
   });
 });
 
@@ -163,8 +197,8 @@ describe('dimensionSeries', () => {
   it('ranks entities over the whole range and folds the tail into Other', () => {
     const s = dimensionSeries(days, 'model', (c) => c.costUsd, 2);
     expect(s.series.map((x) => [x.key, x.label, x.values])).toEqual([
-      ['p/m1', 'm1', [5, 1]],
-      ['p/m2', 'm2', [3, 0]]
+      ['p/m1', 'p/m1', [5, 1]],
+      ['p/m2', 'p/m2', [3, 0]]
     ]);
     expect(s.other).toEqual([1, 2]);
     expect(s.unattributed).toBeUndefined();
