@@ -9,6 +9,7 @@ import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
+import { installPiAgentOverrides } from '../pi-agents';
 
 export const PI_APPROVAL_MARKER = 'VCODE_APPROVAL::';
 const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
@@ -124,6 +125,13 @@ export class PiAdapter implements HarnessAdapter {
     const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
+
+    // Subagents inherit the session model: override pi-subagents' pinned Explore agent globally
+    // and per project, without clobbering a file the user or the project already provides.
+    await installPiAgentOverrides({
+      cwd: meta.cwd,
+      log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
+    });
 
     const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '--session-dir', sessionDir];
     if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
