@@ -295,6 +295,8 @@ export interface UsageDayDimensions {
   modelTool: Record<string, Record<string, ToolUsage>>;
   /** Live per-tool outcomes keyed by harness; absent in legacy days and never estimated. */
   harnessTool?: Record<string, Record<string, ToolUsage>>;
+  /** Per-tool call counts keyed `harness|provider/model`, attributed to both when the call ran. */
+  harnessModelTool: Record<string, Record<string, ToolUsage>>;
   file: Record<string, FileUsage>;
 }
 
@@ -338,6 +340,12 @@ export interface HarnessToolRow extends ToolUsage {
   key: string;
   label: string;
   name: string;
+}
+
+/** Tool-call rollup for one tool under one harness and model. */
+export interface HarnessModelToolRow extends ModelToolRow {
+  /** The harness the call ran in. */
+  harness: string;
 }
 
 /** File-change counts by change kind, aggregated across tool calls. */
@@ -426,6 +434,8 @@ export interface AnalyticsSummary {
   modelTools: ModelToolRow[];
   /** Live per-tool outcomes per harness, recorded since this dimension was introduced. */
   harnessTools: HarnessToolRow[];
+  /** Per-tool call counts per harness and model, sorted by volume. */
+  harnessModelTools: HarnessModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];
@@ -477,6 +487,11 @@ export interface SessionMeta {
   /** User-picked display label for the status badge; shown instead of the status name until cleared. */
   statusLabel?: string;
   harnessRef: HarnessRef;
+  /**
+   * Set on a cross-harness fork: the copied transcript is written to `fork-context.md` and prefixed
+   * to the next user message so the new harness starts with the prior conversation, then cleared.
+   */
+  pendingForkContext?: boolean;
   usage: UsageTotals;
   lastError?: string;
   /** Current model as reported by the harness (may differ from config after live switch). */
@@ -724,6 +739,8 @@ export interface AppSettings {
   theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
+  /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
+  remote: RemoteConfig;
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
@@ -787,6 +804,8 @@ export interface AppSettings {
   utilityModel?: ModelRef;
   /** Set once the first-run setup guide has been completed. */
   onboardingDone?: boolean;
+  /** Project roots where the user dismissed the "publish to GitHub" guide on the Git tab. */
+  gitSetupSkipped?: string[];
 }
 
 export interface GitFileStatus {
@@ -807,6 +826,26 @@ export interface GitSummary {
   behind?: number;
   /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
   error?: string;
+}
+
+/**
+ * Guided-setup state for a folder: how far a repository has come (init, first commit, GitHub
+ * remote, push) and whether the GitHub CLI can automate the remote side.
+ */
+export interface GitSetupStatus {
+  isRepo: boolean;
+  /** Repository root, once initialized. */
+  root?: string;
+  /** Current branch; absent on a detached HEAD. */
+  branch?: string;
+  /** False for a repository with no commits yet (an unborn branch). */
+  hasCommits: boolean;
+  /** The `origin` remote URL, when one is configured. */
+  remote?: string;
+  /** True once the current branch exists on origin (a remote-tracking ref). */
+  pushed: boolean;
+  /** GitHub CLI availability, which powers one-click repository creation and credential setup. */
+  gh: { installed: boolean; authenticated: boolean; account?: string };
 }
 
 export interface GitBranchInfo {
@@ -922,6 +961,28 @@ export interface FsEntry {
   path: string;
   isDir: boolean;
   size?: number;
+}
+
+/** Remote access (docs/REMOTE-ACCESS.md §6): config + live state surfaced to the renderer. */
+export interface RemoteConfig {
+  enabled: boolean;
+  relayUrl?: string;
+}
+
+export interface RemoteState {
+  status: 'off' | 'connecting' | 'online' | 'error';
+  detail?: string;
+  pairing?: { code: string; expiresAt: number };
+  pendingRequest?: { code: string; name: string; platform: string };
+  onlineClients: string[];
+}
+
+export interface RemoteDeviceInfo {
+  deviceId: string;
+  kind: 'host' | 'web';
+  name: string;
+  platform: string;
+  lastSeen: number;
 }
 
 export interface DoctorReport {

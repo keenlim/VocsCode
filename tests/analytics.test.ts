@@ -101,8 +101,10 @@ describe('summarize', () => {
     ];
     const tools = { Read: { calls: 8, errors: 1, declined: 0, durationMs: 800 }, Bash: { calls: 6, errors: 0, declined: 1, durationMs: 900 } };
     const modelTools = { 'openai/gpt': { Bash: { calls: 4, errors: 1, declined: 0, durationMs: 0 } }, 'anthropic/opus': { Read: { calls: 6, errors: 0, declined: 1, durationMs: 0 } } };
+    const harnessModelTools = { 'codex|openai/gpt': { Bash: { calls: 4, errors: 1, declined: 0, durationMs: 0 } }, 'claude|anthropic/opus': { Read: { calls: 6, errors: 0, declined: 1, durationMs: 0 } } };
     const files = { 'src/a.ts': { adds: 1, updates: 3, deletes: 0, renames: 0 }, 'src/b.ts': { adds: 2, updates: 0, deletes: 1, renames: 0 } };
-    const s = summarize(sessions, {}, tools, modelTools, files, 0, 0);
+    const harnessTools = { codex: { Bash: { calls: 4, errors: 1, declined: 0, durationMs: 0 } } };
+    const s = summarize(sessions, {}, tools, modelTools, harnessModelTools, files, 0, 0, harnessTools);
     expect(s.totals.costUsd).toBeCloseTo(4.5);
     expect(s.totals.turns).toBe(7);
     expect(s.sessionCount).toBe(3);
@@ -126,6 +128,11 @@ describe('summarize', () => {
       ['openai/gpt', 'Bash', 4]
     ]);
     expect(s.modelTools[0].label).toBe('opus');
+    expect(s.harnessModelTools.map((r) => [r.harness, r.key, r.name, r.calls])).toEqual([
+      ['claude', 'anthropic/opus', 'Read', 6],
+      ['codex', 'openai/gpt', 'Bash', 4]
+    ]);
+    expect(s.harnessTools).toEqual([{ key: 'codex', label: 'codex', name: 'Bash', calls: 4, errors: 1, declined: 0, durationMs: 0 }]);
     expect(s.files[0]).toMatchObject({ path: 'src/a.ts', total: 4 });
   });
 
@@ -142,7 +149,7 @@ describe('summarize', () => {
       },
       'openai/terra': { bash: { calls: 5, errors: 1, declined: 1, durationMs: 50 } }
     };
-    const s = summarize([], {}, tools, modelTools, {}, 0, 0);
+    const s = summarize([], {}, tools, modelTools, {}, {}, 0, 0);
     expect(s.tools).toEqual([
       { name: 'bash', calls: 10, errors: 3, declined: 1, durationMs: 100 },
       { name: 'AskUserQuestion', calls: 2, errors: 0, declined: 0, durationMs: 0 }
@@ -172,7 +179,7 @@ describe('summarize', () => {
       rec('c', usage({ costUsd: 0.5, turns: 2 }), 'local', 'llama'),
       rec('d', usage({ costUsd: 0.2, inputTokens: 1000 }), 'local', 'embed')
     ];
-    const s = summarize(sessions, {}, {}, {}, {}, 0, 0);
+    const s = summarize(sessions, {}, {}, {}, {}, {}, 0, 0);
     expect(s.modelRates.map((r) => r.key)).toEqual(['anthropic/opus', 'local/llama', 'local/embed', 'deepseek/chat']);
     const opus = s.modelRates.find((r) => r.key === 'anthropic/opus')!;
     expect(opus.tokens).toBe(200_000);
@@ -198,9 +205,9 @@ describe('summarize', () => {
       '2025-06-02': { ...emptyDay(), costUsd: 2 },
       '2025-05-01': { ...emptyDay(), costUsd: 4 }
     };
-    const s = summarize([], days, {}, {}, {}, 7, now);
+    const s = summarize([], days, {}, {}, {}, {}, 7, now);
     expect(s.days.map((d) => d.date)).toEqual(['2025-06-09']);
-    const all = summarize([], days, {}, {}, {}, 0, now);
+    const all = summarize([], days, {}, {}, {}, {}, 0, now);
     expect(all.days.map((d) => d.date)).toEqual(['2025-05-01', '2025-06-02', '2025-06-09']);
     expect(all.activeDays).toBe(3);
   });
@@ -388,6 +395,11 @@ describe('per-tool-call tracking', () => {
       { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 500 }
     ]);
     expect(rollupDays(s.days).harnessTools).toEqual(s.harnessTools);
+    expect(s.harnessModelTools).toEqual([
+      { harness: 'claude', key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 3, errors: 1, declined: 1, durationMs: 750 },
+      { harness: 'pi', key: 'anthropic/same-model', label: 'same-model', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 500 }
+    ]);
+    expect(rollupDays(s.days).harnessModelTools).toEqual(s.harnessModelTools);
     expect(s.toolTotals).toEqual({ calls: 6, errors: 2, declined: 2, durationMs: 1500 });
     expect(s.days.map((d) => [d.date, d.usage.toolCalls])).toEqual([['2025-06-09', 6]]);
     expect(s.sessions.map((x) => x.toolCalls)).toEqual([3, 2]);
@@ -431,13 +443,16 @@ describe('per-tool-call tracking', () => {
   it('keeps transcript backfill out of the new harness dimension', async () => {
     const store = new AnalyticsStore(tmpDir(), { log });
     const old = toolItem('old-error', { name: 'Read', status: 'error' });
-    await store.load([meta('old', 'claude', usage({}))], async () => [old]);
+    await store.load([meta('old', 'claude', usage({}), { activeModel: { provider: 'anthropic', model: 'opus' } })], async () => [old]);
     expect(store.summary(0).toolTotals.calls).toBe(1);
+    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
+    expect(rollupDays(store.summary(0).days).harnessModelTools).toEqual(store.summary(0).harnessModelTools);
     expect(store.summary(0).harnessTools).toEqual([]);
     expect(rollupDays(store.summary(0).days).harnessTools).toEqual([]);
     store.recordToolCall('old', old);
     await store.flush();
     expect(store.summary(0).toolTotals.calls).toBe(1);
+    expect(store.summary(0).harnessModelTools).toEqual([{ harness: 'claude', key: 'anthropic/opus', label: 'opus', name: 'Read', calls: 1, errors: 1, declined: 0, durationMs: 250 }]);
     expect(store.summary(0).harnessTools).toEqual([]);
   });
 
@@ -594,6 +609,8 @@ describe('per-dimension day slices', () => {
     expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
     expect(by?.modelTool['openrouter/glm']?.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
     expect(by?.modelTool['anthropic/sonnet']?.edit).toEqual({ calls: 1, errors: 1, declined: 0, durationMs: 5 });
+    expect(by?.harnessModelTool['pi|openrouter/glm']?.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
+    expect(by?.harnessModelTool['claude|anthropic/sonnet']?.edit).toEqual({ calls: 1, errors: 1, declined: 0, durationMs: 5 });
     // The all-time per-model tool map survives the reload, keyed like the model slices.
     expect(s.modelTools.map((x) => [x.key, x.name, x.calls]).sort()).toEqual([
       ['anthropic/opus', 'bash', 1],
@@ -601,6 +618,12 @@ describe('per-dimension day slices', () => {
       ['openrouter/glm', 'bash', 1]
     ]);
     expect(s.modelTools.find((x) => x.key === 'anthropic/sonnet')).toMatchObject({ label: 'sonnet', errors: 1 });
+    // The all-time harness+model map keeps each pair separate.
+    expect(s.harnessModelTools.map((x) => [x.harness, x.key, x.name, x.calls])).toEqual([
+      ['claude', 'anthropic/opus', 'bash', 1],
+      ['claude', 'anthropic/sonnet', 'edit', 1],
+      ['pi', 'openrouter/glm', 'bash', 1]
+    ]);
     expect(by?.file['f.ts']).toEqual({ adds: 0, updates: 1, deletes: 0, renames: 0 });
     // The range rollup rebuilds the totals from the slices with nothing left over.
     const r = rollupDays(s.days);
@@ -614,6 +637,36 @@ describe('per-dimension day slices', () => {
       ['anthropic/sonnet', 'edit', 1],
       ['openrouter/glm', 'bash', 1]
     ]);
+    expect(r.harnessModelTools.map((x) => [x.harness, x.key, x.name, x.calls])).toEqual([
+      ['claude', 'anthropic/opus', 'bash', 1],
+      ['claude', 'anthropic/sonnet', 'edit', 1],
+      ['pi', 'openrouter/glm', 'bash', 1]
+    ]);
+  });
+
+  it('keeps one model separate per harness while the model-only rollup merges them', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const store = new AnalyticsStore(dir, { log });
+    const claude = meta('claude-s', 'claude', usage({}), { updatedAt: t0, activeModel: { provider: 'anthropic', model: 'opus' } });
+    const pi = meta('pi-s', 'pi', usage({}), { updatedAt: t0, activeModel: { provider: 'anthropic', model: 'opus' } });
+    await store.load([claude, pi]);
+    store.recordToolCall('claude-s', { id: 'c1', kind: 'tool', ts: 1, name: 'Bash', status: 'done' }, t0);
+    store.recordToolCall('pi-s', { id: 'p1', kind: 'tool', ts: 1, name: 'Bash', status: 'error' }, t0);
+    store.recordToolCall('pi-s', { id: 'p2', kind: 'tool', ts: 1, name: 'Bash', status: 'done' }, t0);
+    await store.flush();
+
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    const s = fresh.summary(0, t0);
+    expect(s.harnessModelTools.map((r) => [r.harness, r.key, r.name, r.calls, r.errors])).toEqual([
+      ['pi', 'anthropic/opus', 'Bash', 2, 1],
+      ['claude', 'anthropic/opus', 'Bash', 1, 0]
+    ]);
+    // The model-only map still merges the same model across harnesses.
+    expect(s.modelTools.map((r) => [r.key, r.name, r.calls, r.errors])).toEqual([['anthropic/opus', 'Bash', 3, 1]]);
+    expect(s.days[0].usage.by?.harnessModelTool['claude|anthropic/opus']?.Bash).toMatchObject({ calls: 1, errors: 0 });
+    expect(s.days[0].usage.by?.harnessModelTool['pi|anthropic/opus']?.Bash).toMatchObject({ calls: 2, errors: 1 });
   });
 
   it('backfills pre-existing sessions into slices and reports the window before the range', async () => {

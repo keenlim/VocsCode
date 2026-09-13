@@ -78,15 +78,15 @@ describe.runIf(enabled)('electron e2e: approvals', () => {
     expect(await win.locator('.turn-footer').innerText()).toMatch(/complete/i);
     expect(await win.locator('.turn-footer').innerText()).not.toMatch(/failed|interrupted/i);
 
-    // Tool card recorded the change; Changes panel shows the new file.
+    // Both tools completed; the non-repository Changes panel offers Git setup.
     expect(await win.locator('.tool-card').count()).toBe(2);
     expect(await win.locator('.tool-name').allTextContents()).toEqual(['write_file', 'grep']);
     const grep = win.locator('.tool-card').filter({ has: win.locator('.tool-name', { hasText: /^grep$/ }) });
     expect(await grep.innerText()).toContain('done');
     await grep.getByRole('button').first().click();
     expect(await grep.innerText()).toContain('approved by vocs code');
-    await win.click('.panel-tab:has-text("Changes")');
-    await win.waitForSelector('.changes, .empty', { timeout: 10_000 }); // no git repo here → empty state
+    await win.getByRole('button', { name: 'Changes', exact: true }).click();
+    await win.getByRole('button', { name: 'Initialize repository', exact: true }).waitFor({ state: 'visible', timeout: 10_000 });
     await win.screenshot({ path: path.join(shots, 'e2e-06-approval-applied.png') });
     // Header shows the session title next to the status dot (layout regression check).
     const title = await win.getByTestId('session-title').innerText();

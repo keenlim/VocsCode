@@ -502,11 +502,9 @@ function caseSensitive(pattern: string): boolean {
 
 export async function grepTool(cwd: string, args: { pattern: string; path?: string; glob?: string; max_results?: number }, signal: AbortSignal): Promise<ToolExecResult> {
   const root = resolveInCwd(cwd, args.path);
-  const requested = args.max_results ?? 200;
-  if (!Number.isInteger(requested) || requested < 1) return { output: 'max_results must be a positive integer.', isError: true };
-  if (signal.aborted) return { output: 'Search interrupted before execution.', isError: true };
+  const max = Math.max(1, Math.min(Math.floor(Number.isFinite(args.max_results) ? args.max_results! : 200), 2000));
+  if (signal.aborted) return { output: '[interrupted by user]', isError: true };
   if (args.pattern.length > 500) return { output: 'Pattern is too long (max 500 characters).', isError: true };
-  const max = Math.min(requested, 2000);
   const rg = which('rg');
   if (rg) {
     const rgArgs = ['-n', '--with-filename', '--no-heading', '--color', 'never', '--no-config', caseSensitive(args.pattern) ? '--case-sensitive' : '--ignore-case'];
@@ -514,60 +512,92 @@ export async function grepTool(cwd: string, args: { pattern: string; path?: stri
     for (const d of IGNORED_DIRS) rgArgs.push('-g', `!${d}`);
     rgArgs.push('-e', args.pattern, root);
     return new Promise<ToolExecResult>((resolve) => {
+      const byteLimit = 512 * 1024;
       const lines: string[] = [];
+      const stdoutDecoder = new StringDecoder('utf8');
+      const stderrDecoder = new StringDecoder('utf8');
       let pending = '';
       let stderr = '';
-      let reason = '';
-      let done = false;
-      let lineClipped = false;
-      let termination: Promise<void> | undefined;
-      const decoder = new StringDecoder('utf8');
-      const child = spawn(rg, rgArgs, { cwd, windowsHide: true, detached: process.platform !== 'win32' });
-      const stop = (why: string) => {
-        if (termination || done) return;
-        reason = why;
-        termination = terminate(child);
+      let bytes = 0;
+      let limited: 'matches' | 'bytes' | undefined;
+      let interrupted = false;
+      let timedOut = false;
+      let settled = false;
+      let child;
+      try {
+        child = spawn(rg, rgArgs, { cwd, windowsHide: true });
+      } catch {
+        resolve({ output: 'ripgrep failed', isError: true });
+        return;
+      }
+      const stopAtLimit = (reason: 'matches' | 'bytes') => {
+        if (limited) return;
+        limited = reason;
+        child.kill();
       };
-      const onAbort = () => stop('Search interrupted.');
-      const timer = setTimeout(() => stop('Search timed out after 30000 ms.'), 30_000);
-      const addLine = () => {
-        if (pending && lines.length <= max) lines.push(pending.replace(root + path.sep, '').replace(/\r$/, ''));
-        pending = '';
-        if (lines.length > max) stop('limit');
+      const onAbort = () => {
+        interrupted = true;
+        if (!limited && !timedOut) child.kill();
       };
-      const consume = (text: string) => {
-        if (termination) return;
-        const parts = text.split('\n');
-        for (let i = 0; i < parts.length; i++) {
-          const room = 1000 - pending.length;
-          if (parts[i].length > room) lineClipped = true;
-          pending += parts[i].slice(0, room);
-          if (i < parts.length - 1) addLine();
-          if (termination) break;
-        }
-      };
-      const finish = async (code: number | null, error?: Error) => {
-        if (done) return;
-        consume(decoder.end());
-        if (pending && lines.length <= max) addLine();
-        done = true;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, 30_000);
+      const finish = (result: ToolExecResult) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
-        await termination;
-        const res = searchResult(lines, max);
-        if (lineClipped) res.output += '\n[Matching line text truncated; use read_file for full context.]';
-        if (error || (reason && reason !== 'limit') || (!reason && code !== 0 && code !== 1)) {
-          res.isError = true;
-          res.output += `\n[${error?.message || reason || `ripgrep exited ${code}`}${stderr ? `: ${stderr}` : ''}]`;
-        }
-        resolve(res);
+        resolve(result);
       };
-      child.stdout.on('data', (d: Buffer) => consume(decoder.write(d)));
-      child.stderr.on('data', (d: Buffer) => { stderr = (stderr + d.toString()).slice(0, MAX_OUTPUT); });
+      const addLine = (line: string) => {
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (line) lines.push(line.replace(root + path.sep, ''));
+      };
+      const push = (chunk: Buffer, diagnostic: boolean) => {
+        if (settled || limited || interrupted || timedOut) return;
+        // Slice before decoding: even one enormous match or diagnostic stays bounded.
+        const data = chunk.subarray(0, byteLimit - bytes);
+        bytes += data.length;
+        const text = (diagnostic ? stderrDecoder : stdoutDecoder).write(data);
+        if (diagnostic) stderr += text;
+        else {
+          let start = 0;
+          let end: number;
+          while ((end = text.indexOf('\n', start)) !== -1) {
+            addLine(pending + text.slice(start, end));
+            pending = '';
+            // One lookahead match proves overflow; exactly max at EOF is complete.
+            if (lines.length > max) {
+              stopAtLimit('matches');
+              return;
+            }
+            start = end + 1;
+          }
+          pending += text.slice(start);
+        }
+        if (bytes >= byteLimit) stopAtLimit('bytes');
+      };
+      child.stdout.on('data', (chunk: Buffer) => push(chunk, false));
+      child.stderr.on('data', (chunk: Buffer) => push(chunk, true));
+      child.on('close', (code) => {
+        if (settled) return;
+        // Do not flush an incomplete UTF-8 character cut off by a limit or abort.
+        if (!limited && !interrupted && !timedOut) {
+          pending += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
+        }
+        if (pending && lines.length <= max) addLine(pending);
+        let output = [lines.slice(0, max).join('\n'), stderr.trimEnd()].filter(Boolean).join('\n');
+        if (lines.length > max) output += `\n[Results truncated: more than ${max} matches; narrow the search.]`;
+        if (limited === 'bytes') output = [output, '[output truncated]'].filter(Boolean).join('\n');
+        if (interrupted) output = [output, '[interrupted by user]'].filter(Boolean).join('\n');
+        if (timedOut) output = [output, '[Search timed out after 30000 ms.]'].filter(Boolean).join('\n');
+        finish({ output: output || 'No matches.', isError: interrupted || timedOut || (!limited && code !== 0 && code !== 1) });
+      });
+      child.on('error', () => finish({ output: 'ripgrep failed', isError: true }));
       signal.addEventListener('abort', onAbort, { once: true });
       if (signal.aborted) onAbort();
-      child.on('error', (e) => { void finish(null, e); });
-      child.on('close', (code) => { void finish(code); });
     });
   }
   // Keep potentially catastrophic JS regex evaluation off the main process and cancellable.

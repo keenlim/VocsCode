@@ -11,6 +11,7 @@ import type {
   GitBranchOverview,
   GitIssueList,
   GitPullRequestList,
+  GitSetupStatus,
   GitSummary,
   GitWorktreeInfo,
   HarnessAvailability,
@@ -25,6 +26,9 @@ import type {
   ModelRef,
   PermissionMode,
   ProviderConfig,
+  RemoteConfig,
+  RemoteDeviceInfo,
+  RemoteState,
   SearchFilters,
   SecretStatus,
   SearchResponse,
@@ -53,6 +57,8 @@ export interface IpcContract {
   'app:notify': [{ title: string; body: string }, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
+  /** A renderer exception (React render error or an uncaught error/rejection), recorded in the main log. */
+  'app:rendererError': [{ message: string; stack?: string; source?: string }, void];
   /** Opens a validated SKILL.md in the configured editor. */
   'skills:openInEditor': [{ path: string; line?: number }, { ok: boolean; error?: string }];
 
@@ -147,6 +153,14 @@ export interface IpcContract {
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 
+  /** Remote access (docs/REMOTE-ACCESS.md). Enrollment + device tokens live in the secret store. */
+  'remote:get': [void, { config: RemoteConfig; state: RemoteState; devices: RemoteDeviceInfo[] }];
+  'remote:enable': [{ relayUrl: string; enrollToken: string }, RemoteState];
+  'remote:disable': [void, RemoteState];
+  'remote:pairStart': [{ hostName?: string }, { code: string; expiresAt: number }];
+  'remote:pairRespond': [{ decision: 'approve' | 'deny' }, void];
+  'remote:revoke': [{ deviceId: string }, void];
+
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
@@ -162,6 +176,17 @@ export interface IpcContract {
   'git:checkout': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
   /** Branches-panel housekeeping: per-branch age, ahead/behind, merged state and worktree binding. */
   'git:branchesOverview': [{ sessionId: string }, GitBranchOverview];
+  /** Guided git setup: whether the folder is a repository and how far the GitHub connection has come. */
+  'git:setupStatus': [{ sessionId: string }, GitSetupStatus];
+  'git:init': [{ sessionId: string }, { ok: boolean; error?: string }];
+  /** Stages everything and commits; an empty folder gets an empty initial commit so it can be pushed. */
+  'git:initialCommit': [{ sessionId: string; message: string }, { ok: boolean; output: string }];
+  /** Points `origin` at a pasted repository URL, replacing an existing origin. */
+  'git:setRemote': [{ sessionId: string; url: string }, { ok: boolean; error?: string }];
+  /** Pushes the current branch to origin with `-u`; never prompts for credentials. */
+  'git:push': [{ sessionId: string }, { ok: boolean; output: string }];
+  /** Creates a GitHub repository with gh, sets origin and pushes (needs an authenticated gh). */
+  'git:createGitHubRepo': [{ sessionId: string; name: string; private: boolean }, { ok: boolean; url?: string; output?: string }];
   'git:deleteBranch': [{ sessionId: string; branch: string; force?: boolean }, { ok: boolean; error?: string }];
   /** Fast-forwards a local branch to its upstream, whether or not it is checked out. */
   'git:updateBranch': [{ sessionId: string; branch: string }, { ok: boolean; error?: string }];
@@ -205,7 +230,8 @@ export const PUSH_CHANNELS = {
   settingsChanged: 'push:settingsChanged',
   focusSession: 'push:focusSession',
   terminalData: 'push:terminalData',
-  terminalsChanged: 'push:terminalsChanged'
+  terminalsChanged: 'push:terminalsChanged',
+  remoteState: 'push:remoteState'
 } as const;
 
 export type PushPayloads = {
@@ -216,6 +242,7 @@ export type PushPayloads = {
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
   'push:terminalData': { terminalId: string; seq: number; data: string };
   'push:terminalsChanged': TerminalInfo[];
+  'push:remoteState': RemoteState;
 };
 
 export type PushChannel = keyof PushPayloads;

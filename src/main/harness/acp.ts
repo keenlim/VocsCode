@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
@@ -124,6 +124,8 @@ export class AcpAdapter implements HarnessAdapter {
         }
       }
     }
+    // Preset args are user-visible configuration, not secrets (keys travel in env).
+    this.ctx.log('info', `spawning ACP agent ${preset.id}: ${command} ${args.join(' ')} in ${meta.cwd}`);
     const child = spawnTool(command, args, { cwd: meta.cwd, env });
     this.child = child;
     child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
@@ -132,8 +134,6 @@ export class AcpAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'status', status: 'stopped', detail: `${preset.name} exited (${code})` });
     });
     child.on('error', (e) => this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true }));
-    if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
-
     if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
 
     try {
@@ -156,13 +156,32 @@ export class AcpAdapter implements HarnessAdapter {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
       // HTTP and SSE entries are dropped unless the agent said it understands them.
       const mcpCaps = (this.caps.mcpCapabilities ?? {}) as { http?: boolean; sse?: boolean };
-      const mcpServers = toAcp(
-        (await this.ctx.mcpServers().catch((e) => {
-          this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
-          return [];
-        })).map((r) => r.def),
-        mcpCaps
-      ) as unknown as acp.NewSessionRequest['mcpServers'];
+      // ACP requires an absolute `command` and the agent rejects the whole handshake when one is
+      // relative — Windows' `cmd /c` shim wrapper is exactly that case. Resolve what we can and
+      // drop the rest: losing one server beats losing the session.
+      const mcpDefs: McpServerDef[] = [];
+      const skippedMcp: string[] = [];
+      for (const { def } of await this.ctx.mcpServers().catch((e) => {
+        this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+        return [];
+      })) {
+        if (def.transport !== 'stdio' || !def.command) {
+          mcpDefs.push(def);
+          continue;
+        }
+        const command = path.isAbsolute(def.command) ? def.command : which(def.command, [this.ctx.runtime.runtimePaths.appRuntimeDir]);
+        if (!command) {
+          skippedMcp.push(def.id);
+          this.ctx.log('warn', `mcp ${def.id}: cannot resolve "${def.command}" to an absolute path; skipping`);
+          continue;
+        }
+        mcpDefs.push(command === def.command ? def : { ...def, command });
+      }
+      if (skippedMcp.length) {
+        const what = skippedMcp.length > 1 ? 'servers' : 'server';
+        this.info(`Skipped MCP ${what} with a command that is not an absolute path: ${skippedMcp.join(', ')}`, 'warn');
+      }
+      const mcpServers = toAcp(mcpDefs, mcpCaps) as unknown as acp.NewSessionRequest['mcpServers'];
       let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
@@ -184,7 +203,7 @@ export class AcpAdapter implements HarnessAdapter {
       // Apply the configured model / effort if the agent exposes them.
       if (meta.config.model?.model) await this.setModel(meta.config.model).catch((e) => this.ctx.log('warn', `setModel: ${errorMessage(e)}`));
       const effort = this.ctx.effort();
-      if (effort) await this.setEffort(effort).catch(() => undefined);
+      if (effort) await this.setEffort(effort).catch((e) => this.ctx.log('debug', `setEffort(${effort}) not applied: ${errorMessage(e)}`));
     } catch (e) {
       // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
       await this.killChild();

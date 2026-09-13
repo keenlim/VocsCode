@@ -2,7 +2,7 @@
  * View model for the analytics dashboard: the scoped slice of a summary (all time or a bounded
  * range), the chart series derived from it, and the display formatters the tabs share.
  */
-import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, HarnessToolRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
+import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, HarnessModelToolRow, HarnessToolRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
 import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
@@ -43,6 +43,8 @@ export interface Scope {
   /** Per-tool call counts keyed by model, sorted by volume. */
   modelTools: ModelToolRow[];
   harnessTools: HarnessToolRow[];
+  /** Per-tool call counts keyed by harness and model, sorted by volume. */
+  harnessModelTools: HarnessModelToolRow[];
   files: FileUsageRow[];
   /** Sessions active in range (all time: every recorded session), highest spend first. */
   sessions: UsageSessionRecord[];
@@ -80,6 +82,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
       toolTotals: summary.toolTotals,
       modelTools: summary.modelTools,
       harnessTools: summary.harnessTools,
+      harnessModelTools: summary.harnessModelTools,
       files: summary.files,
       sessions: summary.sessions,
       sessionCount: summary.sessionCount,
@@ -107,6 +110,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
     toolTotals: r.toolTotals,
     modelTools: r.modelTools,
     harnessTools: r.harnessTools,
+    harnessModelTools: r.harnessModelTools,
     files: r.files,
     sessions,
     sessionCount: sessions.length,

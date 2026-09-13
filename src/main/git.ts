@@ -1,14 +1,23 @@
 /** Git plumbing behind the Changes panel: status and diff summaries, per-file revert, staging, commits, and isolated worktrees plus the /pr and /merge GitHub flow. */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSummary, GitWorktreeInfo } from '../shared/types';
+import type { GitBranchInfo, GitBranchOverview, GitBranchOverviewItem, GitFileStatus, GitIssue, GitIssueList, GitPrInfo, GitPullRequest, GitPullRequestList, GitSetupStatus, GitSummary, GitWorktreeInfo } from '../shared/types';
 import { isOutsideWorkspace } from './harness/permissions';
+import type { Logger } from './log';
 import { runCapture, which, type CaptureResult } from './runtime';
 import { exists } from './util/fs';
 import { makeFileChange } from './util/file-changes';
 
 const gitBin = () => which('git') ?? 'git';
 const ghBin = () => which('gh');
+
+/** Module-level on purpose: these helpers are plain functions called from many places, and the log is one. */
+let gitLog: Logger = () => undefined;
+
+/** Routes git/gh diagnostics (timeouts, non-zero exits) into the main log. Off until the host calls it. */
+export function setGitLog(log: Logger): void {
+  gitLog = log;
+}
 
 const PR_URL = /https:\/\/[^\s/"]+\/[^\s]+\/pull\/\d+/;
 
@@ -38,7 +47,18 @@ async function readCapped(file: string, maxBytes: number): Promise<string | unde
 }
 
 async function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<GitRun> {
-  return runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
+  const r = await runCapture(gitBin(), args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' } });
+  // Probes fail routinely (no repo, unborn branch, no upstream), so a non-zero exit is debug; a
+  // timeout means the panel showed a partial or empty result and deserves a visible line.
+  if (timedOut(r)) gitLog('warn', `git ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `git ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  return r;
+}
+
+/** Enough of the argv to identify the command; commit messages and long refspecs are cut. */
+function describeArgs(args: string[]): string {
+  const s = args.join(' ');
+  return s.length > 160 ? `${s.slice(0, 160)}…` : s;
 }
 
 export async function gitRoot(cwd: string): Promise<string | null> {
@@ -319,15 +339,27 @@ export async function gitDiff(cwd: string, file?: string, staged = false): Promi
   const r = await git(cwd, ['diff', ...(staged ? ['--cached'] : ['HEAD'])], DIFF_TIMEOUT_MS);
   if (timedOut(r)) return { diff: '', error: diffTimeoutMessage() };
   if (r.truncated) return { diff: '', error: 'Diff output was truncated; select a file or narrow the change.' };
+  const maxDiffBytes = 2_000_000;
+  const maxUntrackedFiles = 200;
+  const budgetError = 'Combined diff limit reached — select an individual file to view the remaining changes.';
   let out = r.stdout;
-  // Append untracked files, capped before reading so a stray artifact cannot spike memory.
+  let outputBytes = Buffer.byteLength(out, 'utf8');
+  // Never slice a tracked patch to make it fit the aggregate preview.
+  if (outputBytes > maxDiffBytes) return { diff: '', error: budgetError };
+  let candidates = 0;
+  // Bound both total patch bytes and file reads, not just each untracked file's size.
   const untracked = await git(cwd, ['ls-files', '--others', '--exclude-standard']);
   if (timedOut(untracked)) return { diff: out, error: 'The untracked-file list timed out — new files may be missing from this diff.' };
   if (untracked.truncated) return { diff: out, error: 'The untracked-file list was truncated — new files may be missing from this diff.' };
   for (const f of untracked.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    if (candidates++ >= maxUntrackedFiles || outputBytes >= maxDiffBytes) return { diff: out, error: budgetError };
     const content = await readCapped(path.join(root, f), MAX_UNTRACKED_DIFF_BYTES);
     if (content === undefined) continue;
-    out += makeFileChange(root, f, null, content, { oldFileName: '/dev/null' }).diff ?? '';
+    const patch = makeFileChange(root, f, null, content, { oldFileName: '/dev/null' }).diff ?? '';
+    const patchBytes = Buffer.byteLength(patch, 'utf8');
+    if (outputBytes + patchBytes > maxDiffBytes) return { diff: out, error: budgetError };
+    out += patch;
+    outputBytes += patchBytes;
   }
   return { diff: out };
 }
@@ -362,12 +394,119 @@ export async function gitCommit(cwd: string, message: string): Promise<{ ok: boo
   return { ok: r.code === 0, output: (r.stdout + r.stderr).trim() };
 }
 
+/** Accepts an http(s)/git/ssh URL or scp-like `git@host:path`. Option-looking strings are rejected so a remote cannot inject git flags. */
+export function isRemoteUrl(url: string): boolean {
+  const u = url.trim();
+  if (!u || /[\s"'`\\]/.test(u)) return false;
+  if (/^(?:https?|git|ssh):\/\/[^\s/]+/i.test(u)) return true;
+  return /^[\w.-]+@[\w.-]+:[^\s]+$/.test(u);
+}
+
+/** Whether gh can act on the user's behalf; one-click repository creation and credential setup need auth. */
+async function ghAuthStatus(): Promise<GitSetupStatus['gh']> {
+  const bin = ghBin();
+  if (!bin) return { installed: false, authenticated: false };
+  const r = await runCapture(bin, ['auth', 'status'], { timeoutMs: 10_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const account = `${r.stdout}\n${r.stderr}`.match(/Logged in to [^\s]+ (?:account|as) ([^\s(]+)/i)?.[1];
+  return { installed: true, authenticated: r.code === 0, ...(account ? { account } : {}) };
+}
+
+/** Guided-setup state: what the folder already has and what is left before it can be pushed. */
+export async function gitSetupStatus(cwd: string): Promise<GitSetupStatus> {
+  const gh = await ghAuthStatus();
+  const root = await gitRoot(cwd);
+  if (!root) return { isRepo: false, hasCommits: false, pushed: false, gh };
+  const [branch, head, remote] = await Promise.all([
+    git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']),
+    git(cwd, ['remote', 'get-url', 'origin'])
+  ]);
+  const branchName = branch.stdout.trim() || undefined;
+  const hasCommits = head.code === 0;
+  const remoteUrl = remote.code === 0 ? remote.stdout.trim() || undefined : undefined;
+  let pushed = false;
+  if (branchName && hasCommits && remoteUrl) {
+    pushed = (await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchName}`])).code === 0;
+  }
+  return { isRepo: true, root, ...(branchName ? { branch: branchName } : {}), hasCommits, ...(remoteUrl ? { remote: remoteUrl } : {}), pushed, gh };
+}
+
+/** `git init` on the default branch `main`, with a fallback for git builds that predate `-b`. */
+export async function gitInit(cwd: string): Promise<{ ok: boolean; error?: string }> {
+  const existing = await gitRoot(cwd);
+  if (existing) return { ok: false, error: `Already inside the repository at ${existing}` };
+  const r = await git(cwd, ['init', '-b', 'main']);
+  if (r.code === 0) return { ok: true };
+  const fallback = await git(cwd, ['init']);
+  if (fallback.code !== 0) return { ok: false, error: (fallback.stderr || fallback.stdout).trim() || 'git init failed' };
+  await git(cwd, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+  return { ok: true };
+}
+
+/** First commit in a fresh repository; an empty folder gets an empty commit so it can be pushed. */
+export async function gitInitialCommit(cwd: string, message: string): Promise<{ ok: boolean; output: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Not a git repository' };
+  const head = await git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+  if (head.code === 0) return { ok: false, output: 'This repository already has commits.' };
+  await git(cwd, ['add', '-A']);
+  const staged = await git(cwd, ['diff', '--cached', '--name-only']);
+  const empty = staged.stdout.trim() ? [] : ['--allow-empty'];
+  const r = await git(cwd, ['commit', ...empty, '-m', message.trim() || 'Initial commit']);
+  return { ok: r.code === 0, output: (r.stdout + r.stderr).trim() || (r.code === 0 ? 'Created the initial commit.' : 'git commit failed') };
+}
+
+/** Points `origin` at the pasted repository URL, replacing an existing origin. */
+export async function gitSetRemote(cwd: string, url: string): Promise<{ ok: boolean; error?: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, error: 'Initialize git first.' };
+  if (!isRemoteUrl(url)) return { ok: false, error: 'Enter a repository URL like https://github.com/you/project.git or git@github.com:you/project.git.' };
+  const clean = url.trim();
+  const existing = await git(cwd, ['remote', 'get-url', 'origin']);
+  const r = existing.code === 0 ? await git(cwd, ['remote', 'set-url', 'origin', clean]) : await git(cwd, ['remote', 'add', 'origin', clean]);
+  return r.code === 0 ? { ok: true } : { ok: false, error: (r.stderr || r.stdout).trim() || 'Could not set the origin remote.' };
+}
+
+/** Pushes the current branch to origin and records it as the upstream; credentials are never prompted for. */
+export async function gitPush(cwd: string): Promise<{ ok: boolean; output: string }> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Not a git repository' };
+  const branch = (await git(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).stdout.trim();
+  if (!branch) return { ok: false, output: 'Detached HEAD — check out a branch first.' };
+  if ((await git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code !== 0) return { ok: false, output: 'Nothing to push yet — create the first commit.' };
+  if ((await git(cwd, ['remote', 'get-url', 'origin'])).code !== 0) return { ok: false, output: 'No origin remote yet — connect a GitHub repository first.' };
+  const r = await git(cwd, ['push', '-u', 'origin', branch], 120_000);
+  return { ok: r.code === 0, output: (r.stdout + r.stderr).trim() || (r.code === 0 ? `Pushed ${branch} to origin.` : 'git push failed') };
+}
+
+/** Creates a GitHub repository for this folder through gh, adds origin and pushes the first branch. */
+export async function gitCreateGitHubRepo(cwd: string, name: string, isPrivate: boolean): Promise<PrResult> {
+  const root = await gitRoot(cwd);
+  if (!root) return { ok: false, output: 'Initialize git first.' };
+  if (!ghBin()) return { ok: false, output: 'GitHub CLI (gh) is not installed — install it, or create the repository on github.com and paste its URL.' };
+  const clean = name.trim();
+  if (!/^[A-Za-z0-9][\w.-]*$/.test(clean)) return { ok: false, output: 'Repository names may use letters, numbers, dot, dash and underscore.' };
+  const auth = await ghAuthStatus();
+  if (!auth.authenticated) return { ok: false, output: 'Not signed in to GitHub — run `gh auth login`, then try again.' };
+  if ((await git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])).code !== 0) return { ok: false, output: 'Create the first commit before publishing.' };
+  if ((await git(cwd, ['remote', 'get-url', 'origin'])).code === 0) return { ok: false, output: 'origin is already configured — use Push to publish this repository.' };
+  const r = await gh(root, ['repo', 'create', clean, isPrivate ? '--private' : '--public', '--source', root, '--remote', 'origin', '--push'], 180_000);
+  const out = (r.stdout + r.stderr).trim();
+  if (r.truncated) return { ok: false, output: 'gh repo create response was truncated' };
+  if (r.code !== 0) return { ok: false, output: out || 'gh repo create failed' };
+  return { ok: true, url: out.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/.]+/)?.[0], output: out };
+}
+
 type PrResult = { ok: boolean; url?: string; output?: string };
 
 const noGh = (): PrResult => ({ ok: false, output: 'GitHub CLI (gh) is required — install it and run `gh auth login`.' });
 
 async function gh(cwd: string, args: string[], timeoutMs = 120_000): Promise<CaptureResult> {
-  return runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  const r = await runCapture(ghBin() ?? 'gh', args, { cwd, timeoutMs, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+  // gh talks to GitHub: a timeout or a non-zero exit here is the reason a PR badge or list is missing.
+  if (timedOut(r)) gitLog('warn', `gh ${describeArgs(args)} in ${cwd} timed out after ${timeoutMs}ms`);
+  else if (r.code !== 0) gitLog('debug', `gh ${describeArgs(args)} in ${cwd} exited ${r.code ?? 'null'}: ${failure(r).split('\n')[0].slice(0, 300)}`);
+  return r;
 }
 
 const prUrlIn = (out: string): string | undefined => out.match(PR_URL)?.[0];
@@ -643,41 +782,44 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
   const names = refs.stdout.split('\n').map((l) => l.split('\t')[0]).filter(Boolean);
   const base = pickBase(names);
   const wtByBranch = new Map(wt.worktrees.filter((w) => w.branch).map((w) => [w.branch!, w.path]));
-  const branches = await Promise.all(
-    refs.stdout
-      .split('\n')
-      .filter(Boolean)
-      .map(async (line) => {
-        const [name, date, subject, upstream, track] = line.split('\t');
-        const counts =
-          name === base
-            ? undefined
-            : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
-                const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
-                return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
-              });
-        const merged =
-          name === base
-            ? false
-            : (await git(root, ['merge-base', '--is-ancestor', name, base])).code === 0;
-        const up = parseUpstreamTrack(track ?? '');
-        const item: GitBranchOverviewItem = {
-          name,
-          current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
-          isBase: name === base,
-          lastCommitAt: date ? Number(date) * 1000 : undefined,
-          lastCommitSubject: subject || undefined,
-          merged,
-          upstream: upstream?.trim() || undefined,
-          ...counts,
-          ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
-          ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
-          ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
-          ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
-        };
-        return item;
-      })
-  );
+  const lines = refs.stdout.split('\n').filter(Boolean);
+  const branches: GitBranchOverviewItem[] = new Array(lines.length);
+  let next = 0;
+  // A repo can have hundreds of local refs; keep their child processes bounded.
+  await Promise.all(Array.from({ length: Math.min(4, lines.length) }, async () => {
+    while (next < lines.length) {
+      const index = next++;
+      const [name, date, subject, upstream, track] = lines[index].split('\t');
+      const counts =
+        name === base
+          ? undefined
+          : await git(root, ['rev-list', '--left-right', '--count', `${base}...${name}`]).then((r) => {
+              if (r.code !== 0 || r.truncated || timedOut(r)) return undefined;
+              const m = r.stdout.trim().match(/^(\d+)\s+(\d+)$/);
+              return m ? { behind: Number(m[1]), ahead: Number(m[2]) } : undefined;
+            });
+      const merged =
+        name === base
+          ? false
+          : counts ? counts.ahead === 0 : (await git(root, ['merge-base', '--is-ancestor', name, base])).code === 0;
+      const up = parseUpstreamTrack(track ?? '');
+      const item: GitBranchOverviewItem = {
+        name,
+        current: Boolean(wt.worktrees.find((w) => w.branch === name && path.resolve(w.path) === wt.current)),
+        isBase: name === base,
+        lastCommitAt: date ? Number(date) * 1000 : undefined,
+        lastCommitSubject: subject || undefined,
+        merged,
+        upstream: upstream?.trim() || undefined,
+        ...counts,
+        ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
+        ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
+        ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
+        ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
+      };
+      branches[index] = item;
+    }
+  }));
   // Newest work first, base branch pinned to top like GitHub's default-branch row.
   branches.sort((a, b) => Number(b.isBase) - Number(a.isBase) || (b.lastCommitAt ?? 0) - (a.lastCommitAt ?? 0));
   return { isRepo: true, base, branches, worktrees: wt.worktrees, ...(pr.ghMissing ? { ghMissing: true } : {}) };
