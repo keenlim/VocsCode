@@ -38,7 +38,6 @@ export function NewSessionDialog() {
   const [advanced, setAdvanced] = useState(false);
   const [appendSystemPrompt, setAppendSystemPrompt] = useState('');
   const [maxBudget, setMaxBudget] = useState('');
-  const [customProvider, setCustomProvider] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
   const [creating, setCreating] = useState(false);
 
   // Focus the first-prompt textarea so typing can start immediately.
@@ -121,8 +120,7 @@ export function NewSessionDialog() {
         useWorktree,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
         appendSystemPrompt: appendSystemPrompt.trim() || undefined,
-        maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined,
-        codexModelProvider: harness === 'codex' && customProvider.id && customProvider.baseUrl ? { id: customProvider.id, name: customProvider.name || customProvider.id, baseUrl: customProvider.baseUrl, envKey: customProvider.envKey || undefined, wireApi: 'chat' } : undefined
+        maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined
       };
       // Persist before creation so an initial prompt also sees an explicit switch back to the
       // harness default instead of inheriting the previously remembered effort.
@@ -324,15 +322,6 @@ export function NewSessionDialog() {
               <Field label="Budget cap (USD)" hint="Enforced by the Claude harness; shown as a warning elsewhere.">
                 <input type="number" min={0} step={0.5} value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} />
               </Field>
-              {harness === 'codex' && (
-                <Field label="Custom OpenAI-compatible provider for Codex" hint="Registers a model_providers entry for this thread. The API key is read from the env var named here.">
-                  <div className="row gap8">
-                    <input placeholder="id (e.g. ollama)" value={customProvider.id} onChange={(e) => setCustomProvider({ ...customProvider, id: e.target.value })} />
-                    <input placeholder="base URL" value={customProvider.baseUrl} onChange={(e) => setCustomProvider({ ...customProvider, baseUrl: e.target.value })} />
-                    <input placeholder="env key" value={customProvider.envKey} onChange={(e) => setCustomProvider({ ...customProvider, envKey: e.target.value })} />
-                  </div>
-                </Field>
-              )}
             </div>
           )}
         </section>
