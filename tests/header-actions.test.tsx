@@ -1,7 +1,7 @@
 // Header: the thinking toggle lives in the title row, the 3-dot menu is gone, and fork/archive
 // buttons behave exactly like the sidebar row's (same fork menu, same archive flow).
 /** @vitest-environment jsdom */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const invokeMock = vi.fn().mockResolvedValue({});
 (window as unknown as { harness: unknown }).harness = {
@@ -10,12 +10,15 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { rememberEffort, setSessionEffort } from '../src/renderer/src/sessionActions';
 import { useStore } from '../src/renderer/src/store';
 import type { SessionMeta } from '../src/shared/types';
+
+// Header owns an asynchronous shared Git subscription; release it before jsdom is torn down.
+afterEach(async () => { await act(async () => { cleanup(); }); });
 
 const session = (id = 's_h', patch: Partial<SessionMeta> = {}): SessionMeta => ({
   id,
@@ -55,6 +58,21 @@ describe('header actions', () => {
     const title = container.querySelector('.header-title') as HTMLElement;
     expect(title.querySelector('[aria-label="Toggle panel"]')).toBeTruthy();
     expect(container.querySelector('[aria-label="More"]')).toBeNull();
+  });
+
+  it('shows the harness label in the controls row, left of the model pill, with the session row tone', () => {
+    const { container } = setup({ config: { harness: 'claude', projectRoot: 'G:/proj/a', permissionMode: 'ask' } as SessionMeta['config'] });
+    const pills = container.querySelector('.header-pills') as HTMLElement;
+    const label = pills.querySelector('.badge') as HTMLElement;
+    expect(label).toBeTruthy();
+    expect(label.textContent).toContain('Claude');
+    // Same tone class the sidebar session row uses for this harness.
+    expect(label.classList.contains('badge-amber')).toBe(true);
+    // Ordered before the model selector pill in the same row.
+    const model = pills.querySelector('[title="Model"]') as HTMLElement;
+    expect(label.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No longer in the title row.
+    expect((container.querySelector('.header-title') as HTMLElement).querySelector('.badge')).toBeNull();
   });
 
   it('toggles thinking from the actions row, below the panel toggle', () => {

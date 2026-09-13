@@ -2,10 +2,13 @@
  * Offline tests for the pi approvals extension. When the host has no approval UI attached the
  * extension must fail closed and block the gated action (issue #126).
  */
+import os from 'node:os';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import vocsCodeApprovals from '../resources/pi/vocs-code-approvals';
 
-type ToolCallHandler = (event: { toolName: string; input: Record<string, unknown> }, ctx: object) => Promise<unknown>;
+type ToolCallHandler = (event: { toolName: string; toolCallId?: string; input: Record<string, unknown> }, ctx: object) => Promise<unknown>;
 
 function register(mode: string): ToolCallHandler {
   process.env.VOCS_CODE_PERMISSION_MODE = mode;
@@ -21,8 +24,56 @@ function register(mode: string): ToolCallHandler {
   return handler;
 }
 
-afterEach(() => {
+const tempDirs: string[] = [];
+afterEach(async () => {
   delete process.env.VOCS_CODE_PERMISSION_MODE;
+  delete process.env.VOCS_CODE_MODE_FILE;
+  delete process.env.VOCS_CODE_EFFORT_FILE;
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+describe('pi approval path and command boundaries', () => {
+  it('never executes denied writes through a junction, including missing descendants', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-gate-'));
+    tempDirs.push(dir);
+    const cwd = path.join(dir, 'workspace');
+    const outside = path.join(dir, 'outside');
+    await fs.mkdir(cwd);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(cwd, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    const handler = register('accept-edits');
+    const select = vi.fn(async () => 'Deny');
+    for (const file of ['escape/existing.txt', 'escape/new/deep.txt', '../outside/direct.txt']) {
+      const result = await handler({ toolName: 'write', toolCallId: file, input: { path: file, content: 'forbidden' } }, { cwd, ui: { select, notify: vi.fn() } }) as { block?: boolean } | undefined;
+      if (!result?.block) {
+        await fs.mkdir(path.dirname(path.resolve(cwd, file)), { recursive: true });
+        await fs.writeFile(path.resolve(cwd, file), 'forbidden');
+      }
+      expect(result?.block).toBe(true);
+    }
+    expect(await fs.readdir(outside)).toEqual([]);
+    expect(select).toHaveBeenCalledTimes(3);
+    await expect(handler({ toolName: 'write', input: { path: 'safe/new.txt', content: 'allowed' } }, { cwd })).resolves.toBeUndefined();
+  });
+
+  it.each(['~/outside.txt', '@../outside.txt', 'file:///outside.txt'])('prompts for Pi-expanded path %s rather than checking an unrelated Node path', async (file) => {
+    const handler = register('accept-edits');
+    const select = vi.fn(async () => 'Deny');
+    await expect(handler({ toolName: 'write', input: { path: file } }, { cwd: process.cwd(), ui: { select } })).resolves.toMatchObject({ block: true });
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it('dangerous commands still prompt after allowing a shell for the session, including powershell', async () => {
+    const handler = register('ask');
+    const select = vi.fn().mockResolvedValueOnce('Allow for session').mockResolvedValue('Deny');
+    const execute = vi.fn();
+    for (const [toolName, command] of [['bash', 'echo safe'], ['bash', 'git push --force'], ['powershell', 'Remove-Item -Recurse outside']]) {
+      const result = await handler({ toolName, input: { command } }, { cwd: process.cwd(), ui: { select, notify: vi.fn() } }) as { block?: boolean } | undefined;
+      if (!result?.block) execute(command);
+    }
+    expect(execute).toHaveBeenCalledExactlyOnceWith('echo safe');
+    expect(select).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('pi approval extension without a UI', () => {
@@ -63,9 +114,42 @@ describe('pi approval extension without a UI', () => {
       reason: expect.stringContaining('Plan mode')
     });
   });
+
+  it('gates an MCP tool in auto mode, where no classification is possible', async () => {
+    const handler = register('auto');
+    await expect(handler({ toolName: 'mcp__gitnexus__query', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining('approval UI is unavailable')
+    });
+  });
+
+  it('blocks every MCP tool in plan mode', async () => {
+    const handler = register('plan');
+    await expect(handler({ toolName: 'mcp__gitnexus__context', input: {} }, { cwd: process.cwd() })).resolves.toMatchObject({
+      block: true,
+      reason: expect.stringContaining('Plan mode')
+    });
+  });
+
+  it('allows an MCP tool in full-auto', async () => {
+    const handler = register('full-auto');
+    await expect(handler({ toolName: 'mcp__gitnexus__query', input: { query: 'auth' } }, { cwd: process.cwd() })).resolves.toBeUndefined();
+  });
 });
 
 describe('pi approval extension with a UI', () => {
+  it.each(['ask', 'plan'])('correlates a %s denial without executing the operation', async (mode) => {
+    const ui = { select: vi.fn(async (_title: string, _options: string[]) => 'Deny'), notify: vi.fn() };
+    const execute = vi.fn();
+    const handler = register(mode);
+    const result = await handler({ toolName: 'write', toolCallId: 'blocked-write', input: { path: 'blocked.txt', content: 'never written' } }, { ui, cwd: process.cwd() }) as { block?: boolean } | undefined;
+    if (!result?.block) execute();
+    expect(execute).not.toHaveBeenCalled();
+    expect(result?.block).toBe(true);
+    expect(ui.notify).toHaveBeenCalledExactlyOnceWith('VCODE_TOOL_BLOCKED::' + JSON.stringify({ toolCallId: 'blocked-write', toolName: 'write' }), 'info');
+    if (mode === 'ask') expect(JSON.parse(ui.select.mock.calls[0]![0]!.slice('VCODE_APPROVAL::'.length))).toMatchObject({ toolCallId: 'blocked-write' });
+  });
+
   it('routes the request through the host select and allows on request', async () => {
     const ui = { select: vi.fn(async (_title: string, _options: string[]) => 'Allow once'), notify: vi.fn() };
     const handler = register('ask');
@@ -81,5 +165,51 @@ describe('pi approval extension with a UI', () => {
       block: true,
       reason: expect.stringContaining('declined')
     });
+  });
+});
+
+type EffortHandler = (
+  event: { payload?: { reasoning?: { effort?: string } } & Record<string, unknown> },
+  ctx: { model?: { provider?: string; id?: string } }
+) => Promise<unknown>;
+
+function registerEffort(): EffortHandler {
+  let handler: EffortHandler | undefined;
+  const pi: Parameters<typeof vocsCodeApprovals>[0] = {
+    on: (event, h) => {
+      if (event === 'before_provider_request') handler = h as unknown as EffortHandler;
+    }
+  };
+  vocsCodeApprovals(pi);
+  if (!handler) throw new Error('before_provider_request handler was not registered');
+  return handler;
+}
+
+describe('pi reasoning-effort override', () => {
+  it('rewrites the effort only for the model the host chose', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-effort-'));
+    const file = path.join(dir, 'reasoning-effort.json');
+    await fs.writeFile(file, JSON.stringify({ provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', effort: 'max' }));
+    process.env.VOCS_CODE_EFFORT_FILE = file;
+    try {
+      const handler = registerEffort();
+      const event = { payload: { model: 'deepseek/deepseek-v4.1-flash', reasoning: { effort: 'xhigh' } } };
+      // pi clamped `max` to `xhigh`; the host's choice wins for the matching model.
+      await expect(handler(event, { model: { provider: 'openrouter', id: 'deepseek/deepseek-v4.1-flash' } })).resolves.toEqual({
+        model: 'deepseek/deepseek-v4.1-flash',
+        reasoning: { effort: 'max' }
+      });
+      // A different model, or a different provider, keeps pi's own mapping.
+      await expect(handler(event, { model: { provider: 'openrouter', id: 'openai/gpt-5' } })).resolves.toBeUndefined();
+      await expect(handler(event, { model: { provider: 'deepseek', id: 'deepseek/deepseek-v4.1-flash' } })).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the payload untouched when the host has no choice on disk', async () => {
+    process.env.VOCS_CODE_EFFORT_FILE = path.join(os.tmpdir(), 'pi-effort-missing.json');
+    const handler = registerEffort();
+    await expect(handler({ payload: { reasoning: { effort: 'high' } } }, { model: { provider: 'openrouter', id: 'x' } })).resolves.toBeUndefined();
   });
 });

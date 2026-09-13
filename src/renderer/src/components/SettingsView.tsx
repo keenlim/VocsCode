@@ -1,20 +1,20 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ProviderConfig, SecretStatus } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteDeviceInfo, RemoteState, SecretStatus } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
 import { GROUP_LABELS, GROUP_ORDER, THEMES, swatchFor, type ThemeId } from '../../../shared/themes';
 import { BUILTIN_SHORTCUT_GROUPS, SHORTCUT_COMMANDS, accelFromEvent, formatAccelerator, isReservedAccel, shortcutCommandInfo, type ShortcutCommand } from '../../../shared/shortcuts';
-import { invoke, isMac, platform } from '../api';
+import { invoke, isMac, on, platform } from '../api';
 import { rememberEffort } from '../sessionActions';
 import { useStore } from '../store';
 import { systemPrefersDark } from '../theme';
 import { askConfirm, Badge, Button, Field, Icon, Kbd, Spinner, Toggle } from './ui';
 import { ModelPicker } from './ModelPicker';
 
-type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'about';
+type Section = 'general' | 'shortcuts' | 'terminal' | 'providers' | 'harnesses' | 'acp' | 'remote' | 'about';
 
 export function SettingsView() {
   const settings = useStore((s) => s.settings)!;
@@ -36,6 +36,7 @@ export function SettingsView() {
             ['providers', 'Providers & keys', 'bolt'],
             ['harnesses', 'Harnesses', 'shield'],
             ['acp', 'ACP agents', 'fork'],
+            ['remote', 'Remote access', 'bolt'],
             ['about', 'About & doctor', 'info']
           ] as [Section, string, string][]
         ).map(([id, label, icon]) => (
@@ -51,6 +52,7 @@ export function SettingsView() {
         {section === 'providers' && <Providers settings={settings} />}
         {section === 'harnesses' && <Harnesses settings={settings} update={update} />}
         {section === 'acp' && <AcpAgents settings={settings} update={update} />}
+        {section === 'remote' && <RemoteSection settings={settings} update={update} />}
         {section === 'about' && <About />}
       </div>
     </div>
@@ -297,7 +299,7 @@ function Providers({ settings }: { settings: AppSettings }) {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
-  const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '' });
+  const [custom, setCustom] = useState({ id: '', name: '', baseUrl: '', envKey: '', kind: 'openai-compatible' as ProviderKind });
 
   const refreshSecretStatus = async () => {
     try {
@@ -392,13 +394,14 @@ function Providers({ settings }: { settings: AppSettings }) {
                   <ProviderBaseUrl provider={p} onSave={(baseUrl) => save(p, { baseUrl })} />
                 </Field>
               </div>
+              <ProviderModels provider={p} onSave={(models) => save(p, { models })} />
             </div>
           )}
         </div>
       ))}
       {adding ? (
         <div className="provider-card">
-          <div className="provider-head"><span className="provider-name">New OpenAI-compatible provider</span></div>
+          <div className="provider-head"><span className="provider-name">New provider</span></div>
           <div className="provider-body">
             <div className="row gap8">
               <input placeholder="id (letters, dashes)" value={custom.id} onChange={(e) => setCustom({ ...custom, id: e.target.value.replace(/[^a-z0-9-]/gi, '').toLowerCase() })} />
@@ -408,15 +411,21 @@ function Providers({ settings }: { settings: AppSettings }) {
               <input placeholder="Base URL (…/v1)" value={custom.baseUrl} onChange={(e) => setCustom({ ...custom, baseUrl: e.target.value })} />
               <input placeholder="Env var for key (optional)" value={custom.envKey} onChange={(e) => setCustom({ ...custom, envKey: e.target.value })} />
             </div>
+            <Field label="Kind" inline hint={custom.kind === 'anthropic' ? 'Claude Code runs on this endpoint, so its models appear for the Claude harness.' : 'OpenAI-compatible endpoints power the native harness.'}>
+              <select value={custom.kind} onChange={(e) => setCustom({ ...custom, kind: e.target.value as ProviderKind })}>
+                <option value="openai-compatible">OpenAI-compatible</option>
+                <option value="anthropic">Anthropic-compatible (Claude Code)</option>
+              </select>
+            </Field>
             <div className="row gap8">
               <Button
                 variant="primary"
                 size="sm"
                 disabled={!custom.id || !custom.baseUrl}
                 onClick={async () => {
-                  await invoke('providers:save', { id: custom.id, kind: 'openai-compatible', name: custom.name || custom.id, baseUrl: custom.baseUrl, envKey: custom.envKey || undefined, hasApiKey: false, models: [], enabled: true });
+                  await invoke('providers:save', { id: custom.id, kind: custom.kind, name: custom.name || custom.id, baseUrl: custom.baseUrl, envKey: custom.envKey || undefined, hasApiKey: false, models: [], enabled: true });
                   setAdding(false);
-                  setCustom({ id: '', name: '', baseUrl: '', envKey: '' });
+                  setCustom({ id: '', name: '', baseUrl: '', envKey: '', kind: 'openai-compatible' });
                 }}
               >
                 Add provider
@@ -429,11 +438,44 @@ function Providers({ settings }: { settings: AppSettings }) {
         </div>
       ) : (
         <Button icon="plus" onClick={() => setAdding(true)}>
-          Add OpenAI-compatible provider
+          Add provider
         </Button>
       )}
       <ModelOverrides settings={settings} />
     </div>
+  );
+}
+
+/** Manual model ids for an endpoint that publishes no /v1/models catalog (gateways, local hosts). */
+function ProviderModels({ provider, onSave }: { provider: ProviderConfig; onSave: (models: ModelInfo[]) => Promise<void> }) {
+  const [draft, setDraft] = useState('');
+  const add = async () => {
+    const id = draft.trim();
+    if (!id || provider.models.some((m) => m.id === id)) return;
+    await onSave([...provider.models, { id, provider: provider.id, displayName: id }]);
+    setDraft('');
+  };
+  return (
+    <>
+      <div className="row gap8">
+        <Field label="Models" inline hint="Add ids for endpoints with no catalog; the harness refresh replaces this list.">
+          <input placeholder="Add a model id" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void add()} />
+        </Field>
+        <Button size="sm" variant="ghost" onClick={() => void add()} disabled={!draft.trim()}>
+          Add
+        </Button>
+      </div>
+      {provider.models.length > 0 && (
+        <div className="chips">
+          {provider.models.slice(0, 12).map((m) => (
+            <button key={m.id} type="button" className="chip" title={`Remove ${m.id}`} onClick={() => void onSave(provider.models.filter((x) => x.id !== m.id))}>
+              {m.id} ×
+            </button>
+          ))}
+          {provider.models.length > 12 && <span className="muted small">+{provider.models.length - 12} more</span>}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -671,7 +713,8 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
           <option value="bundled">Bundled runtime only</option>
         </select>
       </Field>
-      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Claude Code instead of inheriting its login" />
+      <Toggle checked={settings.claude.useProviderKey} onChange={(v) => update({ claude: { ...settings.claude, useProviderKey: v } })} label="Pass the stored Anthropic API key to Anthropic's own endpoint" />
+      <p className="muted small">Claude Code runs against any provider that publishes an Anthropic-format endpoint. OpenRouter and DeepSeek do, so once their key is stored their catalogs appear for this harness automatically and the endpoint follows the model you pick. Anything else can be added under Providers with Kind <strong>Anthropic-compatible</strong>. This toggle only affects Anthropic's own endpoint: on sends the stored API key, off keeps the Claude Code login.</p>
       {bin('claude', 'claude path override')}
       <h3>Codex</h3>
       <Field label="Runtime">
@@ -913,6 +956,145 @@ function About() {
             ))}
           </tbody>
         </table>
+      )}
+    </div>
+  );
+}
+
+/** Remote access (docs/REMOTE-ACCESS.md §6): relay connection, browser pairing, devices.
+ *  The enrollment secret is stored in the OS keychain via secrets:set, never in settings. */
+function RemoteSection({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
+  const config = settings.remote ?? { enabled: false };
+  const [state, setState] = useState<RemoteState | null>(null);
+  const [devices, setDevices] = useState<RemoteDeviceInfo[]>([]);
+  const [relayUrl, setRelayUrl] = useState(config.relayUrl ?? '');
+  const [enroll, setEnroll] = useState('');
+  const [pairing, setPairing] = useState<{ code: string; expiresAt: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    const refresh = () => {
+      void invoke('remote:get', undefined)
+        .then((r) => {
+          setState(r.state);
+          setDevices(r.devices);
+          setPairing(r.state.pairing ?? null);
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const un = on('push:remoteState', (s) => setState(s));
+    const tick = setInterval(refresh, 5000);
+    return () => {
+      un();
+      clearInterval(tick);
+    };
+  }, []);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await fn();
+      void invoke('remote:get', undefined).then((r) => {
+        setState(r.state);
+        setDevices(r.devices);
+        setPairing(r.state.pairing ?? null);
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const secondsLeft = pairing ? Math.max(0, Math.ceil((pairing.expiresAt - Date.now()) / 1000)) : 0;
+  const statusLine = state ? `${state.status}${state.detail ? ` — ${state.detail}` : ''}` : 'unknown';
+
+  return (
+    <div className="settings-body">
+      <h3>Remote access</h3>
+      <p className="muted small">
+        Let a paired browser at code.vocs.io drive sessions on this computer. Sessions, keys and terminals
+        stay on this machine; the traffic is end-to-end encrypted and the relay sees metadata only.
+      </p>
+      <Field label="Relay URL" hint="WebSocket relay that routes paired sessions, e.g. wss://relay.your-domain.dev">
+        <input value={relayUrl} placeholder="https://your-relay.workers.dev" onChange={(e) => setRelayUrl(e.target.value)} />
+      </Field>
+      <Field label="Enrollment secret" hint="Shared secret from the relay deployment (wrangler secret ENROLL_TOKEN). Stored in the OS keychain.">
+        <input type="password" value={enroll} placeholder="••••••••" onChange={(e) => setEnroll(e.target.value)} />
+      </Field>
+      <div className="settings-actions">
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy || !relayUrl || !enroll}
+          onClick={() =>
+            void act(async () => {
+              await invoke('remote:enable', { relayUrl: relayUrl.trim(), enrollToken: enroll.trim() });
+              setEnroll('');
+            })
+          }
+        >
+          {busy ? 'Connecting…' : 'Connect'}
+        </Button>
+        {config.enabled && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(() => invoke('remote:disable', undefined))}>
+            Disconnect
+          </Button>
+        )}
+      </div>
+      <p className="muted small">
+        Status: <strong>{statusLine}</strong>
+        {state?.onlineClients?.length ? ` · ${state.onlineClients.length} browser${state.onlineClients.length === 1 ? '' : 's'} connected` : ''}
+      </p>
+      {error && <p className="small" style={{ color: 'var(--red, #d00)' }}>{error}</p>}
+
+      {config.enabled && state?.status === 'online' && (
+        <>
+          <h3>Pair a browser</h3>
+          {pairing && secondsLeft > 0 ? (
+            <div>
+              <p className="muted small">Enter this code at code.vocs.io → “Add a computer” (expires in {secondsLeft}s):</p>
+              <p style={{ fontSize: 28, letterSpacing: 6, fontWeight: 600 }}>{pairing.code}</p>
+            </div>
+          ) : (
+            <Button size="sm" disabled={busy} onClick={() => void act(() => invoke('remote:pairStart', { hostName: undefined }))}>
+              Show pairing code
+            </Button>
+          )}
+        </>
+      )}
+
+      {state?.pendingRequest && (
+        <div>
+          <h3>Pairing request</h3>
+          <p className="muted small">
+            “{state.pendingRequest.name}” ({state.pendingRequest.platform}) wants to pair with this computer.
+          </p>
+          <div className="settings-actions">
+            <Button size="sm" variant="primary" onClick={() => void act(() => invoke('remote:pairRespond', { decision: 'approve' }))}>
+              Allow
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void act(() => invoke('remote:pairRespond', { decision: 'deny' }))}>
+              Deny
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {devices.length > 0 && (
+        <>
+          <h3>Paired devices</h3>
+          {devices.map((d) => (
+            <Field key={d.deviceId} label={`${d.kind === 'host' ? 'Computer' : 'Browser'}: ${d.name}`} hint={`${d.platform} · last seen ${new Date(d.lastSeen).toLocaleString()}`}>
+              <Button size="sm" variant="ghost" onClick={() => void act(() => invoke('remote:revoke', { deviceId: d.deviceId }))}>
+                Revoke
+              </Button>
+            </Field>
+          ))}
+        </>
       )}
     </div>
   );

@@ -6,10 +6,10 @@ import {
   autoCompactionTokenThreshold,
   hasReachedAutoCompactionThreshold,
 } from '../src/shared/compaction';
-import type { AppSettings, SessionEvent, SessionMeta, UsageTotals } from '../src/shared/types';
+import type { AppSettings, ProviderConfig, SessionEvent, SessionMeta, UsageTotals } from '../src/shared/types';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
 import { fetchProviderModels } from '../src/main/models/providers';
-import { enrichModelContextWindows } from '../src/main/models/static-models';
+import { enrichModelsFromProviders } from '../src/main/models/static-models';
 import { SessionManager } from '../src/main/session-manager';
 import { ClaudeAdapter, claudeModelToInfo } from '../src/main/harness/claude';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
@@ -103,7 +103,7 @@ describe('automatic compaction thresholds', () => {
     expect(fixture.send).not.toHaveBeenCalled();
     finish();
     await sending;
-    expect(fixture.send).toHaveBeenCalledWith({ text: 'next turn' });
+    expect(fixture.send).toHaveBeenCalledWith(expect.objectContaining({ text: 'next turn' }));
   });
 
   it('retries a no-op compaction after more history is available', async () => {
@@ -217,7 +217,7 @@ describe('model context metadata', () => {
 
   it('preserves reported limits, fills known snapshots, and leaves unknown catalogs honest', () => {
     const providers = defaultSettings().providers;
-    const models = enrichModelContextWindows(
+    const models = enrichModelsFromProviders(
       [
         { id: 'claude-opus-5-20260101', provider: 'anthropic', displayName: 'Claude snapshot' },
         { id: 'gpt-5.4-2026-01-01', provider: 'openai', displayName: 'GPT snapshot' },
@@ -255,6 +255,30 @@ describe('model context metadata', () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
+  });
+
+  it('takes OpenRouter reasoning levels from the provider catalog over a harness map', () => {
+    const providers: ProviderConfig[] = [
+      {
+        id: 'openrouter',
+        kind: 'openrouter',
+        name: 'OpenRouter',
+        hasApiKey: true,
+        enabled: true,
+        models: [
+          { id: 'deepseek/deepseek-v4.1-flash', provider: 'openrouter', displayName: 'DeepSeek: DeepSeek V4.1 Flash', supportedEfforts: ['max', 'high', 'low'], defaultEffort: 'high' }
+        ]
+      }
+    ];
+    const enriched = enrichModelsFromProviders(
+      [{ id: 'deepseek/deepseek-v4.1-flash', provider: 'openrouter', displayName: 'DeepSeek: DeepSeek V4.1 Flash', supportedEfforts: ['high', 'xhigh'] }],
+      providers,
+    );
+    expect(enriched[0].supportedEfforts).toEqual(['max', 'high', 'low']);
+    expect(enriched[0].defaultEffort).toBe('high');
+    // Only OpenRouter models defer to the provider catalog; other harnesses keep their own levels.
+    const other = enrichModelsFromProviders([{ id: 'claude-opus-5', provider: 'anthropic', displayName: 'Claude Opus 5', supportedEfforts: ['high'] }], providers);
+    expect(other[0].supportedEfforts).toEqual(['high']);
   });
 });
 

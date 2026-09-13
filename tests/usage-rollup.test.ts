@@ -1,7 +1,7 @@
 /** Unit tests for the shared usage rollups: range buckets from day slices, the unattributed remainder and chart series. */
 import { describe, expect, it } from 'vitest';
 import type { AnalyticsDayPoint, UsageDay } from '../src/shared/types';
-import { addCounters, addSlice, dimensionSeries, emptyCounters, emptyDimensions, fillDays, rollupDays, speedTps } from '../src/shared/usage-rollup';
+import { addCounters, addSlice, dimensionSeries, emptyCounters, emptyDimensions, fillDays, harnessModelToolUsageRows, rollupDays, speedTps } from '../src/shared/usage-rollup';
 
 interface Row {
   id: string;
@@ -52,10 +52,12 @@ describe('rollupDays', () => {
     ]),
     sliced('2025-06-02', [{ id: 'a', harness: 'claude', model: 'opus', project: '/p1', costUsd: 3, turns: 2, durationMs: 3000, speed: [100, 8000] }])
   ];
-  days[1].usage.by!.tool = { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
+  days[1].usage.by!.tool = { bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } };
   days[0].usage.by!.tool = { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 }, Read: { calls: 4, errors: 0, declined: 0, durationMs: 0 } };
   days[0].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 } } };
-  days[1].usage.by!.modelTool = { 'p/opus': { Bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
+  days[1].usage.by!.modelTool = { 'p/opus': { bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
+  days[0].usage.by!.harnessModelTool = { 'claude|p/opus': { Bash: { calls: 2, errors: 0, declined: 1, durationMs: 0 } } };
+  days[1].usage.by!.harnessModelTool = { 'claude|p/opus': { bash: { calls: 3, errors: 1, declined: 0, durationMs: 300 } }, 'pi|p/glm': { Read: { calls: 1, errors: 1, declined: 0, durationMs: 0 } } };
   days[0].usage.by!.file = { 'a.ts': { adds: 1, updates: 2, deletes: 0, renames: 0 } };
   days[1].usage.by!.file = { 'a.ts': { adds: 0, updates: 1, deletes: 0, renames: 0 }, 'b.ts': { adds: 0, updates: 0, deletes: 0, renames: 0 } };
 
@@ -78,15 +80,41 @@ describe('rollupDays', () => {
   it('merges per-tool and per-file slices across days, dropping files with no changes', () => {
     const r = rollupDays(days);
     expect(r.tools.map((t) => [t.name, t.calls, t.errors, t.declined])).toEqual([
-      ['Bash', 5, 1, 1],
+      ['bash', 5, 1, 1],
       ['Read', 4, 0, 0]
     ]);
     expect(r.toolTotals).toEqual({ calls: 9, errors: 1, declined: 1, durationMs: 300 });
     expect(r.modelTools.map((t) => [t.key, t.label, t.name, t.calls, t.errors])).toEqual([
-      ['p/opus', 'opus', 'Bash', 5, 1],
+      ['p/opus', 'opus', 'bash', 5, 1],
       ['p/glm', 'glm', 'Read', 1, 1]
     ]);
+    expect(r.harnessModelTools.map((t) => [t.harness, t.key, t.label, t.name, t.calls, t.errors])).toEqual([
+      ['claude', 'p/opus', 'opus', 'bash', 5, 1],
+      ['pi', 'p/glm', 'glm', 'Read', 1, 1]
+    ]);
     expect(r.files).toEqual([{ path: 'a.ts', adds: 1, updates: 3, deletes: 0, renames: 0, total: 4 }]);
+  });
+
+  it('rolls up only recorded harness/tool slices in selected days, combining casing but not aliases', () => {
+    const older = sliced('2025-06-01', [{ id: 'c', harness: 'claude', model: 'same', project: '/p', costUsd: 0 }]);
+    const newer = sliced('2025-06-02', [{ id: 'p', harness: 'pi', model: 'same', project: '/p', costUsd: 0 }]);
+    older.usage.by!.harnessTool = { claude: { Read: { calls: 3, errors: 1, declined: 1, durationMs: 50 } } };
+    newer.usage.by!.harnessTool = {
+      claude: { read: { calls: 2, errors: 1, declined: 0, durationMs: 20 } },
+      pi: { Read: { calls: 1, errors: 0, declined: 1, durationMs: 0 }, read: { calls: 1, errors: 0, declined: 0, durationMs: 5 }, read_file: { calls: 1, errors: 1, declined: 0, durationMs: 10 } }
+    };
+    const legacy = sliced('2025-05-30', [{ id: 'old', harness: 'pi', model: 'same', project: '/p', costUsd: 1, toolCalls: 100 }]);
+    delete legacy.usage.by!.harnessTool;
+    legacy.usage.by!.tool = { Read: { calls: 100, errors: 80, declined: 10, durationMs: 0 } };
+    const rows = rollupDays([legacy, older, newer]).harnessTools;
+    expect(rows).toEqual([
+      { key: 'claude', label: 'claude', name: 'read', calls: 5, errors: 2, declined: 1, durationMs: 70 },
+      { key: 'pi', label: 'pi', name: 'read', calls: 2, errors: 0, declined: 1, durationMs: 5 },
+      { key: 'pi', label: 'pi', name: 'read_file', calls: 1, errors: 1, declined: 0, durationMs: 10 }
+    ]);
+    expect(rollupDays([newer]).harnessTools).toEqual([{ ...rows[0], calls: 2, errors: 1, declined: 0, durationMs: 20 }, rows[1], rows[2]]);
+    expect(rollupDays([legacy]).harnessTools).toEqual([]);
+    expect(legacy.usage.by?.harnessTool).toBeUndefined();
   });
 
   it('keeps days recorded before slices existed in the totals and reports them as unattributed', () => {
@@ -101,6 +129,20 @@ describe('rollupDays', () => {
     days[0].usage.by!.estimated = true;
     expect(rollupDays(days).estimatedDays).toBe(1);
     delete days[0].usage.by!.estimated;
+  });
+});
+
+describe('harnessModelToolUsageRows', () => {
+  it('splits only at the harness separator and merges tool casing within a harness', () => {
+    const rows = harnessModelToolUsageRows({
+      'pi|openrouter/anthropic/claude-3.5-sonnet': { Bash: { calls: 2, errors: 1, declined: 0, durationMs: 0 } },
+      'claude|anthropic/claude-3.5-sonnet': { bash: { calls: 1, errors: 0, declined: 0, durationMs: 0 } }
+    });
+    // Provider model ids keep their own slashes; only the first `|` is the harness boundary.
+    expect(rows.map((r) => [r.harness, r.key, r.label, r.name, r.calls])).toEqual([
+      ['pi', 'openrouter/anthropic/claude-3.5-sonnet', 'anthropic/claude-3.5-sonnet', 'bash', 2],
+      ['claude', 'anthropic/claude-3.5-sonnet', 'claude-3.5-sonnet', 'bash', 1]
+    ]);
   });
 });
 

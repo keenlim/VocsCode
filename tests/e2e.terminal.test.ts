@@ -8,6 +8,7 @@
  */
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -28,10 +29,13 @@ async function waitForFile(file: string, ms: number): Promise<string> {
   const until = Date.now() + ms;
   while (Date.now() < until) {
     try {
-      return await fs.readFile(file, 'utf8');
+      const text = await fs.readFile(file, 'utf8');
+      // A shell redirect creates the file before it writes the line, so wait for content too.
+      if (text.length) return text;
     } catch {
-      await new Promise((r) => setTimeout(r, 200));
+      /* not there yet */
     }
+    await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`timed out waiting for ${file}`);
 }
@@ -51,6 +55,10 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'ELECTRON_RUN_AS_NODE' && k !== 'ANTHROPIC_BASE_URL' && k !== 'CLAUDECODE' && !k.startsWith('CLAUDE_CODE_')) env[k] = v;
     env.VOCS_CODE_USER_DATA = userData;
     env.VOCS_CODE_DEBUG = '1';
+    // Isolate git's global/system config so the guided "tell git who you are" step is deterministic
+    // even on a machine that already has a user.name (CI runners, dev boxes).
+    env.GIT_CONFIG_GLOBAL = path.join(tmp, 'gitconfig');
+    env.GIT_CONFIG_NOSYSTEM = '1';
 
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
@@ -81,6 +89,61 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.locator('.harness-card', { has: win.locator('.harness-card-name', { hasText: /^Native loop$/ }) }).click();
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
+
+      // The MCP tab ships GitNexus built in: on by default, scoped to this repo, not shared.
+      await win.click('.panel-tab:has-text("MCP")');
+      const builtin = win.locator('.mcp-section', { has: win.locator('h3', { hasText: 'Built-in' }) });
+      await builtin.waitFor({ timeout: 20_000 });
+      expect(await builtin.innerText()).toContain('gitnexus');
+      const builtinToggles = builtin.locator('input[type="checkbox"]');
+      expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
+      expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally
+
+      // The MCP page chooses between one shared server and per-repo servers; the repo tab follows.
+      await win.click('.sidebar-link:has-text("MCP")');
+      await win.waitForSelector('.mcp-page', { timeout: 20_000 });
+      await win.click('.mcp-page button:has-text("One shared server")');
+      await win.locator('[data-testid="session-row"]').first().click();
+      await win.click('.panel-tab:has-text("MCP")');
+      await expect
+        .poll(async () => builtin.innerText(), { timeout: 20_000 })
+        .toContain('shared server');
+      // Restore the default so the rest of the run is unaffected.
+      await win.click('.sidebar-link:has-text("MCP")');
+      await win.waitForSelector('.mcp-page', { timeout: 20_000 });
+      await win.click('.mcp-page button:has-text("Per-repo servers")');
+      await win.locator('[data-testid="session-row"]').first().click();
+
+      // The project is a brand-new folder, so the Git tab guides setup. Initializing turns the
+      // guide into the branches view with the GitHub continuation; the first commit runs through
+      // real git, proving the panel's actions reach the repository rather than only its own state.
+      await win.click('.panel-tab:has-text("Git")');
+      await win.waitForSelector('.git-setup', { timeout: 20_000 });
+      expect(await win.locator('.git-setup-title').innerText()).toBe('Set up git in this folder');
+      await win.click('.git-setup button:has-text("Initialize repository")');
+      await win.waitForSelector('.git-setup-banner', { timeout: 20_000 });
+      expect(await win.locator('.git-setup-banner .git-setup-title').innerText()).toBe('Publish this repository to GitHub');
+      await fs.stat(path.join(project, '.git')); // the repository exists on disk, not just in the UI
+
+      // With no global git identity, the commit step must ask for a name and email instead of
+      // surfacing git's "Author identity unknown" — and the commit must carry them.
+      await win.getByLabel('Your name').fill('Vocs Code E2E');
+      await win.getByLabel('Your email').fill('e2e@example.com');
+      await win.click('.git-setup-banner button:has-text("Save and commit")');
+      await expect
+        .poll(
+          () => {
+            try {
+              return execFileSync('git', ['-C', project, 'rev-parse', '--verify', 'HEAD'], { stdio: 'pipe' }).toString().trim().length > 0;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 20_000 }
+        )
+        .toBe(true);
+      expect(execFileSync('git', ['-C', project, 'log', '-1', '--format=%an <%ae>'], { stdio: 'pipe' }).toString().trim()).toBe('Vocs Code E2E <e2e@example.com>');
+      expect(await win.locator('.git-setup-banner').innerText()).toContain('Connect a GitHub repository');
 
       // A `!` draft with no terminal yet opens one and runs the command there; the agent is not involved.
       await win.fill('.composer textarea', '!echo first-bang > first-bang.txt');
@@ -139,6 +202,30 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.keyboard.press('Enter');
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(0);
       await win.waitForSelector('.term .empty', { timeout: 10_000 });
+
+      // A killed renderer must not leave a blank window: main logs it and reloads automatically,
+      // and the reloaded page paints the app again — without restarting the main process. The
+      // Playwright page object for a crashed target stays crashed, so prove recovery through main.
+      const electronApp = app;
+      const mainPid = await electronApp.evaluate(() => process.pid);
+      await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer());
+      await expect
+        .poll(
+          async () =>
+            electronApp.evaluate(async ({ BrowserWindow }) => {
+              const wc = BrowserWindow.getAllWindows()[0]?.webContents;
+              if (!wc || wc.isDestroyed() || wc.isLoading()) return false;
+              try {
+                return (await wc.executeJavaScript("Boolean(document.querySelector('.brand'))")) === true;
+              } catch {
+                return false;
+              }
+            }),
+          { timeout: 60_000 }
+        )
+        .toBe(true);
+      expect(await electronApp.evaluate(() => process.pid)).toBe(mainPid);
+      expect(mainLog.join('')).toMatch(/ERROR renderer process gone: crashed/);
     } catch (e) {
       await win.screenshot({ path: path.join(shots, 'e2e-fail-terminal.png') }).catch(() => undefined);
       const tail = (arr: string[], n: number) => arr.slice(-n).join('\n');

@@ -7,6 +7,7 @@ import { pruneModelOverrides } from '../shared/model-overrides';
 import { normalizeCustomShortcuts } from '../shared/shortcuts';
 import { DEFAULT_TERMINAL_SETTINGS } from '../shared/terminal';
 import { isThemeId } from '../shared/themes';
+import type { Logger } from './log';
 import { isValidServerId } from './mcp/file';
 import { readJson, writeJson } from './util/fs';
 
@@ -186,7 +187,7 @@ export function defaultSettings(): AppSettings {
   return {
     version: 1,
     theme: 'system',
-    defaultHarness: 'claude',
+    defaultHarness: 'pi',
     defaultPermissionMode: 'ask',
     defaultEffort: undefined,
     autoCompactionThreshold: undefined,
@@ -196,12 +197,14 @@ export function defaultSettings(): AppSettings {
     notifications: true,
     soundOnApproval: false,
     binaries: {},
+    remote: { enabled: false },
     claude: { runtime: 'auto', useProviderKey: false, settingSources: ['user', 'project', 'local'] },
     codex: { runtime: 'auto' },
     pi: { extraArgs: [] },
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     mcpServers: [],
     mcpProjectState: {},
+    gitnexus: { mode: 'per-repo' },
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -215,7 +218,8 @@ export function defaultSettings(): AppSettings {
     customShortcuts: {},
     goalDefaults: { autoContinue: true, maxIterations: 25 },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
-    agent: { enabled: true }
+    agent: { enabled: true },
+    gitSetupSkipped: []
   };
 }
 
@@ -313,8 +317,15 @@ export function normalizeMcpProjectState(stored: unknown): Record<string, McpPro
     const s = raw as Record<string, unknown>;
     const disabledGlobal = ids(s.disabledGlobal);
     const enabledRepo = ids(s.enabledRepo);
-    if (disabledGlobal.length || enabledRepo.length) {
-      out[root] = { ...(disabledGlobal.length ? { disabledGlobal } : {}), ...(enabledRepo.length ? { enabledRepo } : {}) };
+    const disabledBuiltin = ids(s.disabledBuiltin);
+    const gitnexusGlobal = s.gitnexusGlobal === true;
+    if (disabledGlobal.length || enabledRepo.length || disabledBuiltin.length || gitnexusGlobal) {
+      out[root] = {
+        ...(disabledGlobal.length ? { disabledGlobal } : {}),
+        ...(enabledRepo.length ? { enabledRepo } : {}),
+        ...(disabledBuiltin.length ? { disabledBuiltin } : {}),
+        ...(gitnexusGlobal ? { gitnexusGlobal: true } : {})
+      };
     }
   }
   return out;
@@ -336,12 +347,15 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
     pi: { ...d.pi, ...(stored.pi ?? {}) },
+    // A corrupted or older value falls back to the isolated per-repo default.
+    gitnexus: { mode: stored.gitnexus?.mode === 'shared' ? 'shared' : 'per-repo' },
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
     folders: Array.isArray(stored.folders) ? stored.folders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderOrder: Array.isArray(stored.folderOrder) ? stored.folderOrder.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     collapsedFolders: Array.isArray(stored.collapsedFolders) ? stored.collapsedFolders.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
+    gitSetupSkipped: Array.isArray(stored.gitSetupSkipped) ? stored.gitSetupSkipped.filter((p): p is string => typeof p === 'string' && p.length > 0) : [],
     folderStyles: normalizeFolderStyles(stored.folderStyles),
     customLabels: normalizeCustomLabels(stored.customLabels),
     customShortcuts: normalizeCustomShortcuts(stored.customShortcuts),
@@ -377,14 +391,18 @@ export class SettingsStore {
   private settings: AppSettings = defaultSettings();
   private readonly file: string;
   private listeners = new Set<(s: AppSettings) => void>();
+  private readonly log: Logger;
 
-  constructor(userData: string) {
+  constructor(userData: string, log: Logger = () => undefined) {
     this.file = path.join(userData, 'settings.json');
+    this.log = log;
   }
 
   async load(): Promise<AppSettings> {
-    const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined);
+    const stored = await readJson<Partial<AppSettings> | undefined>(this.file, undefined, { log: this.log });
     this.settings = normalizeSettings(stored);
+    if (stored === undefined) this.log('info', 'no settings.json yet; using defaults');
+    else this.log('info', `settings loaded: harness=${this.settings.defaultHarness} permissions=${this.settings.defaultPermissionMode} theme=${this.settings.theme}`);
     return this.settings;
   }
 
@@ -395,7 +413,14 @@ export class SettingsStore {
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     this.settings = normalizeSettings({ ...this.settings, ...patch });
     await writeJson(this.file, this.settings);
-    for (const l of this.listeners) l(this.settings);
+    for (const l of this.listeners) {
+      // One listener throwing must not starve the rest, and the caller already has its new settings.
+      try {
+        l(this.settings);
+      } catch (e) {
+        this.log('warn', `settings listener failed: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+      }
+    }
     return this.settings;
   }
 

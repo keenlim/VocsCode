@@ -29,12 +29,14 @@ const globalServer = { id: 'github', transport: 'stdio' as const, command: 'npx'
 function info(over: Partial<McpProjectInfo> = {}): McpProjectInfo {
   return {
     projectRoot: 'G:/repo',
+    mode: 'per-repo',
     file: 'G:/repo/.mcp.json',
     display: 'G:/repo/.mcp.json',
     exists: true,
     repo: [repoServer],
     global: [globalServer],
     state: {},
+    builtin: [],
     detected: [],
     effective: [
       { def: repoServer, scope: 'repo', enabled: false, reason: 'not-enabled' },
@@ -106,11 +108,60 @@ describe('MCP panel tab', () => {
   });
 
   it('says so when the harness has no MCP support at all', async () => {
-    invoke.mockResolvedValue(info({ harness: 'pi', support: 'none', effective: [] }));
+    invoke.mockResolvedValue(info({ harness: 'claude', support: 'none', effective: [] }));
     await act(async () => {
-      render(<McpTab session={session('pi')} />);
+      render(<McpTab session={session()} />);
     });
     expect(screen.getByText(/no MCP support in the installed version/i)).toBeTruthy();
+  });
+
+  it('ships GitNexus on by default and lets the repo share its graph', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
+    await act(async () => {
+      render(<McpTab session={session()} />);
+    });
+    expect(screen.getByText('Built-in')).toBeTruthy();
+    expect(screen.getByText('gitnexus')).toBeTruthy();
+    // The share toggle is off by default.
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    const toggles = builtinSection?.querySelectorAll('input[type="checkbox"]') ?? [];
+    expect((toggles[1] as HTMLInputElement).checked).toBe(false);
+    await act(async () => {
+      fireEvent.click(toggles[1] as HTMLInputElement);
+    });
+    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { gitnexusGlobal: true } });
+  });
+
+  it('turns the built-in off for this repo only', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: false }] }));
+    await act(async () => {
+      render(<McpTab session={session()} />);
+    });
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    const onToggle = (builtinSection?.querySelectorAll('input[type="checkbox"]') ?? [])[0] as HTMLInputElement;
+    await act(async () => {
+      fireEvent.click(onToggle);
+    });
+    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
+  });
+
+  it('drops the per-repo on/off in shared mode but keeps the share switch', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ mode: 'shared', builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
+    await act(async () => {
+      render(<McpTab session={session()} />);
+    });
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    expect(builtinSection?.textContent).toContain('shared server');
+    // Only the share toggle is present; the repo can no longer switch GitNexus off on its own.
+    const toggles = builtinSection?.querySelectorAll('input[type="checkbox"]') ?? [];
+    expect(toggles.length).toBe(1);
+    await act(async () => {
+      fireEvent.click(toggles[0] as HTMLInputElement);
+    });
+    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { gitnexusGlobal: true } });
   });
 
   it('surfaces a broken .mcp.json instead of silently ignoring it', async () => {

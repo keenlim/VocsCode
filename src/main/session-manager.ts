@@ -24,18 +24,19 @@ import type {
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { createAdapter } from './harness/registry';
+import { renderForkContext } from './fork-context';
 import { resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
-import { emptyUsage, enrichModelContextWindows } from './models/static-models';
+import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
 import type { SettingsStore } from './settings';
 import type { SessionStore } from './store';
 import type { AnalyticsStore } from './analytics';
 import { deferred, errorMessage, shortId, type Deferred } from './util/async';
-import { readJson, writeJson } from './util/fs';
+import { exists, readJson, writeJson } from './util/fs';
 import { generateSessionTitle, titleFromPrompt } from './session-title';
 
 export { titleFromPrompt };
@@ -50,12 +51,20 @@ export interface SessionManagerDeps {
   pushSessions: (sessions: SessionMeta[]) => void;
   notify: (sessionId: string, title: string, body: string) => void;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /** Where per-project GitNexus homes are written (the app's userData dir). */
+  gitnexusHomeBase?: string;
+  /** Shared mode: the shared GitNexus MCP endpoint, started lazily. */
+  sharedGitnexus?: () => Promise<string | null>;
+  /** Shared mode: path to the scope proxy the harness spawns. */
+  gitnexusProxyPath?: string;
 }
 
 interface ActiveSession {
   adapter: HarnessAdapter;
   approvals: Map<string, Deferred<ApprovalDecision>>;
   liveItems: Map<string, TranscriptItem>;
+  /** Model active when each running tool call began, retained until its terminal upsert. */
+  toolModels: Map<string, ModelRef>;
   dirty: Set<string>;
   lastAssistantText: string;
   starting: Promise<void> | null;
@@ -71,6 +80,8 @@ interface ActiveSession {
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 const AUTO_COMPACTION_RETRY_MS = 30_000;
+/** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
+const FORK_CONTEXT_FILE = 'fork-context.md';
 
 export class SessionManager {
   /** How often a session parked on 'pr' re-checks whether its branch was merged. */
@@ -89,10 +100,13 @@ export class SessionManager {
     // Sessions restored while parked on a PR resume polling for their merge. A harness that
     // died while the app was closed ('stopped') gets its git-derived status re-checked once,
     // so a quit that killed the harness does not erase a parked pr/merged badge for good.
+    // Stagger the checks: they each probe git and gh, and dozens at the same instant freeze
+    // startup (the probe storm that used to stall the event loop for seconds).
+    let stagger = 0;
     for (const s of list) {
       if ((s.status === 'pr' || s.status === 'stopped') && !this.gitStateChecked.has(s.id)) {
         this.gitStateChecked.add(s.id);
-        this.scheduleGitStateCheck(s.id);
+        this.scheduleGitStateCheck(s.id, 4_000 + Math.min(stagger++, 50) * 400);
       }
     }
     return list;
@@ -199,9 +213,22 @@ export class SessionManager {
    * worktree branch, and may even work in a different repo than the session's cwd.
    */
   async sessionPrRefs(id: string): Promise<PrRef[]> {
+    // The transcript can be tens of MB and every parked-pr/stopped session is scanned once at
+    // boot; stat first and reuse the result until the file actually changes.
+    let file: string;
+    try {
+      file = path.join(this.deps.store.sessionDir(id), 'transcript.jsonl');
+    } catch {
+      return [];
+    }
+    const st = await fs.stat(file).catch(() => undefined);
+    if (!st) return [];
+    const stamp = `${st.mtimeMs}:${st.size}`;
+    const cached = this.prRefsCache.get(id);
+    if (cached && cached.stamp === stamp) return cached.refs;
     let raw = '';
     try {
-      raw = await fs.readFile(path.join(this.deps.store.sessionDir(id), 'transcript.jsonl'), 'utf8');
+      raw = await fs.readFile(file, 'utf8');
     } catch {
       return [];
     }
@@ -210,25 +237,53 @@ export class SessionManager {
       const ref: PrRef = { repo: `${m[1]}/${m[2]}`, number: Number(m[3]) };
       if (!out.some((p) => p.repo === ref.repo && p.number === ref.number)) out.push(ref);
     }
+    this.prRefsCache.set(id, { stamp, refs: out });
     return out;
   }
 
-  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo. */
+  /** transcript stamp → PR refs, so repeated git-state checks do not re-read every transcript. */
+  private prRefsCache = new Map<string, { stamp: string; refs: PrRef[] }>();
+
+  /** Git roots of other sessions' repos (cached per cwd), for resolving transcript PRs from a foreign repo.
+   *
+   * Every parked-pr/stopped session runs one of these at boot, all at the same moment. Without
+   * sharing, each caller walks the same uncached list and spawns one `git rev-parse` per session
+   * cwd per caller — hundreds of concurrent git processes right as the window opens. Two guards:
+   * in-flight promises are shared per cwd, and a cwd that no longer exists is answered by one
+   * stat instead of a doomed git spawn. */
   async knownRepoRoots(excludeId: string): Promise<string[]> {
     const roots = new Set<string>();
-    for (const s of this.deps.store.list()) {
-      if (s.id === excludeId || s.archived) continue;
-      let root = this.repoRootCache.get(s.cwd);
-      if (root === undefined) {
-        root = (await gitRoot(s.cwd).catch(() => null)) ?? '';
-        this.repoRootCache.set(s.cwd, root);
-      }
-      if (root) roots.add(root);
-    }
+    await Promise.all(
+      this.deps.store.list().map(async (s) => {
+        if (s.id === excludeId || s.archived) return;
+        const root = await this.repoRoot(s.cwd);
+        if (root) roots.add(root);
+      })
+    );
     return [...roots];
   }
 
   private repoRootCache = new Map<string, string>();
+  private repoRootPending = new Map<string, Promise<string>>();
+
+  /** One resolution per cwd at a time; the first resolution is cached for the manager's lifetime. */
+  private repoRoot(cwd: string): Promise<string> {
+    const cached = this.repoRootCache.get(cwd);
+    if (cached !== undefined) return Promise.resolve(cached);
+    let pending = this.repoRootPending.get(cwd);
+    if (!pending) {
+      pending = (async () => {
+        if (!(await exists(cwd))) return '';
+        return (await gitRoot(cwd).catch(() => null)) ?? '';
+      })().then((root) => {
+        this.repoRootCache.set(cwd, root);
+        this.repoRootPending.delete(cwd);
+        return root;
+      });
+      this.repoRootPending.set(cwd, pending);
+    }
+    return pending;
+  }
 
   /** Persists every debounced meta update immediately (used on quit so trailing edits are not lost). */
   async flushPendingPersists(): Promise<void> {
@@ -238,7 +293,7 @@ export class SessionManager {
       entries.map(([id, t]) => {
         clearTimeout(t);
         const meta = this.deps.store.get(id);
-        return meta ? this.deps.store.upsert(meta).catch(() => undefined) : Promise.resolve();
+        return meta ? this.deps.store.upsert(meta).catch((e) => this.deps.log('warn', `[${id}] meta persist during shutdown failed: ${errorMessage(e)}`)) : Promise.resolve();
       })
     );
   }
@@ -295,6 +350,7 @@ export class SessionManager {
       };
     }
     await this.deps.store.upsert(meta);
+    this.deps.log('info', `[${id}] session created: harness=${cfg.harness} model=${describeModel(meta.activeModel)} permissions=${cfg.permissionMode} cwd=${cwd}${worktreeBranch ? ` worktree=${worktreeBranch}` : ''}${meta.goal ? ' goal=yes' : ''}`);
     this.deps.analytics.touchSession(meta);
     const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
     // The folder keeps its sidebar entry even after its last session is archived or deleted.
@@ -330,13 +386,14 @@ export class SessionManager {
       try {
         await removeWorktree(meta.config.projectRoot, meta.cwd);
       } catch (e) {
-        this.deps.log('warn', `worktree removal failed: ${errorMessage(e)}`);
+        this.deps.log('warn', `[${id}] worktree removal failed: ${errorMessage(e)}`);
       }
     }
     const tWorktree = Date.now();
     await this.deps.store.remove(id);
     const tStore = Date.now();
     this.pushSessions();
+    this.deps.log('info', `[${id}] session deleted (${meta.config.harness}, "${meta.title.slice(0, 60)}")${meta.worktreeBranch ? `; worktree ${meta.worktreeBranch} ${removeWt ? 'removed' : 'kept'}` : ''}`);
     if (tStore - t0 >= 1000) this.deps.log('warn', `slow session delete ${id}: stop ${tStop - t0}ms, worktree ${tWorktree - tStop}ms, store ${tStore - tWorktree}ms`);
   }
 
@@ -400,9 +457,10 @@ export class SessionManager {
       try {
         await restoreWorktree(meta.config.projectRoot, meta.cwd, meta.worktreeBranch);
       } catch (e) {
-        this.deps.log('warn', `worktree restore failed: ${errorMessage(e)}`);
+        this.deps.log('warn', `[${id}] worktree restore failed: ${errorMessage(e)}`);
       }
     }
+    this.deps.log('info', `[${id}] session ${archived ? 'archived' : 'unarchived'}${archived && removeWt && meta.worktreeBranch ? ` (worktree removed${forceWt ? ', forced' : ''})` : ''}`);
     return this.patch(id, { archived });
   }
 
@@ -414,7 +472,8 @@ export class SessionManager {
       // Overlay in-memory streaming state.
       const map = new Map(items.map((i) => [i.id, i]));
       for (const [k, v] of live) map.set(k, v);
-      const order = [...items.map((i) => i.id), ...[...live.keys()].filter((k) => !items.some((i) => i.id === k))];
+      const persistedIds = new Set(items.map((i) => i.id));
+      const order = [...persistedIds, ...[...live.keys()].filter((k) => !persistedIds.has(k))];
       return order.map((k) => map.get(k) as TranscriptItem);
     });
   }
@@ -434,8 +493,8 @@ export class SessionManager {
       mcpServers: () => {
         const m = this.get(id) ?? meta;
         return resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
-          { getSecret: this.deps.getSecret, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, gitnexusHomeBase: this.deps.gitnexusHomeBase },
+          { getSecret: this.deps.getSecret, sharedGitnexus: this.deps.sharedGitnexus, gitnexusProxyPath: this.deps.gitnexusProxyPath, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
         );
       },
       emit: (event) => this.emit(id, event),
@@ -450,6 +509,9 @@ export class SessionManager {
         const m = this.get(id);
         if (!m) return;
         Object.assign(m, patch);
+        // A harness may discover its actual model only after startup. Refresh the analytics
+        // snapshot immediately so tool calls before the first usage update are not unattributed.
+        if ('activeModel' in patch) this.deps.analytics.touchSession(m);
         this.schedulePersist(m);
         this.pushSessions();
       },
@@ -473,6 +535,7 @@ export class SessionManager {
       adapter,
       approvals: new Map(),
       liveItems: new Map(),
+      toolModels: new Map(),
       dirty: new Set(),
       lastAssistantText: '',
       starting: null,
@@ -487,10 +550,14 @@ export class SessionManager {
     meta.status = 'starting';
     meta.statusDetail = `Starting ${HARNESS_BY_ID[meta.config.harness].name}…`;
     this.pushSessions();
+    const resume = describeResume(meta.harnessRef);
+    this.deps.log('info', `[${id}] starting ${meta.config.harness} (model=${describeModel(meta.activeModel)} permissions=${meta.config.permissionMode} cwd=${meta.cwd}${resume ? ` resume=${resume}` : ''})`);
+    const t0 = Date.now();
     active.starting = adapter
       .start()
       .then(() => {
         active.starting = null;
+        this.deps.log('info', `[${id}] ${meta.config.harness} started in ${Date.now() - t0}ms`);
         const m = this.get(id);
         if (m && m.status === 'starting') {
           m.status = 'idle';
@@ -501,9 +568,11 @@ export class SessionManager {
       .catch((e) => {
         active.starting = null;
         this.active.delete(id);
+        // The transcript card below is what the user sees; this line is what a bug report needs.
+        this.deps.log('error', `[${id}] ${meta.config.harness} failed to start after ${Date.now() - t0}ms: ${e instanceof Error ? e.stack ?? e.message : errorMessage(e)}`);
         // Start failed after spawn: dispose the adapter so no harness child process is orphaned
         // (pi/acp start() have no self-cleaning handshake either).
-        active.adapter.dispose().catch((de) => this.deps.log('warn', `dispose after failed start: ${errorMessage(de)}`));
+        active.adapter.dispose().catch((de) => this.deps.log('warn', `[${id}] dispose after failed start: ${errorMessage(de)}`));
         const m = this.get(id);
         if (m) {
           m.status = 'error';
@@ -522,6 +591,8 @@ export class SessionManager {
   async send(id: string, input: UserInput): Promise<void> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    // Size and shape only: the prompt itself belongs to the transcript, not the log.
+    this.deps.log('debug', `[${id}] user input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
     if (meta.title === 'New session' && input.text.trim()) {
@@ -531,12 +602,70 @@ export class SessionManager {
       this.pushSessions();
       this.scheduleLlmTitle(id, placeholder, input.text);
     }
+    await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id });
+  }
+
+  /** Replaces a sent prompt only when its adapter can restore a durable pre-message checkpoint. */
+  async editAndResend(id: string, userItemId: string, input: UserInput): Promise<TranscriptItem[]> {
+    const meta = this.get(id);
+    if (!meta) throw new Error('Session not found');
+    if (!input.text.trim() && !input.images?.length) throw new Error('Message cannot be empty');
+    if (meta.status === 'running' || meta.status === 'starting' || meta.status === 'awaiting') throw new Error('Wait for the current turn to finish before editing a message');
+
+    const items = await this.deps.store.readTranscript(id);
+    const index = items.findIndex((item) => item.id === userItemId && item.kind === 'user');
+    if (index < 0) throw new Error('Message no longer exists in this transcript');
+    const previous = items[index] as Extract<TranscriptItem, { kind: 'user' }>;
+    const active = await this.ensureActive(id);
+    if (active.compactionInFlight || active.approvals.size || active.adapter.busy) throw new Error('Wait for the current session activity to finish before editing a message');
+    if (!active.adapter.rewindToUserMessage) throw new Error('This harness does not support editing past messages yet');
+    if (!(await active.adapter.rewindToUserMessage(userItemId))) throw new Error('This message can no longer be rewound');
+    this.deps.log('info', `[${id}] rewound to message ${userItemId} for edit-and-resend; ${items.length - index - 1} later item(s) dropped from the transcript`);
+
+    const revised: TranscriptItem = {
+      ...previous,
+      text: input.text,
+      images: input.images ?? previous.images,
+      queuedAs: 'now'
+    };
+    // Context is now safely at the same boundary, so the persistence rewrite cannot diverge.
+    active.liveItems.clear();
+    active.dirty.clear();
+    active.lastAssistantText = '';
+    await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
+    await this.dispatchInput(id, { text: revised.text, images: revised.images, mode: 'now', transcriptItemId: userItemId });
+    return this.transcript(id);
+  }
+
+  private async dispatchInput(id: string, input: UserInput): Promise<void> {
     const active = await this.ensureActive(id);
     // Compaction can run without marking an adapter busy. Keep a new turn from reading or
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
     if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(input);
+    await active.adapter.send(await this.withForkContext(id, input));
+    await this.clearForkContext(id);
+  }
+
+  /** Prefixes the first message after a cross-harness fork with the handed-off transcript. */
+  private async withForkContext(id: string, input: UserInput): Promise<UserInput> {
+    const meta = this.get(id);
+    if (!meta?.pendingForkContext) return input;
+    let context: string | null = null;
+    try {
+      context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
+    } catch {
+      context = null;
+    }
+    return context ? { ...input, text: `${context}\n\n${input.text}` } : input;
+  }
+
+  /** Cleared only after the harness accepted the seeded message, so a failed start retries with it. */
+  private async clearForkContext(id: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.pendingForkContext) return;
+    meta.pendingForkContext = undefined;
+    await this.deps.store.upsert(meta);
   }
 
   /**
@@ -562,6 +691,7 @@ export class SessionManager {
 
   /** Denies every pending approval and records the decision on its transcript card. */
   private cancelApprovals(id: string, active: ActiveSession, note: string): void {
+    if (active.approvals.size) this.deps.log('info', `[${id}] denying ${active.approvals.size} pending approval(s): ${note}`);
     for (const [reqId, d] of [...active.approvals]) {
       const decision: ApprovalDecision = { optionId: 'deny', note };
       active.approvals.delete(reqId);
@@ -579,6 +709,7 @@ export class SessionManager {
   async interrupt(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
+    this.deps.log('info', `[${id}] interrupt requested`);
     this.cancelApprovals(id, active, 'Interrupted');
     await active.adapter.interrupt();
   }
@@ -586,6 +717,7 @@ export class SessionManager {
   async stop(id: string): Promise<void> {
     const active = this.active.get(id);
     if (!active) return;
+    this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
     this.cancelApprovals(id, active, 'Session stopped');
     if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
     this.active.delete(id);
@@ -593,7 +725,7 @@ export class SessionManager {
     try {
       await active.adapter.dispose();
     } catch (e) {
-      this.deps.log('warn', `dispose failed: ${errorMessage(e)}`);
+      this.deps.log('warn', `[${id}] dispose failed: ${errorMessage(e)}`);
     }
     const meta = this.get(id);
     if (meta) {
@@ -609,7 +741,9 @@ export class SessionManager {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.active.keys()].map((id) => this.stop(id)));
+    const ids = [...this.active.keys()];
+    if (ids.length) this.deps.log('info', `stopping ${ids.length} running session(s)`);
+    await Promise.all(ids.map((id) => this.stop(id)));
   }
 
   /**
@@ -623,10 +757,13 @@ export class SessionManager {
   async setModel(id: string, model: ModelRef): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    const active = this.active.get(id);
+    // Do not publish or persist the requested model until the harness accepts the switch.
+    if (active) await active.adapter.setModel(model);
+    this.deps.log('info', `[${id}] model ${describeModel(meta.activeModel)} → ${describeModel(model)}${active ? '' : ' (applies at next start)'}`);
     meta.config.model = model;
     meta.activeModel = model;
-    const active = this.active.get(id);
-    if (active) await active.adapter.setModel(model);
+    this.deps.analytics.touchSession(meta);
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
@@ -635,6 +772,7 @@ export class SessionManager {
   async setEffort(id: string, effort: EffortLevel): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    this.deps.log('info', `[${id}] effort ${meta.activeEffort ?? 'default'} → ${effort}`);
     meta.config.effort = effort;
     meta.activeEffort = effort;
     const active = this.active.get(id);
@@ -647,6 +785,8 @@ export class SessionManager {
   async setPermissionMode(id: string, mode: PermissionMode): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    // Permission changes are the one setting worth an audit trail: they decide what runs unasked.
+    this.deps.log('info', `[${id}] permission mode ${meta.config.permissionMode} → ${mode}`);
     meta.config.permissionMode = mode;
     const active = this.active.get(id);
     if (active) await active.adapter.setPermissionMode(mode);
@@ -665,6 +805,7 @@ export class SessionManager {
     const meta = this.get(id);
     active.autoCompactionThreshold = threshold;
     if (threshold && meta && hasReachedAutoCompactionThreshold(threshold, meta.usage)) active.autoCompactionLatched = true;
+    this.deps.log('info', `[${id}] manual context compaction requested (context ${meta?.usage.contextTokens ?? '?'} tokens)`);
     const operation = active.adapter.compact();
     active.compactionInFlight = operation;
     try {
@@ -673,13 +814,16 @@ export class SessionManager {
         active.autoCompactionLatched = false;
         active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
         this.scheduleAutoCompactionRetry(id, active);
+        this.deps.log('info', `[${id}] compaction skipped: not enough history yet`);
         return { ok: false, detail: 'There is not enough conversation history to compact yet.' };
       }
+      this.deps.log('info', `[${id}] compaction completed`);
       return { ok: true };
     } catch (e) {
       active.autoCompactionLatched = false;
       active.autoCompactionRetryAt = Date.now() + AUTO_COMPACTION_RETRY_MS;
       this.scheduleAutoCompactionRetry(id, active);
+      this.deps.log('warn', `[${id}] compaction failed: ${errorMessage(e)}`);
       throw e;
     } finally {
       if (active.compactionInFlight === operation) active.compactionInFlight = null;
@@ -767,15 +911,22 @@ export class SessionManager {
     const active = this.active.get(id);
     if (active) active.liveItems.clear();
     await this.deps.store.rewriteTranscript(id, []);
+    this.deps.log('info', `[${id}] transcript cleared`);
   }
 
   async respondApproval(sessionId: string, requestId: string, decision: ApprovalDecision): Promise<void> {
     const active = this.active.get(sessionId);
     const d = active?.approvals.get(requestId);
-    if (!active || !d) return;
+    if (!active || !d) {
+      // A stale card (the harness moved on, or the session stopped) is not an error, but it is worth knowing.
+      this.deps.log('debug', `[${sessionId}] approval ${requestId} answered "${decision.optionId}" but is no longer pending`);
+      return;
+    }
     active.approvals.delete(requestId);
     d.resolve(decision);
     const item = active.liveItems.get(requestId);
+    // Audit trail for what the user allowed the agent to do; the command itself is on the transcript card.
+    this.deps.log('info', `[${sessionId}] approval ${requestId} → ${decision.optionId}${item && item.kind === 'approval' ? ` (${item.request.title.slice(0, 120)})` : ''}`);
     if (item && item.kind === 'approval') {
       item.decision = decision;
       item.decidedAt = Date.now();
@@ -797,6 +948,7 @@ export class SessionManager {
     const request: ApprovalRequest = { ...draft, id: shortId('ap_'), sessionId, harness: meta.config.harness, createdAt: Date.now() };
     const d = deferred<ApprovalDecision>();
     active.approvals.set(request.id, d);
+    this.deps.log('info', `[${sessionId}] approval ${request.id} requested (${meta.config.permissionMode}): ${request.title.slice(0, 120)}`);
     this.emit(sessionId, { type: 'item.upsert', item: { id: request.id, kind: 'approval', ts: Date.now(), request } });
     this.emit(sessionId, { type: 'approval.request', request });
     meta.status = 'awaiting';
@@ -813,7 +965,7 @@ export class SessionManager {
       const live = this.active.get(sessionId);
       if (live) live.models = event.models;
       const settings = this.deps.settings.get();
-      const models = enrichModelContextWindows(event.models, settings.providers);
+      const models = enrichModelsFromProviders(event.models, settings.providers);
       event = { ...event, models: applyModelOverrides(models, settings.modelOverrides) };
     }
     const meta = this.get(sessionId);
@@ -829,8 +981,17 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
-        // Tool calls are recorded once, when they leave the running state.
-        if (item.kind === 'tool' && item.status !== 'running') this.deps.analytics.recordToolCall(sessionId, item);
+        if (item.kind === 'tool') {
+          // Keep the model from the start of the call: a model switch before its terminal upsert
+          // must not move the call to the newly selected model.
+          const toolModels = active ? (active.toolModels ??= new Map()) : undefined;
+          if (item.status === 'running' && meta?.activeModel && toolModels && !toolModels.has(item.id)) toolModels.set(item.id, meta.activeModel);
+          if (item.status !== 'running') {
+            const model = toolModels?.get(item.id);
+            toolModels?.delete(item.id);
+            this.deps.analytics.recordToolCall(sessionId, item, undefined, model);
+          }
+        }
         break;
       }
       case 'item.delta': {
@@ -854,15 +1015,18 @@ export class SessionManager {
             meta.status = event.status;
             meta.statusDetail = event.detail;
           }
+          // Only the transitions that end a harness get a line: idle/running flip every turn.
+          if (event.status === 'stopped') this.deps.log('info', `[${sessionId}] harness stopped${event.detail ? `: ${event.detail}` : ''}`);
+          else if (event.status === 'error') this.deps.log('warn', `[${sessionId}] harness reported an error status${event.detail ? `: ${event.detail}` : ''}`);
           if (event.status === 'idle' || event.status === 'stopped' || event.status === 'error') {
             if (active) {
-              void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `live flush failed: ${errorMessage(e)}`));
+              void this.flushLive(sessionId, active).catch((e) => this.deps.log('warn', `[${sessionId}] live flush failed: ${errorMessage(e)}`));
               if (event.status === 'stopped') {
                 // The harness exited on its own: pending approvals would hang forever and the
                 // adapter must be disposed, mirroring the fatal-error path.
                 this.active.delete(sessionId);
                 this.cancelApprovals(sessionId, active, 'Harness stopped');
-                active.adapter.dispose().catch((e) => this.deps.log('warn', `dispose after harness stop failed: ${errorMessage(e)}`));
+                active.adapter.dispose().catch((e) => this.deps.log('warn', `[${sessionId}] dispose after harness stop failed: ${errorMessage(e)}`));
               }
             }
             this.schedulePersist(meta);
@@ -880,7 +1044,7 @@ export class SessionManager {
       case 'usage':
         if (meta) {
           meta.usage = event.totals;
-          this.deps.analytics.recordUsage(meta, event.totals);
+          this.deps.analytics.recordUsage(meta, event.totals, undefined, event.subagentCostByModel);
           const threshold = this.settings().autoCompactionThreshold;
           if (active) {
             if (active.autoCompactionThreshold !== threshold) {
@@ -898,6 +1062,9 @@ export class SessionManager {
           if (meta.status === 'idle') this.scheduleAutoCompaction(meta.id);
         }
         break;
+      case 'subagent':
+        if (meta) this.deps.analytics.recordSubagent(meta, event.completion);
+        break;
       case 'meta':
         if (meta) {
           Object.assign(meta, event.patch);
@@ -906,6 +1073,8 @@ export class SessionManager {
         }
         break;
       case 'error':
+        // The transcript card is the user's copy; this is the support copy, with the harness named.
+        this.deps.log(event.fatal ? 'error' : 'warn', `[${sessionId}] ${meta?.config.harness ?? 'harness'} ${event.fatal ? 'fatal error' : 'error'}: ${event.message}`);
         if (meta) {
           meta.lastError = event.message;
           if (event.fatal) {
@@ -916,7 +1085,7 @@ export class SessionManager {
               // Tear the adapter down cleanly so no approval waits forever and streamed items are saved.
               this.active.delete(sessionId);
               this.cancelApprovals(sessionId, active, 'Harness failed');
-              void this.flushLive(sessionId, active).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `dispose after fatal error failed: ${errorMessage(e)}`));
+              void this.flushLive(sessionId, active).then(() => active.adapter.dispose()).catch((e) => this.deps.log('warn', `[${sessionId}] dispose after fatal error failed: ${errorMessage(e)}`));
             }
           }
           this.schedulePersist(meta);
@@ -932,7 +1101,7 @@ export class SessionManager {
 
   /** Transcript appends must never reject into the void; log a warning instead. */
   private appendTranscript(sessionId: string, item: TranscriptItem): void {
-    this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `transcript append failed: ${errorMessage(e)}`));
+    this.deps.store.appendTranscript(sessionId, item).catch((e) => this.deps.log('warn', `[${sessionId}] transcript append failed (${item.kind} ${item.id}): ${errorMessage(e)}`));
   }
 
   private async flushLive(sessionId: string, active: ActiveSession): Promise<void> {
@@ -947,6 +1116,11 @@ export class SessionManager {
 
   private onTurnFinished(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>): void {
     this.deps.analytics.recordTurn(meta, turn);
+    // One line per turn is the timeline a slow or expensive session is diagnosed from.
+    this.deps.log(
+      turn.status === 'failed' ? 'warn' : 'info',
+      `[${meta.id}] turn ${turn.status}${turn.durationMs !== undefined ? ` in ${(turn.durationMs / 1000).toFixed(1)}s` : ''}${turn.usage ? ` (${turn.usage.inputTokens} in / ${turn.usage.outputTokens} out)` : ''}${turn.costUsd ? ` $${turn.costUsd.toFixed(4)}` : ''}${turn.error ? `: ${turn.error}` : ''}`
+    );
     const active = this.active.get(meta.id);
     if (this.settings().notifications && turn.status !== 'interrupted') {
       this.deps.notify(meta.id, meta.title, turn.status === 'completed' ? 'Turn finished' : `Turn ${turn.status}${turn.error ? `: ${turn.error}` : ''}`);
@@ -958,6 +1132,7 @@ export class SessionManager {
     if (text.includes(GOAL_COMPLETE_TOKEN)) {
       goal.status = 'complete';
       goal.updatedAt = Date.now();
+      this.deps.log('info', `[${meta.id}] goal complete after ${goal.iterations} continuation(s)`);
       this.schedulePersist(meta);
       this.pushSessions();
       this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal marked complete after ${goal.iterations} continuation${goal.iterations === 1 ? '' : 's'}.` } });
@@ -968,6 +1143,7 @@ export class SessionManager {
     if (goal.iterations >= goal.maxIterations) {
       goal.status = 'paused';
       goal.updatedAt = Date.now();
+      this.deps.log('info', `[${meta.id}] goal paused at the ${goal.maxIterations}-iteration guard`);
       this.schedulePersist(meta);
       this.pushSessions();
       this.emit(meta.id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'warn', text: `Goal paused: reached the ${goal.maxIterations}-iteration guard. Resume it from the Goal panel.` } });
@@ -975,12 +1151,13 @@ export class SessionManager {
     }
     goal.iterations += 1;
     goal.updatedAt = Date.now();
+    this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
     this.schedulePersist(meta);
     const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}. The active goal is:\n\n${goal.objective}\n\nReview what has been done so far, verify against real evidence, and continue working toward the goal. If it is now fully achieved, end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line after a brief completion audit. Otherwise keep going without asking for permission to continue.`;
     setTimeout(() => {
       const m = this.get(meta.id);
       if (!m || m.goal?.status !== 'active' || m.status === 'running' || m.status === 'awaiting') return;
-      void this.send(meta.id, { text: prompt }).catch((e) => this.deps.log('warn', `goal continue failed: ${errorMessage(e)}`));
+      void this.send(meta.id, { text: prompt }).catch((e) => this.deps.log('warn', `[${meta.id}] goal continue failed: ${errorMessage(e)}`));
     }, 1500);
   }
 
@@ -988,6 +1165,7 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     const s = this.settings();
+    this.deps.log('info', `[${id}] goal ${action}${opts.maxIterations !== undefined ? ` maxIterations=${opts.maxIterations}` : ''}${opts.autoContinue !== undefined ? ` autoContinue=${opts.autoContinue}` : ''}`);
     switch (action) {
       case 'set': {
         meta.goal = {
@@ -1043,6 +1221,7 @@ export class SessionManager {
     if (path.resolve(meta.cwd) === path.resolve(cwd)) return meta;
     const wasRunning = !!this.active.get(id);
     if (wasRunning) await this.stop(id);
+    this.deps.log('info', `[${id}] session moved ${meta.cwd} → ${cwd}${wasRunning ? ' (harness was running; provider resume state dropped)' : ''}`);
     meta.cwd = cwd;
     const info = await worktreeInfo(cwd).catch(() => null);
     const managedBase = meta.config.projectRoot
@@ -1084,6 +1263,7 @@ export class SessionManager {
       statusDetail: undefined,
       queued: 0,
       harnessRef: {},
+      pendingForkContext: undefined,
       goal: undefined,
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
@@ -1118,18 +1298,23 @@ export class SessionManager {
         meta.harnessRef = { nativeHistory: true };
       }
     }
-    await this.deps.store.upsert(meta);
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
     if (cross) {
+      // The target cannot resume the source's provider session, so hand it the prior conversation
+      // as plain text: the first message in the fork carries it and then the flag is cleared.
+      await this.deps.store.writeBlob(nid, FORK_CONTEXT_FILE, renderForkContext(keep, src.config.harness, target));
+      meta.pendingForkContext = true;
       keep.push({
         id: shortId('i_'),
         kind: 'info',
         ts: Date.now(),
         level: 'info',
-        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The new harness starts with a fresh context — the transcript above is carried over for reference.`
+        text: `Forked from ${HARNESS_BY_ID[src.config.harness].name} into ${HARNESS_BY_ID[target].name} in the same directory${meta.worktreeBranch ? ` (branch ${meta.worktreeBranch})` : ''}. The conversation above is handed to the new harness as context on your next message.`
       });
     }
+    await this.deps.store.upsert(meta);
     await this.deps.store.rewriteTranscript(nid, keep);
+    this.deps.log('info', `[${nid}] forked from ${id}${cross ? ` (${src.config.harness} → ${target})` : ''}; ${keep.length} transcript item(s) carried over`);
     this.pushSessions();
     return meta;
   }
@@ -1171,6 +1356,22 @@ export class SessionManager {
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
+}
+
+/** `provider/model` for log lines, or 'default' when the harness picks. */
+function describeModel(model: ModelRef | undefined): string {
+  return model ? `${model.provider}/${model.model}` : 'default';
+}
+
+/** Which provider-side session a harness will try to resume, or '' for a fresh start. */
+function describeResume(ref: HarnessRef): string {
+  if (ref.claudeSessionId) return `claude:${ref.claudeSessionId}${ref.forkOnResume ? ' (fork)' : ''}`;
+  if (ref.codexThreadId) return `codex:${ref.codexThreadId}`;
+  if (ref.piSessionFile) return `pi:${path.basename(ref.piSessionFile)}`;
+  if (ref.acpSessionId) return `acp:${ref.acpSessionId}`;
+  if (ref.cursorAgentId) return `cursor:${ref.cursorAgentId}`;
+  if (ref.nativeHistory) return 'native:history';
+  return '';
 }
 
 /** `, 12.3 tok/s` for the markdown export, or '' when the turn has no speed sample. */

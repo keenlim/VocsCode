@@ -207,6 +207,24 @@ v1 account model: **accounts-lite** — a single provisioned account, no signup 
 billing flow. The device registry and routing are account-keyed from day one, so
 productizing later means adding signup + billing, not rework.
 
+**Status:** P0–P3 implemented. P0 transport extraction; P1 localhost web client + shims +
+responsive shell; P2 relay + desktop host + e2e crypto + Settings UI + relay web client
+(pairing, read-only browsing); P3 interactive remote chat — `sessions:send/interrupt/stop/
+create/rename/setModel/setEffort/setPermissionMode` opened to paired clients, the web page
+gained a composer, interrupt/stop controls and a native-dialog-free new-session flow
+(folders come from the host's known folders, harnesses from live availability), and the
+canonical-JSON bug that broke void-returning invoke results was fixed.
+Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
+Cloudflare account; QR pairing (deferred until the production relay URL exists); P3.5
+terminal over WAN; P4 hardening (audit surface, offline mirror, view-only mode).
+
+Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
+AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
+zero new dependencies (the X25519/Ed25519/XChaCha choice in §6.2 needed a library; the
+WebCrypto-universal set has the same trust properties and was adopted instead). v1 adds
+an **enrollment secret** (`ENROLL_TOKEN`): the desktop must present it to request
+pairing codes, so random parties cannot spam the desktop with pairing prompts.
+
 ### 6.3 Pairing flow
 
 ```

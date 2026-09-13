@@ -11,13 +11,13 @@ import { Agatho } from './agents';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitRevertFile, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
-import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
+import { gitnexusHomeBase, globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
-import { enrichModelContextWindows } from './models/static-models';
+import { enrichModelsFromProviders } from './models/static-models';
 import type { RuntimeResolver } from './runtime';
 import type { SearchIndex } from './search';
 import { which } from './runtime';
@@ -26,6 +26,7 @@ import type { SessionManager } from './session-manager';
 import { normalizeMcpProjectState, normalizeMcpServers, type SettingsStore } from './settings';
 import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, readSkillDoc } from './skills';
 import type { TerminalManager } from './terminal';
+import type { RemoteHost } from './remote/host';
 import { listWorkspaceFiles, readWorkspaceFile } from './workspace-files';
 import { errorMessage } from './util/async';
 import { spawnTool } from './harness/spawn';
@@ -69,6 +70,8 @@ export interface HandlerDeps {
   analytics: AnalyticsStore;
   /** Deep session search (FTS5); derived state, safe to rebuild. */
   search: SearchIndex;
+  /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
+  remote?: RemoteHost;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -95,10 +98,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   async function invokeChannel(channel: string, req: unknown): Promise<unknown> {
     const fn = handlers.get(channel as IpcChannel);
-    if (!fn) throw new Error(`Unknown channel: ${channel}`);
+    if (!fn) {
+      deps.log('warn', `ipc: unknown channel ${channel}`);
+      throw new Error(`Unknown channel: ${channel}`);
+    }
     const t0 = Date.now();
     try {
       return await fn(req as never);
+    } catch (e) {
+      // The renderer shows the message as a toast, but a toast is gone in seconds; the log line
+      // is what a bug report has. Only the channel and the error — never the request, which for
+      // secrets:set is the key itself.
+      deps.log('warn', `ipc ${channel} failed: ${errorMessage(e)}`);
+      throw e;
     } finally {
       const ms = Date.now() - t0;
       if (ms >= SLOW_HANDLER_MS) deps.log('warn', `slow ipc ${channel}: ${ms}ms`);
@@ -192,6 +204,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
   });
+  // Exceptions are invisible once the renderer window is blank; they belong in the same log as
+  // everything else, clipped so one runaway stack cannot fill it.
+  handle('app:rendererError', ({ message, stack, source }) => {
+    const where = source ? ` at ${source}` : '';
+    const trace = stack ? `\n${stack.slice(0, 4000)}` : '';
+    deps.log('error', `renderer error${where}: ${message.slice(0, 2000)}${trace}`);
+  });
   handle('app:notify', async ({ title, body }) => {
     if (typeof title !== 'string' || typeof body !== 'string') return;
     const s = settings.get();
@@ -211,6 +230,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('settings:get', () => settings.get());
   handle('settings:update', async (patch) => {
     const next = await settings.update(patch);
+    // Keys only: provider entries carry custom headers, and window bounds change every drag.
+    const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
+    if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
     deps.push(PUSH_CHANNELS.settingsChanged, next);
     return next;
   });
@@ -237,7 +259,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('providers:list', () => {
     const s = settings.get();
     return s.providers.map((p) => {
-      const models = enrichModelContextWindows(p.models.length ? p.models : fallbackModels(p), s.providers);
+      const models = enrichModelsFromProviders(p.models.length ? p.models : fallbackModels(p), s.providers);
       return { ...p, hasApiKey: secrets.has(p.id), models: applyModelOverrides(models, s.modelOverrides) };
     });
   });
@@ -268,9 +290,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       const providers = s.providers.map((x) => (x.id === id ? { ...x, models, modelsUpdatedAt: Date.now() } : x));
       const next = await settings.update({ providers });
       deps.push(PUSH_CHANNELS.settingsChanged, next);
-      return { models: applyModelOverrides(enrichModelContextWindows(models, next.providers), next.modelOverrides) };
+      return { models: applyModelOverrides(enrichModelsFromProviders(models, next.providers), next.modelOverrides) };
     } catch (e) {
-      const models = enrichModelContextWindows(fallbackModels(p), s.providers);
+      deps.log('warn', `model list refresh failed for ${id}: ${errorMessage(e)}`);
+      const models = enrichModelsFromProviders(fallbackModels(p), s.providers);
       return { models: applyModelOverrides(models, s.modelOverrides), error: errorMessage(e) };
     }
   });
@@ -306,6 +329,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         }
         const value = await runtime.availability(id);
         availabilityCache.set(id, { at: Date.now(), value });
+        deps.log('debug', `harness ${id}: ${value.available ? 'available' : 'unavailable'}${value.version ? ` ${value.version}` : ''}${value.binaryPath ? ` at ${value.binaryPath}` : ''}${value.detail ? ` — ${value.detail}` : ''}`);
         out[id] = value;
       })
     );
@@ -314,11 +338,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('harness:models', async ({ harness }) => {
     const current = settings.get();
     const result = await listHarnessModels({ harness, settings: current, runtime, getApiKey: (id) => secrets.get(id) });
-    return { ...result, models: enrichModelContextWindows(result.models, current.providers) };
+    return { ...result, models: enrichModelsFromProviders(result.models, current.providers) };
   });
   handle('harness:install', async ({ id }) => {
+    deps.log('info', `installing ${id} into the app runtime directory`);
     const r = await runtime.install(id);
     availabilityCache.clear();
+    // npm's output is the renderer's to show in full; the log keeps the verdict and the tail of a failure.
+    if (r.ok) deps.log('info', `installed ${id}`);
+    else deps.log('warn', `install of ${id} failed: ${r.log.trim().split('\n').slice(-5).join(' | ').slice(0, 600)}`);
     return r;
   });
 
@@ -337,13 +365,14 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const mcpScope = (sessionId: string) => {
     const m = sessions.get(sessionId);
     if (!m) throw new Error('Session not found');
-    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, gitnexusHomeBase: gitnexusHomeBase(deps.desktop.userDataPath()) };
   };
   handle('mcp:stores', () => globalStoreInfo());
   handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));
   handle('mcp:project:save', async ({ sessionId, servers }) => {
     const scope = mcpScope(sessionId);
     const r = await writeProjectMcp(scope.cwd, normalizeMcpServers(servers));
+    if (!r.ok) deps.log('warn', `[${sessionId}] could not write ${r.file}: ${r.error ?? 'unknown error'}`);
     return { ok: r.ok, error: r.error };
   });
   handle('mcp:project:state', async ({ sessionId, patch }) => {
@@ -357,7 +386,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!checked) return { ok: false, error: 'Incomplete server definition', tools: [], durationMs: 0 };
     const resolved = await resolveVars(checked, { env: process.env, secret: (name) => secrets.get(secretKeyFor(name)) });
     const cwd = sessionId ? sessions.get(sessionId)?.cwd : undefined;
-    return inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+    const result = await inspectServer(normalizeStdio(resolved.def, { which: (cmd) => which(cmd) }), { cwd });
+    if (result.ok) deps.log('debug', `mcp ${checked.id}: inspected in ${result.durationMs}ms, ${result.tools.length} tool(s)`);
+    else deps.log('warn', `mcp ${checked.id}: inspect failed after ${result.durationMs}ms: ${result.error ?? 'unknown error'}`);
+    return result;
   });
   handle('mcp:import', async ({ servers, to, sessionId }) => {
     const incoming = normalizeMcpServers(servers);
@@ -407,6 +439,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
+  handle('sessions:editAndResend', ({ id, userItemId, input }) => sessions.editAndResend(id, userItemId, input));
   handle('sessions:interrupt', ({ id }) => sessions.interrupt(id));
   handle('sessions:stop', ({ id }) => sessions.stop(id));
   handle('sessions:setModel', ({ id, model }) => sessions.setModel(id, model));
@@ -423,6 +456,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     });
     if (res.canceled || !res.filePath) return { path: null };
     await fs.writeFile(res.filePath, md, 'utf8');
+    deps.log('info', `[${id}] transcript exported to ${res.filePath}`);
     return { path: res.filePath };
   });
   handle('sessions:fork', ({ id, harness }) => sessions.fork(id, harness));
@@ -450,6 +484,37 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('agent:cancel', () => agatho.cancel());
   handle('agent:resolve', ({ proposalId, approve }) => agatho.resolveProposal(String(proposalId ?? ''), approve === true));
   handle('agent:reset', () => agatho.reset());
+
+  // Remote access (docs/REMOTE-ACCESS.md). The enrollment and device tokens live in the
+  // secret store, never in settings; enable() stores them and opens the relay socket.
+  if (deps.remote) {
+    const remote = deps.remote;
+    handle('remote:get', async () => ({
+      config: settings.get().remote ?? { enabled: false },
+      state: remote.state(),
+      devices: settings.get().remote?.enabled ? await remote.listDevices() : []
+    }));
+    handle('remote:enable', async ({ relayUrl, enrollToken }) => {
+      await secrets.set('remote-enroll', enrollToken);
+      await settings.update({ remote: { enabled: true, relayUrl } });
+      await remote.enable(relayUrl, enrollToken);
+      return remote.state();
+    });
+    handle('remote:disable', async () => {
+      await settings.update({ remote: { enabled: false } });
+      await remote.disable();
+      return remote.state();
+    });
+    handle('remote:pairStart', ({ hostName }) => remote.startPairing(hostName || 'This computer'));
+    handle('remote:pairRespond', ({ decision }) => {
+      remote.respondPairing(decision);
+      return undefined;
+    });
+    handle('remote:revoke', async ({ deviceId }) => {
+      await remote.revokeDevice(deviceId);
+      return undefined;
+    });
+  }
 
   // `days: 0` is all time; only an absent request falls back to the 30-day default.
   handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));
@@ -488,6 +553,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:pr', async ({ sessionId, base, head }) => {
     const r = await gitCreatePr(cwdOf(sessionId), base, head);
     sessions.note(sessionId, r.ok ? `PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim() : `PR failed: ${r.output ?? 'unknown error'}`, r.ok ? 'info' : 'error');
+    if (r.ok) deps.log('info', `[${sessionId}] PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim());
+    else deps.log('warn', `[${sessionId}] PR creation failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
@@ -495,6 +562,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // An explicit head branch pins the PR (Branches panel); otherwise the session's own is resolved.
     const r = await gitMergePr(cwdOf(sessionId), base, head, head ? {} : await prQueryOf(sessionId));
     sessions.note(sessionId, r.ok ? `Merged${head ? ` ${head}` : ''}: ${r.url ?? 'PR merged'}` : r.output ?? 'Failed to merge the PR', r.ok ? 'info' : 'error');
+    if (r.ok) deps.log('info', `[${sessionId}] PR merged${head ? ` (${head})` : ''}: ${r.url ?? ''}`.trim());
+    else deps.log('warn', `[${sessionId}] PR merge failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
     return r;
   });
@@ -502,6 +571,23 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('git:worktrees', ({ sessionId }) => gitWorktrees(cwdOf(sessionId)));
   handle('git:checkout', ({ sessionId, branch }) => gitCheckout(cwdOf(sessionId), branch));
   handle('git:branchesOverview', ({ sessionId }) => gitBranchesOverview(cwdOf(sessionId)));
+  // Guided setup for a folder that is not a repository yet (or has no GitHub remote).
+  handle('git:setupStatus', ({ sessionId }) => gitSetupStatus(cwdOf(sessionId)));
+  handle('git:init', ({ sessionId }) => gitInit(cwdOf(sessionId)));
+  handle('git:initialCommit', ({ sessionId, message }) => gitInitialCommit(cwdOf(sessionId), message));
+  handle('git:setRemote', ({ sessionId, url }) => gitSetRemote(cwdOf(sessionId), url));
+  handle('git:push', async ({ sessionId }) => {
+    const r = await gitPush(cwdOf(sessionId));
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:createGitHubRepo', async ({ sessionId, name, private: isPrivate }) => {
+    const r = await gitCreateGitHubRepo(cwdOf(sessionId), name, !!isPrivate);
+    if (r.ok) sessions.refreshGitState(sessionId);
+    return r;
+  });
+  handle('git:setIdentity', ({ sessionId, name, email, global }) => gitSetIdentity(cwdOf(sessionId), name, email, !!global));
+  handle('git:githubIdentity', ({ sessionId }) => gitGithubIdentity(cwdOf(sessionId)));
   handle('git:deleteBranch', ({ sessionId, branch, force }) => gitDeleteBranch(cwdOf(sessionId), branch, !!force));
   handle('git:updateBranch', ({ sessionId, branch }) => gitUpdateBranch(cwdOf(sessionId), branch));
   // Only registered worktrees may be removed; `path` must match one git reports so the

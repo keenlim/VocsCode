@@ -3,7 +3,7 @@
  * store so a definition can be copied across. Per-repo servers live on the right-panel MCP tab.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { McpServerDef, McpStoreInfo } from '../../../shared/types';
+import type { GitnexusMode, McpServerDef, McpStoreInfo } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
@@ -38,6 +38,11 @@ export function McpView() {
 
   const save = async (list: McpServerDef[]) => {
     await invoke('settings:update', { mcpServers: list });
+  };
+
+  const gitnexusMode: GitnexusMode = settings?.gitnexus?.mode ?? 'per-repo';
+  const setGitnexusMode = async (mode: GitnexusMode) => {
+    await invoke('settings:update', { gitnexus: { mode } });
   };
 
   const upsert = async (def: McpServerDef) => {
@@ -110,9 +115,30 @@ export function McpView() {
         {tab === OWN_TAB ? (
           <>
             <p className="mcp-intro muted small">
-              These servers are offered to every harness that can take them — Claude, both Codex adapters, ACP agents and the native loop. Cursor reads its own store instead; pi has no MCP support yet.
+              These servers are offered to every harness that can take them — Claude, both Codex adapters, ACP agents and pi. Cursor reads its own store instead.
               Per-repo servers live on a session's <span className="mono">MCP</span> panel tab.
             </p>
+            <div className="mcp-card">
+              <div className="mcp-row-head">
+                <Icon name="server" size={12} />
+                <span className="mcp-name">GitNexus</span>
+                <Badge tone="blue">built-in</Badge>
+              </div>
+              <div className="muted small">Ships with Vocs Code and is offered to every repo. Choose how its server runs.</div>
+              <div className="row gap8 pad-t">
+                <Button size="sm" variant={gitnexusMode === 'per-repo' ? 'primary' : 'ghost'} onClick={() => void setGitnexusMode('per-repo')}>
+                  Per-repo servers
+                </Button>
+                <Button size="sm" variant={gitnexusMode === 'shared' ? 'primary' : 'ghost'} onClick={() => void setGitnexusMode('shared')}>
+                  One shared server
+                </Button>
+              </div>
+              <div className="muted small pad-t">
+                {gitnexusMode === 'shared'
+                  ? 'One GitNexus process serves every indexed repo. Each session still only sees its own graph (plus any repo you share), enforced by this app.'
+                  : 'Each repo gets its own GitNexus process, scoped to that repo. Enable or disable it per repo on the MCP panel tab.'}
+              </div>
+            </div>
             {servers.length === 0 && !editing && (
               <EmptyState icon="server" title="No MCP servers yet">
                 <p>An MCP server gives your agents extra tools — a code host, a database, a browser. Add one here and every harness that supports MCP picks it up on its next session.</p>

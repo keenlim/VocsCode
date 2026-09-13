@@ -166,7 +166,7 @@ class FakePiServer {
   private buf = '';
   private readonly handlers = new Map<string, (params: AnyRecord) => unknown>();
 
-  constructor(private readonly child: AnyRecord) {
+  constructor(private readonly child: AnyRecord, private readonly ready = true) {
     child.stdin.on('data', (d: Buffer) => this.onData(d.toString('utf8')));
   }
 
@@ -184,6 +184,12 @@ class FakePiServer {
       if (line) {
         const msg = JSON.parse(line) as AnyRecord;
         const data = this.handlers.get(msg.type as string)?.(msg) ?? {};
+        if (msg.type === 'get_state' && this.ready) {
+          for (const capability of ['approvals', 'tools']) {
+            const nonce = mocks.spawnCalls.at(-1)?.opts.env?.VOCS_CODE_PI_NONCE;
+            this.child.stdout.write(JSON.stringify({ type: 'extension_ui_request', method: 'notify', id: capability, message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce, capability, ready: true }) }) + '\n');
+          }
+        }
         this.child.stdout.write(JSON.stringify({ type: 'response', id: msg.id, success: true, data }) + '\n');
       }
       idx = this.buf.indexOf('\n');
@@ -360,6 +366,19 @@ describe('pi resume seam', () => {
     mocks.spawnCalls.length = 0;
   });
 
+  it('refuses a runtime without the required extension handshake before sending any prompt', async () => {
+    const h = makeAdapterCtx({ harness: 'pi', runtime: { resolve: () => ({ name: 'pi', path: 'C:/fake/pi.exe' }), resource: () => 'C:/fake/extension.ts' } });
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    new FakePiServer(child, false).respond('get_state', {});
+    const commands: string[] = [];
+    child.stdin.on('data', (data: Buffer) => commands.push(data.toString('utf8')));
+    const adapter = new PiAdapter(h.ctx);
+    await expect(adapter.send({ text: 'Must not execute' })).rejects.toThrow(/Missing readiness/);
+    expect(commands.some((c) => c.includes('"type":"prompt"'))).toBe(false);
+    expect(h.events.some((e) => e.type === 'status' && e.status === 'idle')).toBe(false);
+  });
+
   it('passes the stored session file to the CLI as --session', async () => {
     const h = makeAdapterCtx({
       harness: 'pi',
@@ -425,10 +444,30 @@ describe('native resume seam', () => {
     expect(h.readJson).toHaveBeenCalledWith('native-history.json');
     expect(h.writeJson).toHaveBeenCalledWith(
       'native-history.json',
-      expect.objectContaining({ version: 1, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'tool-1' })]) })
+      expect.objectContaining({ version: 2, messages: expect.arrayContaining([expect.objectContaining({ role: 'tool', toolCallId: 'tool-1' })]) })
     );
     expect(h.meta.harnessRef.nativeHistory).toBe(true);
     expect(h.events.some((e) => e.type === 'status' && e.status === 'idle')).toBe(true);
+    await adapter.dispose();
+  });
+
+  it('restores the checkpoint before a user message without retaining later context', async () => {
+    const h = makeAdapterCtx({ harness: 'native' });
+    const saved = {
+      version: 2,
+      messages: [{ role: 'user', text: 'before' }, { role: 'assistant', text: 'old branch', toolCalls: [] }],
+      boundaries: { u_edit: [{ role: 'user', text: 'before' }] }
+    };
+    h.readJson.mockImplementation(async (name: string) => (name === 'native-history.json' ? saved : null));
+
+    const adapter = new NativeAdapter(h.ctx);
+    await adapter.start();
+
+    await expect(adapter.rewindToUserMessage('u_edit')).resolves.toBe(true);
+    expect(h.writeJson).toHaveBeenLastCalledWith(
+      'native-history.json',
+      expect.objectContaining({ version: 2, messages: [{ role: 'user', text: 'before' }], boundaries: {} })
+    );
     await adapter.dispose();
   });
 });

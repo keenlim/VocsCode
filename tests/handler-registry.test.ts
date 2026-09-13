@@ -111,9 +111,17 @@ describe('handler registry', () => {
     fsSync.writeFileSync(path.join(ws, 'sub', 'b.txt'), 'world', 'utf8');
   });
 
-  it('rejects unknown channels', async () => {
-    const { registry } = stubDeps();
+  it('rejects unknown channels and leaves a log line', async () => {
+    const { registry, logs } = stubDeps();
     await expect(registry.invoke('nope:channel', {})).rejects.toThrow('Unknown channel');
+    expect(logs).toContainEqual(['warn', 'ipc: unknown channel nope:channel']);
+  });
+
+  it('logs a failing handler by channel and error, never by request payload', async () => {
+    const { registry, logs } = stubDeps();
+    await expect(registry.invoke('mcp:project', { sessionId: 's_missing' })).rejects.toThrow('Session not found');
+    expect(logs).toContainEqual(['warn', 'ipc mcp:project failed: Session not found']);
+    expect(logs.some(([, m]) => m.includes('s_missing'))).toBe(false);
   });
 
   it('serves a representative set of channels', () => {
@@ -191,6 +199,21 @@ describe('handler registry', () => {
     expect(created.id).toBe('s_test');
     expect(await registry.invoke('sessions:get', { id: 's_nope' })).toBeNull();
     await expect(registry.invoke('git:summary', { sessionId: 's_nope' })).rejects.toThrow('Session not found');
+    // Guided-setup mutations resolve the session's cwd first, so an unknown id can never reach git
+    // with a path of the caller's choosing.
+    const guided: [string, Record<string, unknown>][] = [
+      ['git:setupStatus', {}],
+      ['git:init', {}],
+      ['git:initialCommit', { message: 'Initial commit' }],
+      ['git:setRemote', { url: 'https://github.com/you/project.git' }],
+      ['git:push', {}],
+      ['git:createGitHubRepo', { name: 'project', private: true }],
+      ['git:setIdentity', { name: 'Mona', email: 'mona@example.com', global: false }],
+      ['git:githubIdentity', {}]
+    ];
+    for (const [channel, extra] of guided) {
+      await expect(registry.invoke(channel, { sessionId: 's_nope', ...extra })).rejects.toThrow('Session not found');
+    }
   });
 
   it('routes deep search through the search index', async () => {
@@ -220,6 +243,14 @@ describe('handler registry', () => {
     await registry.invoke('sessions:send', { id: 's_test', input: { text: 'hi' } });
     expect(logs.some(([level, msg]) => level === 'warn' && msg.includes('slow ipc sessions:send'))).toBe(true);
   });
+
+  it('records renderer errors in the main log', async () => {
+    const { registry, logs } = stubDeps();
+    await registry.invoke('app:rendererError', { message: 'TypeError: boom', stack: 'Error: boom\n  at render', source: 'App.tsx:12' });
+    const line = logs.find(([level]) => level === 'error');
+    expect(line?.[1]).toContain('renderer error at App.tsx:12: TypeError: boom');
+    expect(line?.[1]).toContain('at render');
+  });
 });
 
 describe('mcp handlers', () => {
@@ -244,10 +275,15 @@ describe('mcp handlers', () => {
     });
     const raw = JSON.parse(fsSync.readFileSync(path.join(ws, '.mcp.json'), 'utf8'));
     expect(Object.keys(raw.mcpServers)).toEqual(['good']);
-    const info = (await registry.invoke('mcp:project', { sessionId: 's_test' })) as { repo: { id: string }[]; effective: { enabled: boolean; reason?: string }[] };
+    const info = (await registry.invoke('mcp:project', { sessionId: 's_test' })) as {
+      repo: { id: string }[];
+      effective: { def: { id: string }; enabled: boolean; reason?: string; scope: string }[];
+    };
     expect(info.repo.map((s) => s.id)).toEqual(['good']);
-    // Written, but inert: nothing is active until the user enables it for this repo.
-    expect(info.effective).toEqual([{ def: expect.objectContaining({ id: 'good' }), scope: 'repo', enabled: false, reason: 'not-enabled' }]);
+    // Written, but inert: nothing the repo defines is active until the user enables it for this repo.
+    expect(info.effective.find((e) => e.def.id === 'good')).toEqual({ def: expect.objectContaining({ id: 'good' }), scope: 'repo', enabled: false, reason: 'not-enabled' });
+    // GitNexus ships built in and is offered to an inject harness by default.
+    expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: true, def: expect.objectContaining({ id: 'gitnexus' }) });
   });
 
   it('keeps the per-repo trust switch in settings, keyed by project root', async () => {

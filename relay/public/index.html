@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vocs Code — remote</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- Pairing: enter the code shown by the desktop (Settings → Remote access). -->
+    <section id="screen-pair" data-screen hidden>
+      <div class="card">
+        <h1>Vocs Code</h1>
+        <p class="muted">Pair this browser with your desktop app. Enter the code shown under Settings → Remote access.</p>
+        <form id="pair-form">
+          <label>Relay URL<input id="relay" type="url" placeholder="https://your-relay.workers.dev" required /></label>
+          <label>Pairing code<input id="code" maxlength="9" placeholder="ABCD2345" autocomplete="off" required /></label>
+          <label>Browser name<input id="device-name" placeholder="My laptop" /></label>
+          <button type="submit" class="primary">Pair</button>
+          <p id="pair-error" class="error"></p>
+        </form>
+      </div>
+    </section>
+
+    <!-- Waiting for the desktop decision. -->
+    <section id="screen-pairing" data-screen hidden>
+      <div class="card">
+        <h1>Waiting for approval…</h1>
+        <p class="muted">Confirm the request on your desktop (Settings → Remote access). This expires in five minutes.</p>
+      </div>
+    </section>
+
+    <!-- Paired: sessions + transcript + composer (interactive). -->
+    <section id="screen-app" data-screen hidden>
+      <header class="topbar">
+        <span class="brand">Vocs Code</span>
+        <span id="conn" class="muted small"></span>
+        <button id="new-session" class="ghost">New session</button>
+        <button id="logout" class="ghost">Log out</button>
+      </header>
+      <div class="new-session" id="new-session-panel" hidden>
+        <label>Folder<input id="ns-folder" list="known-folders" placeholder="/path/on/your/machine" /></label>
+        <datalist id="known-folders"></datalist>
+        <label>Harness<select id="ns-harness"></select></label>
+        <label>Title<input id="ns-title" placeholder="Optional" /></label>
+        <label>First prompt<input id="ns-prompt" placeholder="Optional" /></label>
+        <div class="row">
+          <button id="ns-create" class="primary">Create</button>
+          <button id="ns-cancel" class="ghost">Cancel</button>
+        </div>
+        <p id="ns-error" class="error"></p>
+      </div>
+      <div class="layout">
+        <nav id="session-list" class="session-list"></nav>
+        <main class="chat">
+          <div class="chat-head">
+            <span id="active-title" class="muted small"></span>
+            <span class="spacer"></span>
+            <button id="act-interrupt" class="ghost" hidden>Interrupt</button>
+            <button id="act-stop" class="ghost" hidden>Stop</button>
+          </div>
+          <div id="transcript" class="transcript"></div>
+          <div class="composer">
+            <textarea id="composer" rows="2" placeholder="Message the agent… (Enter to send, Shift+Enter for a new line)"></textarea>
+            <button id="send" class="primary">Send</button>
+          </div>
+        </main>
+      </div>
+    </section>
+    <script src="/app.js"></script>
+  </body>
+</html>

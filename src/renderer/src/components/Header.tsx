@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, fmtTokens, harnessShort } from '../format';
+import { basename, fmtCost, fmtTokens, harnessShort, harnessTone } from '../format';
 import { archiveSession, setSessionEffort } from '../sessionActions';
 import { useSessionModels } from '../models';
+import { useGitSummary } from '../gitReads';
 import { useStore } from '../store';
 import { Badge, Button, Dropdown, Icon, MenuItem, StatusDot } from './ui';
 import { ForkIntoDropdown } from './ForkInto';
@@ -20,15 +21,10 @@ export function Header({ session }: { session: SessionMeta }) {
   const toast = useStore((s) => s.toast);
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
-  const [branch, setBranch] = useState<string | undefined>();
   const changesVersion = useStore((s) => s.changesVersion);
+  const { data: summary } = useGitSummary(session.id, changesVersion);
+  const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
-
-  useEffect(() => {
-    invoke('git:summary', { sessionId: session.id })
-      .then((g) => setBranch(g.branch))
-      .catch(() => setBranch(undefined));
-  }, [session.id, changesVersion]);
 
   const current = session.activeModel ?? session.config.model;
   const currentInfo = models.find((m) => current && m.id === current.model && m.provider === current.provider);
@@ -49,13 +45,9 @@ export function Header({ session }: { session: SessionMeta }) {
     <header className="header">
       <div className="header-title">
         <StatusDot status={session.status} />
-        <span className="header-name" title={session.title}>
+        <span className="header-name" data-testid="session-title" title={session.title}>
           {session.title}
         </span>
-        <Badge tone="neutral" title={h.name}>
-          {harnessShort(session.config.harness)}
-          {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
-        </Badge>
         <button type="button" className="header-path" title={session.cwd} onClick={() => void invoke('app:openPath', { path: session.cwd, sessionId: session.id })}>
           <Icon name="folder" size={12} /> {basename(session.cwd)}
         </button>
@@ -71,6 +63,10 @@ export function Header({ session }: { session: SessionMeta }) {
 
       <div className="header-controls">
         <div className="header-pills">
+        <Badge tone={harnessTone(session.config.harness)} title={h.name}>
+          {harnessShort(session.config.harness)}
+          {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
+        </Badge>
         <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <ModelPicker
@@ -86,6 +82,11 @@ export function Header({ session }: { session: SessionMeta }) {
               onSelect={(m) => {
                 close();
                 if (m) void setModel(m);
+              }}
+              onSelectCustom={(id) => {
+                close();
+                const provider = (current ?? models[0])?.provider ?? 'anthropic';
+                void setModel({ id, provider, displayName: id });
               }}
             />
           )}

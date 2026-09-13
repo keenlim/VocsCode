@@ -5,10 +5,12 @@
  * dispatch are exercised; only the child process is fake.
  */
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as acp from '@agentclientprotocol/sdk';
 import type { ApprovalDraft, HarnessContext } from '../src/main/harness/types';
+import type { ResolvedServer } from '../src/main/mcp/effective';
 import type { HarnessRef, PermissionMode, SessionEvent, SessionMeta, TranscriptItem } from '../src/shared/types';
 import { emptyUsage } from '../src/main/models/static-models';
 import { defaultSettings } from '../src/main/settings';
@@ -265,6 +267,110 @@ describe('acp adapter', () => {
     await h.adapter.start();
     expect(h.agent.requests.some((r) => r.method === 'session/resume')).toBe(false);
     expect(h.meta.harnessRef.acpSessionId).toBe('sess-new');
+  });
+
+  it('resolves a relative MCP command to an absolute path and skips the ones it cannot', async () => {
+    const h = makeHarness();
+    // The wrapped form normalizeStdio leaves on Windows is a bare `cmd`; ACP rejects any bare command.
+    const shell = process.platform === 'win32' ? 'cmd' : 'sh';
+    const servers: ResolvedServer[] = [
+      { def: { id: 'gitnexus', transport: 'stdio', command: shell, args: ['/c', 'npx', '-y', 'gitnexus@latest', 'mcp'] }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] },
+      { def: { id: 'ghost', transport: 'stdio', command: 'vocs-code-mcp-not-installed' }, missing: [], secretEnvKeys: [], secretHeaderKeys: [] }
+    ];
+    h.ctx.mcpServers = async () => servers;
+    // dsh fails session/new outright on a relative command; the handshake must still complete.
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', (params) => {
+      for (const [i, s] of (params.mcpServers as AnyRecord[]).entries()) {
+        if (!path.isAbsolute(s.command as string)) throw new Error(`mcpServers[${i}].command must be an absolute path`);
+      }
+      return { sessionId: 'sess-mcp' };
+    });
+
+    await h.adapter.start();
+
+    const req = h.agent.requests.find((r) => r.method === 'session/new');
+    const sent = req?.params.mcpServers as AnyRecord[];
+    expect(sent.map((s) => s.name)).toEqual(['gitnexus']);
+    expect(path.isAbsolute(sent[0].command)).toBe(true);
+    expect(h.meta.harnessRef.acpSessionId).toBe('sess-mcp');
+    expect(infoTexts(h.items, 'warn').some((t) => /ghost/.test(t))).toBe(true);
+    expect(h.events.at(-1)).toEqual({ type: 'status', status: 'idle' });
+  });
+
+  it('decodes dsh-style tuple model values and maps refs back to the raw option value', async () => {
+    const h = makeHarness();
+    const configOptions = [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: JSON.stringify(['deepseek-official', 'deepseek-v4-flash']),
+        options: [
+          {
+            group: 'deepseek-official',
+            name: 'DeepSeek',
+            options: [
+              { value: JSON.stringify(['deepseek-official', 'deepseek-v4-flash']), name: 'DeepSeek V4 Flash' },
+              { value: JSON.stringify(['deepseek-official', 'deepseek-v4-pro']), name: 'DeepSeek V4 Pro' }
+            ]
+          }
+        ]
+      },
+      {
+        id: 'reasoning_effort',
+        name: 'Reasoning effort',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'high',
+        options: [{ value: 'high', name: 'High' }]
+      }
+    ];
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', () => ({ sessionId: 'sess-dsh', configOptions }));
+    h.agent.on('session/set_config_option', (params: AnyRecord) => {
+      expect(params.value).toBe(JSON.stringify(['deepseek-official', 'deepseek-v4-pro']));
+      return { configOptions: [{ ...configOptions[0], currentValue: params.value }, configOptions[1]] };
+    });
+    await h.adapter.start();
+
+    // The catalog exposes clean provider/model refs, not the raw JSON tuples dsh sends.
+    const modelsEvent = h.events.find((e) => e.type === 'models') as AnyRecord;
+    expect(modelsEvent.models).toHaveLength(2);
+    expect(modelsEvent.models[0]).toMatchObject({ id: 'deepseek-v4-flash', provider: 'deepseek-official', displayName: 'DeepSeek V4 Flash' });
+    expect(h.meta.activeModel).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-flash' });
+    expect(h.meta.activeEffort).toBe('high');
+
+    await h.adapter.setModel({ provider: 'deepseek-official', model: 'deepseek-v4-pro' });
+    const setReq = h.agent.requests.find((r) => r.method === 'session/set_config_option');
+    expect(setReq?.params.configId).toBe('model');
+    expect(setReq?.params.value).toBe(JSON.stringify(['deepseek-official', 'deepseek-v4-pro']));
+    expect(h.meta.activeModel).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' });
+    const modelsEvents = h.events.filter((e) => e.type === 'models') as AnyRecord[];
+    expect(modelsEvents.at(-1)!.models[1]).toMatchObject({ id: 'deepseek-v4-pro', isDefault: true });
+  });
+
+  it('keeps plain string model values untouched for agents that do not use tuples', async () => {
+    const h = makeHarness();
+    h.agent.on('initialize', () => ({ protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} }));
+    h.agent.on('session/new', () => ({
+      sessionId: 'sess-plain',
+      configOptions: [
+        {
+          id: 'model',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: 'gemini-2.5-pro',
+          options: [{ value: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' }]
+        }
+      ]
+    }));
+    await h.adapter.start();
+    const modelsEvent = h.events.find((e) => e.type === 'models') as AnyRecord;
+    expect(modelsEvent.models).toEqual([expect.objectContaining({ id: 'gemini-2.5-pro', provider: 'test-agent', displayName: 'Gemini 2.5 Pro' })]);
+    expect(h.meta.activeModel).toEqual({ provider: 'test-agent', model: 'gemini-2.5-pro' });
   });
 
   it('assembles assistant text and completes a prompt turn', async () => {

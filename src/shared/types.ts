@@ -134,9 +134,19 @@ export interface McpProjectState {
   disabledGlobal?: string[];
   /** Repo-file server ids the user has trusted here. */
   enabledRepo?: string[];
+  /** Built-in server ids switched off for this repo. */
+  disabledBuiltin?: string[];
+  /**
+   * Built-in GitNexus only: share this repo's knowledge graph with sessions in other repos.
+   * Off (the default) keeps a session strictly scoped to its own repo's index.
+   */
+  gitnexusGlobal?: boolean;
 }
 
-export type McpScope = 'global' | 'repo';
+export type McpScope = 'global' | 'repo' | 'builtin';
+
+/** How the built-in GitNexus is served: one shared process, or one per repo. */
+export type GitnexusMode = 'shared' | 'per-repo';
 
 /** How a harness takes MCP servers: nothing, injected by us, run by us, or its own store. */
 export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
@@ -164,9 +174,22 @@ export interface McpStoreInfo {
   error?: string;
 }
 
+/** State of one built-in server (GitNexus) for a repo. */
+export interface McpBuiltinInfo {
+  def: McpServerDef;
+  /** Whether it will be handed to this session's harness. */
+  enabled: boolean;
+  /** Whether this repo's index is shared with sessions in other repos. */
+  shared: boolean;
+  /** Whether this repo has an index GitNexus can see for the session. */
+  indexed: boolean;
+}
+
 /** Everything the right-panel MCP tab needs for one session. */
 export interface McpProjectInfo {
   projectRoot: string;
+  /** The built-in GitNexus serving mode this session runs under. */
+  mode: GitnexusMode;
   /** Absolute path of the repo file, whether or not it exists yet. */
   file: string;
   display: string;
@@ -176,6 +199,8 @@ export interface McpProjectInfo {
   error?: string;
   global: McpServerDef[];
   state: McpProjectState;
+  /** Always-present servers the app ships with, headed by GitNexus. */
+  builtin: McpBuiltinInfo[];
   detected: McpStoreInfo[];
   effective: McpEffectiveEntry[];
   harness: HarnessId;
@@ -293,6 +318,10 @@ export interface UsageDayDimensions {
   tool: Record<string, ToolUsage>;
   /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
   modelTool: Record<string, Record<string, ToolUsage>>;
+  /** Live per-tool outcomes keyed by harness; absent in legacy days and never estimated. */
+  harnessTool?: Record<string, Record<string, ToolUsage>>;
+  /** Per-tool call counts keyed `harness|provider/model`, attributed to both when the call ran. */
+  harnessModelTool: Record<string, Record<string, ToolUsage>>;
   file: Record<string, FileUsage>;
 }
 
@@ -328,6 +357,20 @@ export interface ModelToolRow extends ToolUsage {
   label: string;
   /** Tool name. */
   name: string;
+}
+
+/** Tool-call rollup for one tool under one known session harness. */
+export interface HarnessToolRow extends ToolUsage {
+  /** Harness id, not a model or a tool alias. */
+  key: string;
+  label: string;
+  name: string;
+}
+
+/** Tool-call rollup for one tool under one harness and model. */
+export interface HarnessModelToolRow extends ModelToolRow {
+  /** The harness the call ran in. */
+  harness: string;
 }
 
 /** File-change counts by change kind, aggregated across tool calls. */
@@ -414,6 +457,10 @@ export interface AnalyticsSummary {
   tools: ToolUsageRow[];
   /** Per-tool call counts per model, sorted by volume. */
   modelTools: ModelToolRow[];
+  /** Live per-tool outcomes per harness, recorded since this dimension was introduced. */
+  harnessTools: HarnessToolRow[];
+  /** Per-tool call counts per harness and model, sorted by volume. */
+  harnessModelTools: HarnessModelToolRow[];
   files: FileUsageRow[];
   /** Sessions sorted by spend, highest first. */
   sessions: UsageSessionRecord[];
@@ -465,6 +512,11 @@ export interface SessionMeta {
   /** User-picked display label for the status badge; shown instead of the status name until cleared. */
   statusLabel?: string;
   harnessRef: HarnessRef;
+  /**
+   * Set on a cross-harness fork: the copied transcript is written to `fork-context.md` and prefixed
+   * to the next user message so the new harness starts with the prior conversation, then cleared.
+   */
+  pendingForkContext?: boolean;
   usage: UsageTotals;
   lastError?: string;
   /** Current model as reported by the harness (may differ from config after live switch). */
@@ -492,6 +544,8 @@ export interface UserInput {
   text: string;
   images?: ImageAttachment[];
   mode?: SendMode;
+  /** Internal link to the persisted user item; adapters use it to checkpoint rewindable context. */
+  transcriptItemId?: string;
 }
 
 export interface FileChange {
@@ -632,7 +686,8 @@ export type SessionEvent =
     }
   | { type: 'approval.request'; request: ApprovalRequest }
   | { type: 'approval.resolved'; requestId: string; decision: ApprovalDecision }
-  | { type: 'usage'; totals: UsageTotals }
+  | { type: 'usage'; totals: UsageTotals; /** Subagent spend in this delta, per model, so it is attributed to the model that ran it. */ subagentCostByModel?: SubagentCost[] }
+  | { type: 'subagent'; completion: SubagentCompletion }
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
@@ -642,6 +697,29 @@ export interface SessionEventEnvelope {
   sessionId: string;
   event: SessionEvent;
   ts: number;
+}
+
+/** Subagent spend attributed to the model that produced it. */
+export interface SubagentCost {
+  provider: string;
+  model: string;
+  costUsd: number;
+}
+
+/** A finished pi-subagents run, reported to the app so its work is counted and attributed. */
+export interface SubagentCompletion {
+  agentId: string;
+  description?: string;
+  /** Terminal pi-subagents status: completed, error, stopped, aborted. */
+  status: string;
+  /** The model the run actually used, when it could be resolved. */
+  model?: ModelRef;
+  /** Internal tool calls the run made; these never enter the parent transcript. */
+  toolUses: number;
+  costUsd?: number;
+  tokens?: number;
+  durationMs?: number;
+  error?: string;
 }
 
 export interface HarnessAvailability {
@@ -710,6 +788,8 @@ export interface AppSettings {
   theme: ThemeId;
   defaultHarness: HarnessId;
   defaultPermissionMode: PermissionMode;
+  /** Remote access (docs/REMOTE-ACCESS.md): outbound relay connection, off by default. */
+  remote: RemoteConfig;
   defaultEffort?: EffortLevel;
   /** Ask supported harnesses to compact at an idle boundary after context reaches this usage. */
   autoCompactionThreshold?: AutoCompactionThreshold;
@@ -748,6 +828,8 @@ export interface AppSettings {
   mcpServers: McpServerDef[];
   /** Per-user MCP switches keyed by project root; see McpProjectState. */
   mcpProjectState?: Record<string, McpProjectState>;
+  /** How the app-shipped GitNexus server is served (see GitnexusMode). */
+  gitnexus: { mode: GitnexusMode };
   providers: ProviderConfig[];
   /** Capability corrections keyed by `provider/model`; see shared/model-overrides.ts. */
   modelOverrides: Record<string, ModelOverride>;
@@ -778,6 +860,8 @@ export interface AppSettings {
   agent?: { enabled?: boolean; x?: number; y?: number; collapsed?: boolean };
   /** Set once the first-run setup guide has been completed. */
   onboardingDone?: boolean;
+  /** Project roots where the user dismissed the "publish to GitHub" guide on the Git tab. */
+  gitSetupSkipped?: string[];
 }
 
 export interface GitFileStatus {
@@ -798,6 +882,32 @@ export interface GitSummary {
   behind?: number;
   /** Set when git could not produce a trustworthy summary (timeout/corrupt repo); the file list may be empty or incomplete. */
   error?: string;
+}
+
+/**
+ * Guided-setup state for a folder: how far a repository has come (init, first commit, GitHub
+ * remote, push) and whether the GitHub CLI can automate the remote side.
+ */
+export interface GitSetupStatus {
+  isRepo: boolean;
+  /** Repository root, once initialized (a linked worktree reports its own root). */
+  root?: string;
+  /** Main repository root (the shared `.git`), so the guide is dismissed once per project, not per worktree. */
+  mainRoot?: string;
+  /** Current branch; absent on a detached HEAD. */
+  branch?: string;
+  /** False for a repository with no commits yet (an unborn branch). */
+  hasCommits: boolean;
+  /** The `origin` remote URL, when one is configured. */
+  remote?: string;
+  /** True once the current branch exists on origin (a remote-tracking ref). */
+  pushed: boolean;
+  /** True when the repo has any remote-tracking branch, i.e. it has been published; the guide never nags an established repo. */
+  published: boolean;
+  /** Git author identity (`user.name` / `user.email`, local or global); a commit fails while either is missing. */
+  identity: { name?: string; email?: string };
+  /** GitHub CLI availability, which powers one-click repository creation and credential setup. */
+  gh: { installed: boolean; authenticated: boolean; account?: string };
 }
 
 export interface GitBranchInfo {
@@ -878,6 +988,8 @@ export interface GitIssue {
   state: 'OPEN' | 'CLOSED';
   url: string;
   author?: string;
+  /** Markdown description returned by GitHub. */
+  body?: string;
   labels?: { name: string; color?: string }[];
   comments?: number;
   /** ms since epoch */
@@ -911,6 +1023,28 @@ export interface FsEntry {
   path: string;
   isDir: boolean;
   size?: number;
+}
+
+/** Remote access (docs/REMOTE-ACCESS.md §6): config + live state surfaced to the renderer. */
+export interface RemoteConfig {
+  enabled: boolean;
+  relayUrl?: string;
+}
+
+export interface RemoteState {
+  status: 'off' | 'connecting' | 'online' | 'error';
+  detail?: string;
+  pairing?: { code: string; expiresAt: number };
+  pendingRequest?: { code: string; name: string; platform: string };
+  onlineClients: string[];
+}
+
+export interface RemoteDeviceInfo {
+  deviceId: string;
+  kind: 'host' | 'web';
+  name: string;
+  platform: string;
+  lastSeen: number;
 }
 
 export interface DoctorReport {

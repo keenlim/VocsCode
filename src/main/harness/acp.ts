@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import * as acp from '@agentclientprotocol/sdk';
-import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { AcpAgentPreset, ApprovalOption, EffortLevel, FileChange, McpServerDef, ModelInfo, ModelRef, PermissionMode, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { isEffortLevel } from '../../shared/harness-meta';
 import { errorMessage, shortId, truncate, withTimeout } from '../util/async';
 import { which } from '../runtime';
@@ -21,7 +21,7 @@ interface ConfigOptionLike {
   category?: string | null;
   type: 'select' | 'boolean';
   currentValue: string | boolean;
-  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null }[] }[];
+  options?: { value?: string; name: string; description?: string | null; group?: string; options?: { value: string; name: string; description?: string | null; group?: string }[] }[];
 }
 
 const ACP_ENV_KEYS: Record<string, string> = {
@@ -35,13 +35,24 @@ const ACP_ENV_KEYS: Record<string, string> = {
   mistral: 'MISTRAL_API_KEY'
 };
 
-function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null }[] {
-  const out: { value: string; name: string; description?: string | null }[] = [];
+function flattenSelect(opt: ConfigOptionLike): { value: string; name: string; description?: string | null; group?: string }[] {
+  const out: { value: string; name: string; description?: string | null; group?: string }[] = [];
   for (const o of opt.options ?? []) {
-    if (Array.isArray(o.options)) for (const g of o.options) out.push(g);
-    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description });
+    if (Array.isArray(o.options)) for (const g of o.options) out.push({ ...g, group: g.group ?? o.group });
+    else if (typeof o.value === 'string') out.push({ value: o.value, name: o.name, description: o.description, group: o.group });
   }
   return out;
+}
+
+/** dsh-style agents advertise model choices as JSON `[provider, model]` tuples; decode them. */
+function decodeAcpModelValue(value: string): { provider: string; model: string } | null {
+  try {
+    const v = JSON.parse(value) as unknown;
+    if (!Array.isArray(v) || v.length !== 2 || !v.every((x) => typeof x === 'string' && x.length > 0)) return null;
+    return { provider: v[0] as string, model: v[1] as string };
+  } catch {
+    return null;
+  }
 }
 
 export class AcpAdapter implements HarnessAdapter {
@@ -59,6 +70,8 @@ export class AcpAdapter implements HarnessAdapter {
   private turnStartedAt = 0;
   private sessionAllowedKinds = new Set<string>();
   private preset: AcpAgentPreset | null = null;
+  /** Clean ModelRef -> the agent's raw option value (tuple-advertising agents key choices by it). */
+  private modelValues = new Map<string, string>();
   private inflightPrompt: Promise<unknown> | null = null;
 
   constructor(private readonly ctx: HarnessContext) {
@@ -111,6 +124,8 @@ export class AcpAdapter implements HarnessAdapter {
         }
       }
     }
+    // Preset args are user-visible configuration, not secrets (keys travel in env).
+    this.ctx.log('info', `spawning ACP agent ${preset.id}: ${command} ${args.join(' ')} in ${meta.cwd}`);
     const child = spawnTool(command, args, { cwd: meta.cwd, env });
     this.child = child;
     child.stderr?.on('data', (d: Buffer) => this.ctx.log('debug', `[acp:${preset.id}] ${d.toString().trimEnd()}`));
@@ -119,8 +134,6 @@ export class AcpAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'status', status: 'stopped', detail: `${preset.name} exited (${code})` });
     });
     child.on('error', (e) => this.ctx.emit({ type: 'error', message: `${preset.name} failed to start: ${errorMessage(e)}`, fatal: true }));
-    if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
-
     if (!child.stdin || !child.stdout) throw new Error('ACP agent has no stdio');
 
     try {
@@ -143,13 +156,32 @@ export class AcpAdapter implements HarnessAdapter {
       const sessionCaps = (this.caps.sessionCapabilities ?? {}) as { resume?: unknown; list?: unknown };
       // HTTP and SSE entries are dropped unless the agent said it understands them.
       const mcpCaps = (this.caps.mcpCapabilities ?? {}) as { http?: boolean; sse?: boolean };
-      const mcpServers = toAcp(
-        (await this.ctx.mcpServers().catch((e) => {
-          this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
-          return [];
-        })).map((r) => r.def),
-        mcpCaps
-      ) as unknown as acp.NewSessionRequest['mcpServers'];
+      // ACP requires an absolute `command` and the agent rejects the whole handshake when one is
+      // relative — Windows' `cmd /c` shim wrapper is exactly that case. Resolve what we can and
+      // drop the rest: losing one server beats losing the session.
+      const mcpDefs: McpServerDef[] = [];
+      const skippedMcp: string[] = [];
+      for (const { def } of await this.ctx.mcpServers().catch((e) => {
+        this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
+        return [];
+      })) {
+        if (def.transport !== 'stdio' || !def.command) {
+          mcpDefs.push(def);
+          continue;
+        }
+        const command = path.isAbsolute(def.command) ? def.command : which(def.command, [this.ctx.runtime.runtimePaths.appRuntimeDir]);
+        if (!command) {
+          skippedMcp.push(def.id);
+          this.ctx.log('warn', `mcp ${def.id}: cannot resolve "${def.command}" to an absolute path; skipping`);
+          continue;
+        }
+        mcpDefs.push(command === def.command ? def : { ...def, command });
+      }
+      if (skippedMcp.length) {
+        const what = skippedMcp.length > 1 ? 'servers' : 'server';
+        this.info(`Skipped MCP ${what} with a command that is not an absolute path: ${skippedMcp.join(', ')}`, 'warn');
+      }
+      const mcpServers = toAcp(mcpDefs, mcpCaps) as unknown as acp.NewSessionRequest['mcpServers'];
       let res: { sessionId?: string; configOptions?: unknown[] | null; modes?: unknown } | null = null;
       if (meta.harnessRef.acpSessionId && sessionCaps.resume) {
         try {
@@ -171,7 +203,7 @@ export class AcpAdapter implements HarnessAdapter {
       // Apply the configured model / effort if the agent exposes them.
       if (meta.config.model?.model) await this.setModel(meta.config.model).catch((e) => this.ctx.log('warn', `setModel: ${errorMessage(e)}`));
       const effort = this.ctx.effort();
-      if (effort) await this.setEffort(effort).catch(() => undefined);
+      if (effort) await this.setEffort(effort).catch((e) => this.ctx.log('debug', `setEffort(${effort}) not applied: ${errorMessage(e)}`));
     } catch (e) {
       // Handshake failed: tear the agent down so it cannot linger holding injected API keys.
       await this.killChild();
@@ -194,16 +226,26 @@ export class AcpAdapter implements HarnessAdapter {
     const eff = this.effortOption();
     // Agents can advertise values the app does not model (none, auto, numeric levels); drop them at the boundary.
     const efforts = eff ? flattenSelect(eff).map((o) => o.value).filter(isEffortLevel) : undefined;
-    const models: ModelInfo[] = flattenSelect(opt).map((o) => ({
-      id: o.value,
-      provider: this.preset?.id ?? 'acp',
-      displayName: o.name || o.value,
-      description: o.description ?? undefined,
-      supportedEfforts: efforts,
-      isDefault: o.value === opt.currentValue
-    }));
+    this.modelValues.clear();
+    const models: ModelInfo[] = flattenSelect(opt).map((o) => {
+      // dsh-style agents advertise the route as a JSON [provider, model] tuple; expose the bare
+      // model id and real provider so model refs stay clean, and keep the raw value for setting.
+      const decoded = decodeAcpModelValue(o.value);
+      const info: ModelInfo = {
+        id: decoded?.model ?? o.value,
+        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
+        displayName: o.name || decoded?.model || o.value,
+        description: o.description ?? undefined,
+        supportedEfforts: efforts,
+        isDefault: o.value === opt.currentValue
+      };
+      this.modelValues.set(`${info.provider}\u0000${info.id}`, o.value);
+      return info;
+    });
     this.ctx.emit({ type: 'models', models });
-    const current = models.find((m) => m.id === opt.currentValue);
+    const currentValue = typeof opt.currentValue === 'string' ? opt.currentValue : undefined;
+    const currentDecoded = currentValue ? decodeAcpModelValue(currentValue) : null;
+    const current = models.find((m) => (currentDecoded ? m.provider === currentDecoded.provider && m.id === currentDecoded.model : m.id === currentValue));
     if (current) this.ctx.updateMeta({ activeModel: { provider: current.provider, model: current.id } });
     if (eff && isEffortLevel(eff.currentValue)) this.ctx.updateMeta({ activeEffort: eff.currentValue });
   }
@@ -505,7 +547,12 @@ export class AcpAdapter implements HarnessAdapter {
   async setModel(model: ModelRef): Promise<void> {
     const opt = this.modelOption();
     if (!this.conn || !this.sessionId || !opt) throw new Error('This agent does not expose a model option.');
-    const res = await this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: opt.id, value: model.model } as acp.SetSessionConfigOptionRequest);
+    // Send the agent's raw option value: tuple-advertising agents (dsh) key their choices by it.
+    const raw =
+      this.modelValues.get(`${model.provider}\u0000${model.model}`) ??
+      [...this.modelValues.entries()].find(([k]) => k.endsWith(`\u0000${model.model}`))?.[1] ??
+      model.model;
+    const res = await this.conn.setSessionConfigOption({ sessionId: this.sessionId, configId: opt.id, value: raw } as acp.SetSessionConfigOptionRequest);
     this.configOptions = (res.configOptions ?? this.configOptions) as ConfigOptionLike[];
     this.ctx.updateMeta({ activeModel: model });
     this.publishModels();
@@ -528,7 +575,15 @@ export class AcpAdapter implements HarnessAdapter {
   async listModels(): Promise<ModelInfo[]> {
     const opt = this.modelOption();
     if (!opt) return [];
-    return flattenSelect(opt).map((o) => ({ id: o.value, provider: this.preset?.id ?? 'acp', displayName: o.name, description: o.description ?? undefined }));
+    return flattenSelect(opt).map((o) => {
+      const decoded = decodeAcpModelValue(o.value);
+      return {
+        id: decoded?.model ?? o.value,
+        provider: decoded?.provider ?? this.preset?.id ?? 'acp',
+        displayName: o.name || decoded?.model || o.value,
+        description: o.description ?? undefined
+      };
+    });
   }
 
   async dispose(): Promise<void> {

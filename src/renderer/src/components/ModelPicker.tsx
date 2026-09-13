@@ -17,6 +17,7 @@ export function ModelPicker({
   error,
   selected,
   onSelect,
+  onSelectCustom,
   clearOption,
   emptyText = 'No models available'
 }: {
@@ -25,6 +26,8 @@ export function ModelPicker({
   error?: string;
   selected?: ModelRef;
   onSelect: (m: ModelInfo | null) => void;
+  /** When set, a typed id matching no listed model can be used verbatim (gateways that do not publish a catalog). */
+  onSelectCustom?: (id: string) => void;
   /** Optional "no explicit model" row (e.g. harness default). */
   clearOption?: { label: string };
   emptyText?: string;
@@ -38,6 +41,9 @@ export function ModelPicker({
   }, []);
 
   const q = query.trim().toLowerCase();
+  const typed = query.trim();
+  // Offer the typed id only when it is not already a listed model, so an exact match stays a click.
+  const showCustom = !!onSelectCustom && typed.length > 0 && !models.some((m) => m.id.toLowerCase() === typed.toLowerCase());
   const favSet = useMemo(() => new Set(favorites.map(favKey)), [favorites]);
 
   const toggleFavorite = (m: ModelInfo) => {
@@ -51,13 +57,28 @@ export function ModelPicker({
   const matches = (m: ModelInfo) =>
     !q || m.displayName.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
 
+  // The current selection is pinned to the top of the list so it is always visible. It may no
+  // longer exist in the fetched catalog (provider not configured now, or a renamed model), so
+  // fall back to a synthetic row rather than dropping it from the list entirely.
+  const selectedModel = useMemo<ModelInfo | undefined>(() => {
+    if (!selected) return undefined;
+    return (
+      models.find((m) => m.provider === selected.provider && m.id === selected.model) ?? {
+        id: selected.model,
+        provider: selected.provider,
+        displayName: selected.model
+      }
+    );
+  }, [models, selected]);
+  const isSelected = (m: ModelInfo) => !!selectedModel && m.provider === selectedModel.provider && m.id === selectedModel.id;
+
   const rows = useMemo(() => {
     // Keep only models that still exist in the current catalog, preserving stored order.
     const known = favorites.filter((f) => models.some((m) => m.provider === f.provider && m.id === f.model));
     const isFav = (m: ModelInfo) => known.some((f) => f.provider === m.provider && f.model === m.id);
-    const rest = models.filter((m) => !isFav(m));
+    const rest = models.filter((m) => !isFav(m) && !isSelected(m));
     return { known, isFav, rest };
-  }, [favorites, models]);
+  }, [favorites, models, selectedModel]);
 
   const renderRow = (m: ModelInfo) => {
     const active = selected && selected.provider === m.provider && selected.model === m.id;
@@ -89,11 +110,17 @@ export function ModelPicker({
     );
   };
 
-  const favRows = rows.known.map((f) => models.find((m) => m.provider === f.provider && m.id === f.model)!).filter(Boolean);
+  const favRows = rows.known
+    .map((f) => models.find((m) => m.provider === f.provider && m.id === f.model)!)
+    .filter(Boolean)
+    .filter((m) => !isSelected(m));
   const filteredFav = favRows.filter(matches);
   const groups = new Map<string, ModelInfo[]>();
   for (const m of rows.rest) if (matches(m)) groups.set(m.provider, [...(groups.get(m.provider) ?? []), m]);
-  const anyResults = filteredFav.length > 0 || groups.size > 0;
+  // When no explicit model is set, the "harness default" row is the current selection.
+  const pinDefault = !selected && !!clearOption && !q;
+  const pinned = !!selectedModel || pinDefault;
+  const anyResults = pinned || filteredFav.length > 0 || groups.size > 0;
 
   return (
     <div className="model-picker">
@@ -126,8 +153,29 @@ export function ModelPicker({
         </div>
       )}
       {error && <div className="menu-empty">{error}</div>}
-      {!loading && !error && !anyResults && <div className="menu-empty">{q ? `No models match “${query}”.` : emptyText}</div>}
+      {!loading && !error && !anyResults && !showCustom && <div className="menu-empty">{q ? `No models match “${query}”.` : emptyText}</div>}
       <div className="mp-list">
+        {pinned && (
+          <>
+            <div className="menu-group">Selected</div>
+            {selectedModel ? (
+              renderRow(selectedModel)
+            ) : (
+              <button type="button" className="menu-item active" onClick={() => onSelect(null)}>
+                <span className="menu-item-label">{clearOption!.label}</span>
+                <Icon name="check" size={14} />
+              </button>
+            )}
+          </>
+        )}
+        {showCustom && (
+          <>
+            <div className="menu-group">Custom</div>
+            <button type="button" className="menu-item" onClick={() => onSelectCustom!(typed)}>
+              <span className="menu-item-label">Use “{typed}”</span>
+            </button>
+          </>
+        )}
         {filteredFav.length > 0 && (
           <>
             <div className="menu-group">Favorites</div>
@@ -140,7 +188,7 @@ export function ModelPicker({
             {list.map(renderRow)}
           </div>
         ))}
-        {clearOption && !q && (
+        {clearOption && !q && !pinDefault && (
           <>
             <div className="menu-group">Other</div>
             <button type="button" className={`menu-item ${!selected ? 'active' : ''}`} onClick={() => onSelect(null)}>

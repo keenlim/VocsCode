@@ -1180,6 +1180,12 @@ h4 {
   background: var(--blue-soft);
   animation: status-fade 1.2s ease-in-out infinite;
 }
+/* Archiving reuses the Working blink but in amber so it reads as its own transient state. */
+.session-status.status-archiving {
+  color: var(--amber);
+  background: var(--amber-soft);
+  animation: status-fade 1.2s ease-in-out infinite;
+}
 .session-status.status-awaiting {
   color: var(--red);
   background: var(--red-soft);
@@ -1667,7 +1673,8 @@ h4 {
 }
 .msg-user {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
 }
 .msg-user .msg-bubble {
   background: var(--user-bubble);
@@ -1676,6 +1683,51 @@ h4 {
   max-width: 78%;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.msg-user-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  padding: 2px 3px 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.msg-action:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.msg-action:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+.msg-edit textarea {
+  display: block;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  min-width: 260px;
+  resize: vertical;
+  color: inherit;
+  background: color-mix(in srgb, var(--bg) 25%, transparent);
+}
+.msg-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 7px;
 }
 .msg-images {
   display: flex;
@@ -1815,6 +1867,21 @@ h4 {
   background: var(--bg-sunken);
   padding: 1px 5px;
   border-radius: 4px;
+}
+/* A file mentioned in a reply: clicking opens it in the Files panel. */
+.md code.file-ref,
+.md a.file-ref {
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px dotted var(--border-strong);
+}
+.md code.file-ref:hover,
+.md code.file-ref:focus-visible,
+.md a.file-ref:hover,
+.md a.file-ref:focus-visible {
+  color: var(--accent);
+  border-bottom-color: currentColor;
+  outline: none;
 }
 .md pre code {
   background: none;
@@ -2504,6 +2571,169 @@ body.resizing {
   border-top: 1px solid var(--border);
 }
 
+/* Guided git setup (Changes/Git tabs): init, first commit, GitHub remote, push. */
+.git-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 20px;
+  max-width: 520px;
+}
+.git-setup-banner {
+  max-width: none;
+  margin: 8px 10px 4px;
+  padding: 10px 12px;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.git-setup-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.git-setup-head > .icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.git-setup-title {
+  font-weight: 600;
+}
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.setup-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.setup-step-n {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.setup-step.active .setup-step-n {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.setup-step.done .setup-step-n {
+  border-color: var(--green);
+  color: var(--green);
+  background: var(--green-soft);
+}
+.setup-step.pending .setup-step-head {
+  color: var(--fg-muted);
+}
+.setup-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 28px;
+}
+.setup-note {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.setup-note code,
+.setup-cmd code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.setup-cmd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.setup-cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 5px 8px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.setup-row > input {
+  flex: 1;
+  min-width: 150px;
+  width: auto;
+}
+.setup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.setup-vis {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.setup-vis button {
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg-muted);
+}
+.setup-vis button:hover {
+  background: var(--bg-hover);
+}
+.setup-vis button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.setup-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.setup-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.setup-how {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* Branches tab */
 .branches {
   display: flex;
@@ -2635,6 +2865,39 @@ body.resizing {
 }
 .issue-title {
   font-size: 12px;
+}
+.issue-row {
+  cursor: pointer;
+}
+.issue-open {
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-open:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.issue-dialog-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--fg-muted);
+  font-size: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.issue-dialog-body {
+  padding-top: 8px;
+}
+.issue-dialog-empty {
+  margin: 20px 0 4px;
 }
 /* Second column (Updated time / worktree branch) truncates instead of bleeding into the num column. */
 .branch-row > :nth-child(2) {

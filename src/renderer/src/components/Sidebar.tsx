@@ -3,23 +3,13 @@ import React, { useMemo, useRef, useState } from 'react';
 import type { AppSettings, SessionMeta } from '../../../shared/types';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
-import { basename, fmtCost, harnessShort, relTime } from '../format';
+import { basename, fmtCost, harnessShort, harnessTone, relTime } from '../format';
 import { archiveSession } from '../sessionActions';
 import { useStore, toastError } from '../store';
 import { Resizer } from './Resizer';
 import { FolderBranch } from './FolderBranch';
 import { ForkIntoDropdown } from './ForkInto';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
-
-const HARNESS_TONE: Record<string, 'blue' | 'green' | 'amber' | 'purple' | 'neutral' | 'red'> = {
-  claude: 'amber',
-  codex: 'green',
-  'codex-exec': 'green',
-  cursor: 'blue',
-  pi: 'purple',
-  acp: 'blue',
-  native: 'neutral'
-};
 
 /** Icon choices for folder headers (names from the renderer icon set). */
 const FOLDER_ICONS = [
@@ -333,6 +323,7 @@ export function Sidebar() {
               <button
                 type="button"
                 className="project-new-btn"
+                data-testid="new-session"
                 title={`New session in ${basename(g.root)}`}
                 aria-label={`New session in ${basename(g.root)}`}
                 onClick={() => void startNewSession(g.root)}
@@ -451,6 +442,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
   return (
     <div
       className={`session-row ${active ? 'active' : ''}${dragClass}${indicator}`}
+      data-testid="session-row"
       data-session-id={s.id}
       draggable={canDrag}
       onDragStart={(e) => {
@@ -495,7 +487,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
           </div>
         )}
         <div className="session-meta">
-          <Badge tone={HARNESS_TONE[s.config.harness]} title={h?.name}>
+          <Badge tone={harnessTone(s.config.harness)} title={h?.name}>
             {harnessShort(s.config.harness)}
           </Badge>
           {s.activeModel && <span className="session-model" title={`${s.activeModel.provider}/${s.activeModel.model}`}>{s.activeModel.model}</span>}
@@ -513,7 +505,7 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
       <div className="session-side">
         <div onClick={(e) => e.stopPropagation()}>
           <Dropdown align="right" width={200} trigger={() => archiving
-            ? <span className="session-status status-running" title="Archiving…">Archiving</span>
+            ? <span className="session-status status-archiving" title="Archiving…">Archiving</span>
             : <StatusLabel status={s.status} label={s.statusLabel} />}>
             {(close) => <StatusLabelPicker session={s} customLabels={customLabels} onPick={setStatusLabel} close={close} />}
           </Dropdown>

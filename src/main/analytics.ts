@@ -5,9 +5,13 @@ import type {
   AnalyticsSummary,
   FileUsage,
   FileUsageRow,
+  HarnessModelToolRow,
   ModelRateRow,
+  ModelRef,
   ModelToolRow,
   SessionMeta,
+  SubagentCompletion,
+  SubagentCost,
   ToolUsage,
   ToolUsageRow,
   TranscriptItem,
@@ -18,7 +22,7 @@ import type {
   UsageSpeed,
   UsageTotals
 } from '../shared/types';
-import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, totalTokens } from '../shared/usage-rollup';
+import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -35,11 +39,23 @@ interface AnalyticsFile {
   tools: Record<string, ToolUsage>;
   /** Completed tool calls per tool name, keyed by model (`provider/model`). */
   modelTools: Record<string, Record<string, ToolUsage>>;
+  /** Live tool outcomes by known session harness; never reconstructed from legacy aggregates. */
+  harnessTools: Record<string, Record<string, ToolUsage>>;
+  /** Bounded recent-call replay protection, persisted atomically with the counters. */
+  recordedTools: string[];
+  /** Completed tool calls per tool name, keyed by harness and model (`harness|provider/model`). */
+  harnessModelTools: Record<string, Record<string, ToolUsage>>;
   /** File-change counts per path, aggregated from tool results. */
   files: Record<string, FileUsage>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
+
+/** Older calls remain deduped in memory; only this recent window survives restart. */
+const RECENT_TOOL_LIMIT = 10_000;
+
+/** Synthetic tool name for a subagent's internal calls, which pi never puts in the parent transcript. */
+export const SUBAGENT_TOOL = 'subagent';
 
 const EMPTY_USAGE: UsageTotals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 
@@ -217,7 +233,7 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
-export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number): AnalyticsSummary {
+export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, harnessModelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): AnalyticsSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
     addTotals(acc, s.usage);
@@ -287,12 +303,9 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     };
   });
 
-  const toolRows: ToolUsageRow[] = Object.entries(tools)
-    .map(([name, usage]) => ({ name, ...usage }))
-    .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
-  const modelToolRows: ModelToolRow[] = Object.entries(modelTools)
-    .flatMap(([key, perTool]) => Object.entries(perTool).map(([name, usage]) => ({ key, label: key.slice(key.indexOf('/') + 1), name, ...usage })))
-    .sort((a, b) => b.calls - a.calls || a.key.localeCompare(b.key) || a.name.localeCompare(b.name));
+  const toolRows: ToolUsageRow[] = toolUsageRows(tools);
+  const modelToolRows: ModelToolRow[] = modelToolUsageRows(modelTools);
+  const harnessModelToolRows: HarnessModelToolRow[] = harnessModelToolUsageRows(harnessModelTools);
   const toolTotals: ToolUsage = Object.values(tools).reduce<ToolUsage>((acc, t) => {
     addToolUsage(acc, t);
     return acc;
@@ -328,6 +341,8 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     toolTotals,
     tools: toolRows,
     modelTools: modelToolRows,
+    harnessTools: harnessToolUsageRows(harnessTools),
+    harnessModelTools: harnessModelToolRows,
     files: fileRows,
     sessions: sortedSessions,
     sessionCount: sessions.length,
@@ -344,12 +359,14 @@ export interface AnalyticsDeps {
 export type TranscriptReader = (sessionId: string) => Promise<TranscriptItem[]>;
 
 export class AnalyticsStore {
-  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, files: {} };
+  private data: AnalyticsFile = { ...EMPTY_FILE, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
   private readonly file: string;
   private writeTimer: NodeJS.Timeout | null = null;
   private writeQueue: Promise<void> = Promise.resolve();
   /** Tool item ids already counted, so repeated upserts of one call never double-record. */
   private recordedTools = new Set<string>();
+  /** Subagent spend awaiting model re-attribution, keyed by session then `provider/model`. */
+  private readonly pendingSubagentCost = new Map<string, Map<string, SubagentCost>>();
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
     this.file = path.join(userData, 'analytics.json');
@@ -360,7 +377,7 @@ export class AnalyticsStore {
    * session's last active day, and per-tool/per-file stats are rebuilt from its transcript.
    */
   async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
-    const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined);
+    const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined, { log: this.deps.log });
     this.data = {
       version: 1,
       days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
@@ -368,13 +385,18 @@ export class AnalyticsStore {
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
       tools: stored?.tools && typeof stored.tools === 'object' ? stored.tools : {},
       modelTools: stored?.modelTools && typeof stored.modelTools === 'object' ? stored.modelTools : {},
+      harnessTools: stored?.harnessTools && typeof stored.harnessTools === 'object' ? stored.harnessTools : {},
+      recordedTools: Array.isArray(stored?.recordedTools) ? stored.recordedTools.filter((key) => typeof key === 'string').slice(-RECENT_TOOL_LIMIT) : [],
+      harnessModelTools: stored?.harnessModelTools && typeof stored.harnessModelTools === 'object' ? stored.harnessModelTools : {},
       files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
     };
+    this.recordedTools = new Set(this.data.recordedTools);
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
-      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'harnessModelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by?.harnessTool !== undefined && (typeof day.by.harnessTool !== 'object' || day.by.harnessTool === null)) delete day.by.harnessTool;
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
@@ -383,6 +405,16 @@ export class AnalyticsStore {
       if (this.data.recorded[meta.id]) {
         // Still refresh the snapshot: the title/model may have changed since the last write.
         this.data.sessions[meta.id] = snapshotSession(meta, this.data.sessions[meta.id]);
+        // On upgrade, remember old call ids without replaying their already-counted outcomes.
+        if (!Array.isArray(stored?.recordedTools) && readTranscript) {
+          try {
+            for (const item of await readTranscript(meta.id)) {
+              if (item.kind === 'tool' && item.status !== 'running') this.rememberTool(JSON.stringify([meta.id, item.id]));
+            }
+          } catch {
+            this.deps.log('warn', `analytics: could not seed recent tool replay protection for ${meta.id}`);
+          }
+        }
         continue;
       }
       this.data.recorded[meta.id] = { ...meta.usage };
@@ -421,11 +453,12 @@ export class AnalyticsStore {
       const knownFiles: Record<string, FileUsage> = {};
       for (const d of Object.values(this.data.days)) {
         if (!d.by || d.by.estimated) continue;
-        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[name] ??= emptyToolUsage()), t);
+        for (const [name, t] of Object.entries(d.by.tool)) addToolUsage((knownTools[toolNameKey(name)] ??= emptyToolUsage()), t);
         for (const [p, f] of Object.entries(d.by.file)) addFileUsage((knownFiles[p] ??= emptyFileUsage()), f);
       }
-      for (const [name, t] of Object.entries(this.data.tools)) {
-        const k = knownTools[name] ?? emptyToolUsage();
+      for (const t of toolUsageRows(this.data.tools)) {
+        const name = t.name;
+        const k = knownTools[toolNameKey(name)] ?? emptyToolUsage();
         const parts = (['calls', 'errors', 'declined', 'durationMs'] as const).map((f) => apportion(Math.max(0, t[f] - k[f]), weights, f !== 'durationMs'));
         estimated.forEach((d, i) => {
           const share: ToolUsage = { calls: parts[0][i], errors: parts[1][i], declined: parts[2][i], durationMs: parts[3][i] };
@@ -460,7 +493,7 @@ export class AnalyticsStore {
         continue;
       }
       if (item.kind !== 'tool' || item.status === 'running') continue;
-      this.recordToolCall(sessionId, item, dayTs);
+      this.collectToolCall(sessionId, item, dayTs, undefined, false);
       calls++;
     }
     if (durationMs > 0) {
@@ -471,7 +504,7 @@ export class AnalyticsStore {
   }
 
   /** Records cumulative usage totals from the harness, adding the delta to today's bucket. */
-  recordUsage(meta: SessionMeta, totals: UsageTotals, now = Date.now()): void {
+  recordUsage(meta: SessionMeta, totals: UsageTotals, now = Date.now(), subagentCostByModel?: SubagentCost[]): void {
     const prev = this.data.recorded[meta.id];
     const delta = usageDelta(prev ?? { ...EMPTY_USAGE }, totals);
     this.data.recorded[meta.id] = { ...totals };
@@ -479,7 +512,76 @@ export class AnalyticsStore {
     const day = this.dayFor(dayKey(now));
     addDay(day, delta);
     attribute(day, attributionOf(meta), delta);
+    if (subagentCostByModel?.length) this.queueSubagentCost(meta.id, subagentCostByModel);
+    this.flushSubagentCost(meta, day);
     this.scheduleWrite();
+  }
+
+  /**
+   * Records a completed subagent's internal tool calls. They never appear in the parent transcript,
+   * so without this the delegated work is invisible to the tool volume and reliability views.
+   */
+  recordSubagent(meta: SessionMeta, completion: SubagentCompletion, now = Date.now()): void {
+    const uses = Math.max(0, Math.floor(completion.toolUses));
+    if (!uses) return;
+    const day = this.dayFor(dayKey(now));
+    addDay(day, { toolCalls: uses });
+    const by = (day.by ??= emptyDimensions());
+    addToolUsage((by.tool[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    addToolUsage((this.data.tools[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    const session = this.data.sessions[meta.id];
+    if (session) session.toolCalls += uses;
+    // Live per-harness outcomes, so the reliability table accounts for delegated work too.
+    addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    this.scheduleWrite();
+  }
+
+  /**
+   * Subagent spend queued for model re-attribution. pi folds it into the session totals (once
+   * `reportUsage` is on) already attributed to the session's active model, so it is moved here
+   * rather than added — day totals keep the money either way; only the model dimension changes.
+   */
+  private queueSubagentCost(sessionId: string, costs: SubagentCost[]): void {
+    const pending = this.pendingSubagentCost.get(sessionId) ?? new Map<string, SubagentCost>();
+    for (const c of costs) {
+      if (!c.provider || !c.model || !(c.costUsd > 0)) continue;
+      const key = `${c.provider}/${c.model}`;
+      const cur = pending.get(key) ?? { provider: c.provider, model: c.model, costUsd: 0 };
+      cur.costUsd += c.costUsd;
+      pending.set(key, cur);
+    }
+    if (pending.size) this.pendingSubagentCost.set(sessionId, pending);
+  }
+
+  /**
+   * Moves queued subagent cost off the session's active model and onto the model each run used.
+   * Bounded by the active model's own slice so a day can never go negative, and whatever cannot be
+   * moved stays queued for a later delta — so the cumulative split converges even when the spend
+   * and the completion land in different turns.
+   */
+  private flushSubagentCost(meta: SessionMeta, day: UsageDay): void {
+    const pending = this.pendingSubagentCost.get(meta.id);
+    const active = meta.activeModel;
+    if (!pending?.size || !active?.provider || !active.model) return;
+    const by = (day.by ??= emptyDimensions());
+    const fromKey = `${active.provider}/${active.model}`;
+    const from = by.model[fromKey];
+    if (!from) return;
+    for (const [key, c] of pending) {
+      if (key === fromKey) {
+        pending.delete(key);
+        continue;
+      }
+      const moved = Math.min(c.costUsd, from.costUsd);
+      if (moved <= 0) continue;
+      from.costUsd -= moved;
+      const to = (by.model[key] ??= emptySlice(c.model));
+      to.costUsd += moved;
+      if (!to.sessions.includes(meta.id)) to.sessions.push(meta.id);
+      c.costUsd -= moved;
+      if (c.costUsd <= 1e-9) pending.delete(key);
+    }
+    if (pending.size === 0) this.pendingSubagentCost.delete(meta.id);
   }
 
   /**
@@ -504,12 +606,21 @@ export class AnalyticsStore {
   }
 
   /** Records one completed tool call: per-tool counts, per-file changes and today's call volume. */
-  recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now()): void {
-    const parsed = toolCallFromItem(item);
-    if (!parsed) return;
-    const key = `${sessionId}:${item.id}`;
-    if (this.recordedTools.has(key)) return;
+  recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now(), activeModel?: ModelRef): void {
+    this.collectToolCall(sessionId, item, now, activeModel, true);
+  }
+
+  private rememberTool(key: string): boolean {
+    if (this.recordedTools.has(key)) return false;
     this.recordedTools.add(key);
+    this.data.recordedTools.push(key);
+    if (this.data.recordedTools.length > RECENT_TOOL_LIMIT) this.data.recordedTools.shift();
+    return true;
+  }
+
+  private collectToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now: number, activeModel: ModelRef | undefined, live: boolean): void {
+    const parsed = toolCallFromItem(item);
+    if (!parsed || !this.rememberTool(JSON.stringify([sessionId, item.id]))) return;
     const tool = (this.data.tools[item.name] ??= emptyToolUsage());
     addToolUsage(tool, parsed.usage);
     for (const [p, u] of Object.entries(parsed.changes)) {
@@ -521,15 +632,25 @@ export class AnalyticsStore {
     addDay(day, { toolCalls: 1 });
     const by = (day.by ??= emptyDimensions());
     addToolUsage((by.tool[item.name] ??= emptyToolUsage()), parsed.usage);
-    // The snapshot knows which model the call belongs to; keep the per-model tool map in step.
-    const modelKey = session?.model ? `${session.provider ?? ''}/${session.model}` : undefined;
+    if (live && session) {
+      addToolUsage(((this.data.harnessTools[session.harness] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      addToolUsage((((by.harnessTool ??= {})[session.harness] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+    }
+    // Prefer the model captured when the call began; transcript backfills fall back to the session snapshot.
+    const provider = activeModel?.provider ?? session?.provider;
+    const model = activeModel?.model ?? session?.model;
+    const modelKey = model ? `${provider ?? ''}/${model}` : undefined;
     if (modelKey) {
       addToolUsage(((this.data.modelTools[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
       addToolUsage(((by.modelTool[modelKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      if (session?.harness) {
+        const ownerKey = harnessModelKey(session.harness, modelKey);
+        addToolUsage(((this.data.harnessModelTools[ownerKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+        addToolUsage(((by.harnessModelTool[ownerKey] ??= {})[item.name] ??= emptyToolUsage()), parsed.usage);
+      }
     }
     for (const [p, u] of Object.entries(parsed.changes)) addFileUsage((by.file[p] ??= emptyFileUsage()), u);
-    // The snapshot knows which harness, model and project the call belongs to.
-    if (session) attribute(day, { id: session.id, harness: session.harness, provider: session.provider, model: session.model, projectRoot: session.projectRoot }, { toolCalls: 1 });
+    if (session) attribute(day, { id: session.id, harness: session.harness, provider, model, projectRoot: session.projectRoot }, { toolCalls: 1 });
     this.scheduleWrite();
   }
 
@@ -563,6 +684,6 @@ export class AnalyticsStore {
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.files, dayLimit, now);
+    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.harnessModelTools, this.data.files, dayLimit, now, this.data.harnessTools);
   }
 }

@@ -9,7 +9,7 @@ import { useStreamingMarkdown } from '../use-streaming-markdown';
 import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
-import { Badge, Button, Icon, Spinner } from './ui';
+import { askConfirm, Badge, Button, Icon, Spinner } from './ui';
 
 interface ImageLightboxState {
   images: LightboxImage[];
@@ -54,6 +54,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
   const onImageExpand = useCallback((images: LightboxImage[], index: number) => {
     setLightbox({ images, index });
   }, []);
+  /** Inline file references (`\`src/store.ts\``) open in the Files tab of the right panel. */
+  const openFile = useCallback((path: string, line?: number) => useStore.getState().revealFile(session.id, path, line), [session.id]);
 
   const chunks = useMemo(() => groupTranscript(items), [items]);
 
@@ -80,11 +82,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
     el.dataset.rowKey = key;
     if (typeof ResizeObserver !== 'undefined' && !rowObserver.current) {
       rowObserver.current = new ResizeObserver((entries) => {
+        // Non-windowed rows use a flex gap; windowed rows carry that gap as padding.
+        const gap = ref.current ? Number.parseFloat(getComputedStyle(ref.current).rowGap) || 0 : 0;
         let changed = false;
         for (const entry of entries) {
           const k = (entry.target as HTMLElement).dataset.rowKey;
           if (!k) continue;
-          const h = entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height;
+          const h = (entry.borderBoxSize?.[0]?.blockSize ?? entry.target.getBoundingClientRect().height) + gap;
           if (h > 0 && Math.abs((heights.current.get(k) ?? -1) - h) > 0.5) {
             heights.current.set(k, h);
             changed = true;
@@ -94,7 +98,8 @@ export function Transcript({ session }: { session: SessionMeta }) {
       });
     }
     rowObserver.current?.observe(el);
-    const initial = el.getBoundingClientRect().height;
+    const gap = ref.current ? Number.parseFloat(getComputedStyle(ref.current).rowGap) || 0 : 0;
+    const initial = el.getBoundingClientRect().height + gap;
     if (initial > 0 && Math.abs((heights.current.get(key) ?? -1) - initial) > 0.5) {
       heights.current.set(key, initial);
       setMeasureVersion((v) => v + 1);
@@ -140,13 +145,13 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }));
-  }, []);
+    return installMarkdownHandlers(el, (url) => void invoke('app:openExternal', { url }), openFile);
+  }, [openFile]);
 
   // While the find bar is open, follow-the-stream would keep yanking the view away from matches.
   useEffect(() => {
-    if (stick && !findOpen && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [items, stick, findOpen, measureVersion]);
+    if (stick && !findOpen && !jumpHere && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [items, stick, findOpen, jumpHere, measureVersion]);
 
   const onScroll = () => {
     const el = ref.current;
@@ -174,12 +179,24 @@ export function Transcript({ session }: { session: SessionMeta }) {
   useEffect(() => {
     if (!jump || jump.sessionId !== session.id || !loaded || !ref.current) return;
     const el = ref.current.querySelector(`[data-item-id="${CSS.escape(jump.itemId)}"]`);
-    if (!el) return;
+    const consume = () => useStore.setState((s) => s.searchJump === jump ? { searchJump: null } : {});
+    if (!el) {
+      consume();
+      return;
+    }
     setStick(false);
     el.scrollIntoView({ block: 'center' });
     el.classList.add('search-jump-hl');
-    const t = setTimeout(() => el.classList.remove('search-jump-hl'), 2400);
-    return () => clearTimeout(t);
+    const t = setTimeout(() => {
+      el.classList.remove('search-jump-hl');
+      // Keep the reached viewport when rows outside it are unmounted again.
+      setScrollTop(ref.current?.scrollTop ?? 0);
+      consume();
+    }, 2400);
+    return () => {
+      clearTimeout(t);
+      el.classList.remove('search-jump-hl');
+    };
   }, [jump, loaded, session.id]);
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
@@ -205,7 +222,7 @@ export function Transcript({ session }: { session: SessionMeta }) {
         )}
         {virtual && range.start > 0 && <div className="transcript-spacer" style={{ height: tops[range.start] }} aria-hidden />}
         {visible.map((chunk) => (
-          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} />
+          <TranscriptRow key={chunkKey(chunk)} chunk={chunk} sessionId={session.id} canEdit={session.config.harness === 'native' && session.status === 'idle'} showThinking={showThinking} onImageExpand={onImageExpand} measureRow={measureRow} />
         ))}
         {virtual && range.end < chunks.length && <div className="transcript-spacer" style={{ height: tops[chunks.length]! - tops[range.end]! }} aria-hidden />}
         {(session.status === 'running' || session.status === 'starting') && (
@@ -232,10 +249,10 @@ export function Transcript({ session }: { session: SessionMeta }) {
 }
 
 /** One transcript row; `dataItemId` anchors deep-search jumps to the exact item. */
-const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
+const Item = memo(function Item({ item, sessionId, canEdit, showThinking, onImageExpand, dataItemId }: { item: TranscriptItem; sessionId: string; canEdit: boolean; showThinking: boolean; onImageExpand: OnImageExpand; dataItemId?: string }) {
   return (
     <div data-item-id={dataItemId}>
-      {renderItem(item, sessionId, showThinking, onImageExpand)}
+      {renderItem(item, sessionId, canEdit, showThinking, onImageExpand)}
     </div>
   );
 });
@@ -247,12 +264,14 @@ const Item = memo(function Item({ item, sessionId, showThinking, onImageExpand, 
 const TranscriptRow = memo(function TranscriptRow({
   chunk,
   sessionId,
+  canEdit,
   showThinking,
   onImageExpand,
   measureRow
 }: {
   chunk: RenderChunk;
   sessionId: string;
+  canEdit: boolean;
   showThinking: boolean;
   onImageExpand: OnImageExpand;
   measureRow: (key: string, el: HTMLElement) => () => void;
@@ -266,18 +285,26 @@ const TranscriptRow = memo(function TranscriptRow({
   return (
     <div className="transcript-row" ref={ref}>
       {chunk.kind === 'group' ? (
-        <ToolGroup entries={chunk.entries} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} />
+        <ToolGroup entries={chunk.entries} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} />
       ) : (
-        <Item item={chunk.item} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
+        <Item item={chunk.item} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={chunk.item.id} />
       )}
     </div>
   );
-});
+}, (a, b) => a.sessionId === b.sessionId && a.canEdit === b.canEdit && a.showThinking === b.showThinking &&
+  a.onImageExpand === b.onImageExpand && a.measureRow === b.measureRow && sameChunk(a.chunk, b.chunk));
 
-function renderItem(item: TranscriptItem, sessionId: string, showThinking: boolean, onImageExpand: OnImageExpand) {
+/** Grouping recreates wrappers; unchanged constituent items still have stable store identities. */
+function sameChunk(a: RenderChunk, b: RenderChunk): boolean {
+  if (a.kind === 'single' && b.kind === 'single') return a.item === b.item;
+  return a.kind === 'group' && b.kind === 'group' && a.id === b.id &&
+    a.entries.length === b.entries.length && a.entries.every((item, i) => item === b.entries[i]);
+}
+
+function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, showThinking: boolean, onImageExpand: OnImageExpand) {
   switch (item.kind) {
     case 'user':
-      return <UserMessage item={item} onImageExpand={onImageExpand} />;
+      return <UserMessage item={item} sessionId={sessionId} canEdit={canEdit} onImageExpand={onImageExpand} />;
     case 'assistant':
       return <AssistantMessage item={item} showThinking={showThinking} />;
     case 'tool':
@@ -320,13 +347,62 @@ function renderItem(item: TranscriptItem, sessionId: string, showThinking: boole
   }
 }
 
-export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; onImageExpand?: OnImageExpand }) {
+export function UserMessage({ item, sessionId, canEdit = true, onImageExpand }: { item: Extract<TranscriptItem, { kind: 'user' }>; sessionId?: string; canEdit?: boolean; onImageExpand?: OnImageExpand }) {
   const images = item.images ?? [];
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.text);
+  const [rerunning, setRerunning] = useState(false);
+  const toast = useStore((s) => s.toast);
+  const timestamp = new Date(item.ts).toLocaleString(undefined, { weekday: 'long', hour: 'numeric', minute: '2-digit' });
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(item.text);
+      toast('Message copied', 'success');
+    } catch {
+      toast('Could not copy message', 'error');
+    }
+  };
+
+  const rerun = async () => {
+    const text = draft.trim();
+    if (!text && !images.length) return;
+    if (!sessionId) return;
+    const confirmed = await askConfirm({
+      title: 'Edit and rerun this message?',
+      body: 'All transcript items after this message will be discarded. Files changed by those turns are not rolled back.',
+      confirmLabel: 'Rerun message',
+      danger: true
+    });
+    if (!confirmed) return;
+    setRerunning(true);
+    try {
+      const items = await invoke('sessions:editAndResend', { id: sessionId, userItemId: item.id, input: { text, images: images.length ? images : undefined, mode: 'now' } });
+      useStore.getState().replaceTranscript(sessionId, items);
+      setEditing(false);
+      toast('Message rerun from here', 'success');
+    } catch (e) {
+      toast((e as Error).message || 'Could not rerun message', 'error');
+    } finally {
+      setRerunning(false);
+    }
+  };
+
   return (
     <div className="msg msg-user">
       <div className="msg-bubble">
         {item.queuedAs && item.queuedAs !== 'now' && <Badge tone="blue">{item.queuedAs}</Badge>}
-        <div className="msg-text">{item.text}</div>
+        {editing ? (
+          <div className="msg-edit">
+            <textarea aria-label="Edit message" value={draft} onChange={(e) => setDraft(e.target.value)} rows={Math.max(2, Math.min(8, draft.split('\n').length))} autoFocus />
+            <div className="msg-edit-actions">
+              <Button size="sm" onClick={() => { setDraft(item.text); setEditing(false); }} disabled={rerunning}>Cancel</Button>
+              <Button size="sm" variant="primary" icon="refresh" onClick={() => void rerun()} disabled={rerunning || (!draft.trim() && !images.length)}>{rerunning ? 'Rerunning…' : 'Save & rerun'}</Button>
+            </div>
+          </div>
+        ) : (
+          <div className="msg-text">{item.text}</div>
+        )}
         {images.length ? (
           <div className="msg-images">
             {images.map((im, i) =>
@@ -346,6 +422,11 @@ export function UserMessage({ item, onImageExpand }: { item: Extract<TranscriptI
             )}
           </div>
         ) : null}
+      </div>
+      <div className="msg-user-meta">
+        <time dateTime={new Date(item.ts).toISOString()} title={new Date(item.ts).toLocaleString()}>{timestamp}</time>
+        <button type="button" className="msg-action" title="Copy message" aria-label="Copy message" onClick={() => void copy()}><Icon name="copy" size={14} /></button>
+        {sessionId && canEdit && <button type="button" className="msg-action" title="Edit and rerun message" aria-label="Edit and rerun message" onClick={() => setEditing(true)} disabled={rerunning}><Icon name="edit" size={14} /></button>}
       </div>
     </div>
   );
@@ -426,12 +507,14 @@ export function groupTranscript(items: TranscriptItem[]): RenderChunk[] {
 }
 
 /** Collapsed "Ran n commands" header for a run of shell commands, with interleaved commentary inside. */
-export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; showThinking: boolean; onImageExpand: OnImageExpand }) {
+export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, onImageExpand }: { entries: TranscriptItem[]; sessionId: string; canEdit?: boolean; showThinking: boolean; onImageExpand: OnImageExpand }) {
   // open === null means the user has not toggled; then follow running state so live output stays visible.
   const [open, setOpen] = useState<boolean | null>(null);
   // A deep-search jump into one of these commands forces the group open so the anchor exists.
   const jump = useStore((s) => s.searchJump);
   const jumpHere = !!jump && jump.sessionId === sessionId && entries.some((e) => e.id === jump.itemId);
+  // Consuming the navigation request must not immediately hide its matched command.
+  useEffect(() => { if (jumpHere) setOpen(true); }, [jumpHere]);
   const commands = entries.filter((e): e is ToolItem => e.kind === 'tool');
   const running = commands.some((i) => i.status === 'running');
   const expanded = jumpHere || (open ?? running);
@@ -453,7 +536,7 @@ export function ToolGroup({ entries, sessionId, showThinking, onImageExpand }: {
             e.kind === 'tool' ? (
               <ToolCard key={e.id} item={e} dataItemId={e.id} />
             ) : (
-              <Item key={e.id} item={e} sessionId={sessionId} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
+              <Item key={e.id} item={e} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
             )
           )}
         </div>

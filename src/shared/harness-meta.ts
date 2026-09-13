@@ -2,12 +2,40 @@ import type { EffortLevel, HarnessDescriptor, HarnessId, PermissionMode } from '
 
 export const HARNESSES: HarnessDescriptor[] = [
   {
+    id: 'pi',
+    name: 'Pi',
+    tagline: 'Minimal, hackable, any provider',
+    vendor: 'Mario Zechner / community',
+    description:
+      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
+    docsUrl: 'https://github.com/badlogic/pi-mono',
+    capabilities: {
+      streaming: true,
+      approvals: true,
+      steer: true,
+      queue: true,
+      interrupt: true,
+      liveModelSwitch: true,
+      effort: true,
+      images: true,
+      dropsUnsupportedImages: true,
+      resume: true,
+      fork: true,
+      plan: true,
+      costReporting: true,
+      // Injected through the bundled vocs-code-mcp extension, which registers each MCP tool with pi.
+      mcp: 'inject',
+      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
+      modelSource: 'harness'
+    }
+  },
+  {
     id: 'claude',
     name: 'Claude Agent SDK',
     tagline: 'Claude Code harness, embedded',
     vendor: 'Anthropic',
     description:
-      'Runs the Claude Code agent loop through @anthropic-ai/claude-agent-sdk with the full built-in tool set, hooks, MCP, and file checkpointing. Uses your Claude Code login (system CLI) or an Anthropic API key.',
+      'Runs the Claude Code agent loop through @anthropic-ai/claude-agent-sdk with the full built-in tool set, hooks, MCP, and file checkpointing. Uses your Claude Code login (system CLI), an Anthropic API key, or the Anthropic-format catalog of a configured provider — OpenRouter and DeepSeek publish one, and any vendor can be added as an Anthropic-compatible provider.',
     docsUrl: 'https://code.claude.com/docs/en/agent-sdk/typescript',
     capabilities: {
       streaming: true,
@@ -106,33 +134,6 @@ export const HARNESSES: HarnessDescriptor[] = [
       costReporting: false,
       mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
-      modelSource: 'harness'
-    }
-  },
-  {
-    id: 'pi',
-    name: 'Pi',
-    tagline: 'Minimal, hackable, any provider',
-    vendor: 'Mario Zechner / community',
-    description:
-      "Runs the pi coding agent in RPC mode. Model-agnostic through pi's provider registry (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, Ollama, custom). Approvals are added by a bundled pi extension.",
-    docsUrl: 'https://github.com/badlogic/pi-mono',
-    capabilities: {
-      streaming: true,
-      approvals: true,
-      steer: true,
-      queue: true,
-      interrupt: true,
-      liveModelSwitch: true,
-      effort: true,
-      images: true,
-      dropsUnsupportedImages: true,
-      resume: true,
-      fork: true,
-      plan: true,
-      costReporting: true,
-      mcp: 'none',
-      permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
     }
   },
