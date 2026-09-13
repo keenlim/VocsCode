@@ -8,10 +8,11 @@
  * the user correct a single model without touching any of that.
  */
 import type { ModelInfo, ModelOverride, ModelRef } from './types';
+import { modelName } from './model-names';
 
 /** Overrides are keyed by `provider/model` so the same slug on two providers stays distinct. */
 export function modelOverrideKey(provider: string, model: string): string {
-  return `${provider}/${model}`;
+  return modelName(provider, model);
 }
 
 /** Model ids may contain slashes (OpenRouter), so only the first one separates the provider. */

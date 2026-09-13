@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ModelInfo, PermissionMode, SessionMeta } from '../../../shared/types';
 import { EFFORT_LEVELS, HARNESS_BY_ID, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
+import { modelRefName, parseTypedModel } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { basename, fmtCost, fmtTokens, harnessShort, harnessTone } from '../format';
 import { archiveSession, setSessionEffort } from '../sessionActions';
@@ -22,6 +23,7 @@ export function Header({ session }: { session: SessionMeta }) {
   const showThinking = useStore((s) => s.showThinking);
   const toggleThinking = useStore((s) => s.toggleThinking);
   const changesVersion = useStore((s) => s.changesVersion);
+  const providers = useStore((s) => s.settings?.providers) ?? [];
   const { data: summary } = useGitSummary(session.id, changesVersion);
   const branch = summary?.branch;
   const h = HARNESS_BY_ID[session.config.harness];
@@ -67,7 +69,7 @@ export function Header({ session }: { session: SessionMeta }) {
           {harnessShort(session.config.harness)}
           {session.config.harness === 'acp' && session.config.acpAgent ? ` · ${session.config.acpAgent}` : ''}
         </Badge>
-        <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {current?.model ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
+        <Dropdown align="right" width={380} trigger={(open) => <button type="button" className={`pill ${open ? 'open' : ''}`} title="Model"><Icon name="sparkles" size={13} /> {modelRefName(current) ?? 'default model'} <Icon name="chevron" size={12} /></button>}>
           {(close) => (
             <ModelPicker
               models={models}
@@ -85,8 +87,8 @@ export function Header({ session }: { session: SessionMeta }) {
               }}
               onSelectCustom={(id) => {
                 close();
-                const provider = (current ?? models[0])?.provider ?? 'anthropic';
-                void setModel({ id, provider, displayName: id });
+                const ref = parseTypedModel(id, providers.map((p) => p.id), (current ?? models[0])?.provider ?? 'anthropic');
+                void setModel({ id: ref.model, provider: ref.provider, displayName: ref.model });
               }}
             />
           )}

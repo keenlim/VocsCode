@@ -10,7 +10,7 @@ const invokeMock = vi.fn().mockResolvedValue({});
   on: vi.fn().mockReturnValue(() => undefined),
 };
 
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Header } from '../src/renderer/src/components/Header';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { rememberEffort, setSessionEffort } from '../src/renderer/src/sessionActions';
@@ -73,6 +73,27 @@ describe('header actions', () => {
     expect(label.compareDocumentPosition(model) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // No longer in the title row.
     expect((container.querySelector('.header-title') as HTMLElement).querySelector('.badge')).toBeNull();
+  });
+
+  it('names the model by its provider and reads a pasted qualified name back', async () => {
+    // A configured provider is what makes the first segment of a typed name a provider.
+    useStore.setState({ settings: { providers: [{ id: 'openrouter' }] } } as never);
+    const { container } = setup({ activeModel: { provider: 'deepseek', model: 'deepseek-v4-flash' } });
+    const pill = container.querySelector('[title="Model"]') as HTMLElement;
+    expect(pill.textContent).toContain('deepseek/deepseek-v4-flash');
+
+    fireEvent.click(pill);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search models' }), { target: { value: 'openrouter/deepseek/deepseek-flash' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use “openrouter/deepseek/deepseek-flash”' }));
+
+    // The aggregator route survives the round trip: the provider comes from the name, the model
+    // keeps its own slash instead of it being read as a second provider boundary.
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('sessions:setModel', {
+        id: 's_h',
+        model: { provider: 'openrouter', model: 'deepseek/deepseek-flash' }
+      })
+    );
   });
 
   it('toggles thinking from the actions row, below the panel toggle', () => {

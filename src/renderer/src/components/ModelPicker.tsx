@@ -1,6 +1,7 @@
 /** Searchable model picker with star favorites: shared by the header dropdown and the new-session dialog. */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { ModelInfo, ModelRef } from '../../../shared/types';
+import { modelName } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { fmtTokens } from '../format';
 import { useStore } from '../store';
@@ -43,7 +44,7 @@ export function ModelPicker({
   const q = query.trim().toLowerCase();
   const typed = query.trim();
   // Offer the typed id only when it is not already a listed model, so an exact match stays a click.
-  const showCustom = !!onSelectCustom && typed.length > 0 && !models.some((m) => m.id.toLowerCase() === typed.toLowerCase());
+  const showCustom = !!onSelectCustom && typed.length > 0 && !models.some((m) => m.id.toLowerCase() === typed.toLowerCase() || modelName(m.provider, m.id).toLowerCase() === typed.toLowerCase());
   const favSet = useMemo(() => new Set(favorites.map(favKey)), [favorites]);
 
   const toggleFavorite = (m: ModelInfo) => {
@@ -54,8 +55,9 @@ export function ModelPicker({
     void invoke('settings:update', { favoriteModels: next });
   };
 
-  const matches = (m: ModelInfo) =>
-    !q || m.displayName.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q);
+  // The qualified name covers the id and the provider; the vendor label is matched too so a search
+  // for "opus" keeps finding `anthropic/claude-opus-5`.
+  const matches = (m: ModelInfo) => !q || modelName(m.provider, m.id).toLowerCase().includes(q) || m.displayName.toLowerCase().includes(q);
 
   // The current selection is pinned to the top of the list so it is always visible. It may no
   // longer exist in the fetched catalog (provider not configured now, or a renamed model), so
@@ -83,13 +85,17 @@ export function ModelPicker({
   const renderRow = (m: ModelInfo) => {
     const active = selected && selected.provider === m.provider && selected.model === m.id;
     const fav = rows.isFav(m);
+    const name = modelName(m.provider, m.id);
     const context = m.contextWindow && m.contextWindow > 0 && Number.isFinite(m.contextWindow) ? fmtTokens(m.contextWindow) : 'unknown';
-    const metadata = [`Context ${context}`, m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined].filter(Boolean).join(' · ');
+    // A catalog's own label is a hint, not the name: hand-added models carry their id as the label,
+    // so repeating it under the qualified name would say nothing.
+    const vendor = m.displayName && m.displayName !== m.id ? m.displayName : undefined;
+    const metadata = [vendor, `Context ${context}`, m.pricing ? `$${m.pricing.input}/$${m.pricing.output}` : undefined].filter(Boolean).join(' · ');
     return (
-      <div key={`${m.provider}/${m.id}`} className={`mp-row ${active ? 'active' : ''}`}>
+      <div key={name} className={`mp-row ${active ? 'active' : ''}`}>
         <button type="button" className="mp-select" aria-pressed={!!active} onClick={() => onSelect(m)}>
-          <span className="mp-name" title={`${m.provider}/${m.id}`}>
-            {m.displayName}
+          <span className="mp-name" title={name}>
+            {name}
           </span>
           <span className="menu-item-hint" title={metadata}>{metadata}</span>
           {active && <Icon name="check" size={14} />}

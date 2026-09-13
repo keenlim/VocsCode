@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
+import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -511,7 +512,7 @@ export class PiAdapter implements HarnessAdapter {
     const target = norm(name);
     if (!target) return null;
     for (const m of this.models) {
-      if (norm(m.displayName) === target || norm(m.id) === target) return { provider: m.provider, model: m.id };
+      if (norm(m.displayName) === target || norm(m.id) === target || norm(modelName(m.provider, m.id)) === target) return { provider: m.provider, model: m.id };
     }
     for (const m of this.models) {
       if (norm(m.displayName).includes(target) || target.includes(norm(m.id))) return { provider: m.provider, model: m.id };

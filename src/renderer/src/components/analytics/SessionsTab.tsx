@@ -1,6 +1,7 @@
 /** Sessions: every session active in the range as a searchable, sortable table; click one to open it. */
 import React, { useMemo, useState } from 'react';
 import type { AnalyticsSummary, UsageSessionRecord } from '../../../../shared/types';
+import { modelName } from '../../../../shared/model-names';
 import { speedTps } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens, relTime } from '../../format';
 import { useStore } from '../../store';
@@ -81,7 +82,7 @@ export function SessionList({ sessions, compact }: { sessions: UsageSessionRecor
               <span className="slist-title">{s.title}</span>
               <span className="slist-meta">
                 <Badge tone="neutral">{harnessShort(s.harness)}</Badge>
-                {s.model && <span className="mono">{s.model}</span>}
+                {s.model && <span className="mono">{s.provider ? modelName(s.provider, s.model) : s.model}</span>}
                 <span>{basename(s.projectRoot)}</span>
                 <span>{relTime(s.updatedAt)}</span>
                 {!isLive && <span className="slist-gone">deleted</span>}

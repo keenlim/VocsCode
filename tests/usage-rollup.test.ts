@@ -138,10 +138,11 @@ describe('harnessModelToolUsageRows', () => {
       'pi|openrouter/anthropic/claude-3.5-sonnet': { Bash: { calls: 2, errors: 1, declined: 0, durationMs: 0 } },
       'claude|anthropic/claude-3.5-sonnet': { bash: { calls: 1, errors: 0, declined: 0, durationMs: 0 } }
     });
-    // Provider model ids keep their own slashes; only the first `|` is the harness boundary.
+    // Provider model ids keep their own slashes; only the first `|` is the harness boundary, and
+    // without a recorded label the row names the model by its qualified key.
     expect(rows.map((r) => [r.harness, r.key, r.label, r.name, r.calls])).toEqual([
-      ['pi', 'openrouter/anthropic/claude-3.5-sonnet', 'anthropic/claude-3.5-sonnet', 'bash', 2],
-      ['claude', 'anthropic/claude-3.5-sonnet', 'claude-3.5-sonnet', 'bash', 1]
+      ['pi', 'openrouter/anthropic/claude-3.5-sonnet', 'openrouter/anthropic/claude-3.5-sonnet', 'bash', 2],
+      ['claude', 'anthropic/claude-3.5-sonnet', 'anthropic/claude-3.5-sonnet', 'bash', 1]
     ]);
   });
 });

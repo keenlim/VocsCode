@@ -23,6 +23,7 @@ import type {
 } from '../shared/types';
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
+import { modelName } from '../shared/model-names';
 import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
 import { resolveForSession } from './mcp';
@@ -1322,7 +1323,7 @@ export class SessionManager {
   async exportMarkdown(id: string): Promise<string> {
     const meta = this.get(id);
     const items = await this.transcript(id);
-    const lines: string[] = [`# ${meta?.title ?? 'Session'}`, '', `- Harness: ${meta?.config.harness}`, `- Model: ${meta?.activeModel ? `${meta.activeModel.provider}/${meta.activeModel.model}` : 'default'}`, `- Directory: ${meta?.cwd}`, `- Cost: $${(meta?.usage.costUsd ?? 0).toFixed(4)}`, ''];
+    const lines: string[] = [`# ${meta?.title ?? 'Session'}`, '', `- Harness: ${meta?.config.harness}`, `- Model: ${describeModel(meta?.activeModel)}`, `- Directory: ${meta?.cwd}`, `- Cost: $${(meta?.usage.costUsd ?? 0).toFixed(4)}`, ''];
     for (const it of items) {
       switch (it.kind) {
         case 'user':
@@ -1360,7 +1361,7 @@ export class SessionManager {
 
 /** `provider/model` for log lines, or 'default' when the harness picks. */
 function describeModel(model: ModelRef | undefined): string {
-  return model ? `${model.provider}/${model.model}` : 'default';
+  return model ? modelName(model.provider, model.model) : 'default';
 }
 
 /** Which provider-side session a harness will try to resume, or '' for a fresh start. */
