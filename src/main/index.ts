@@ -297,6 +297,7 @@ async function main(): Promise<void> {
       safe('terminal shutdown', terminals?.shutdown(deadline)),
       safe('search close', search?.close()),
       safe('web server stop', webServer?.stop()),
+      safe('agatho shutdown', registry.shutdown()),
       safe('gitnexus shared stop', Promise.resolve().then(() => sharedGitnexus.stop()))
     ]);
     const cap = new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 4000));

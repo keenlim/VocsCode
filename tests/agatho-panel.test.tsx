@@ -115,3 +115,55 @@ describe('Agatho panel', () => {
     expect(screen.getByText('anthropic/claude-haiku-4-5')).toBeTruthy();
   });
 });
+
+describe('Agatho panel placement', () => {
+  /** The panel is fixed-position and anchored by its bottom edge; jsdom has no layout engine. */
+  const viewport = (w: number, h: number) => {
+    for (const [key, value] of [
+      ['innerWidth', w],
+      ['innerHeight', h]
+    ] as const) {
+      Object.defineProperty(window, key, { value, configurable: true });
+    }
+  };
+
+  it('parks bottom-right and anchors by the bottom edge, so the transcript grows upward', () => {
+    viewport(1024, 800);
+    setup([], {}, { enabled: true, collapsed: false });
+    const panel = screen.getByRole('dialog') as HTMLElement;
+    // 800 - 52 (avatar) - 24 (park margin) = 724: the panel's foot stays 24px up, whatever it holds.
+    expect(panel.style.bottom).toBe('24px');
+    expect(panel.style.left).toBe('640px');
+    expect(panel.style.top).toBe('');
+  });
+
+  it('grows upward without moving its foot as the transcript fills up', () => {
+    viewport(1024, 800);
+    const items: AgentItem[] = Array.from({ length: 40 }, (_, i) => ({ id: `a${i}`, kind: 'assistant', text: `line ${i}` }));
+    const { unmount } = setup(items, {}, { enabled: true, collapsed: false });
+    const panel = screen.getByRole('dialog') as HTMLElement;
+    expect(panel.style.bottom).toBe('24px');
+    expect(screen.getAllByText(/^line /)).toHaveLength(40);
+    unmount();
+    setup([], {}, { enabled: true, collapsed: false });
+    expect((screen.getByRole('dialog') as HTMLElement).style.bottom).toBe('24px');
+  });
+
+  it('lets the user drag the panel all the way to the bottom instead of reserving a full panel height', () => {
+    viewport(1024, 800);
+    // The bottom-most reachable spot for the avatar; the old clamp reserved 460px of panel height
+    // and stopped the panel hundreds of pixels short of here.
+    setup([], {}, { enabled: true, collapsed: false, x: 40, y: 800 - 52 - 8 });
+    const panel = screen.getByRole('dialog') as HTMLElement;
+    expect(panel.style.bottom).toBe('8px');
+    expect(panel.style.left).toBe('40px');
+  });
+
+  it('keeps the avatar in reach when the stored position is off the bottom of a shorter window', () => {
+    viewport(1024, 600);
+    setup([], {}, { enabled: true, collapsed: true, x: 9000, y: 5000 });
+    const avatar = screen.getByLabelText('Open Agatho') as HTMLElement;
+    expect(avatar.style.bottom).toBe('8px');
+    expect(avatar.style.left).toBe(`${1024 - 52 - 8}px`);
+  });
+});

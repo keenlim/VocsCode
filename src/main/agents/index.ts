@@ -1,28 +1,23 @@
-/** Agatho: the in-app assistant. A small tool-calling loop over the native provider drivers
- *  whose only reach into the app is the capability allowlist (shared/agent-manifest.ts).
+/** Agatho: the in-app assistant. The agent loop is pi's (src/main/harness/pi.ts runs the same
+ *  runtime for whole sessions); what lives here is the part that must not be delegated: the
+ *  capability allowlist, the risk tiers, and the rule that nothing which changes state runs
+ *  before the user approves it.
  *
- *  Everything that changes state is proposed, not applied: one step's gated calls become a
- *  single proposal the user approves as a batch, and the loop waits for that decision. */
+ *  One step's gated calls become a single proposal the user answers as a batch, and every tool
+ *  call reaches this class over the bridge in ./pi-runtime.ts before anything is invoked. */
+import { randomUUID } from 'node:crypto';
 import type { AgentClientContext, AgentItem, AgentProposal, AgentState } from '../../shared/agent';
 import type { AppSettings, SessionMeta } from '../../shared/types';
-import type { NativeMessage } from '../harness/native/drivers';
-import { anthropicStep, isAnthropicProvider, openaiStep } from '../harness/native/drivers';
-import { resolveProviderApiKey } from '../models/providers';
+import { PI_ENV_KEYS } from '../harness/pi';
 import { errorMessage, shortId } from '../util/async';
 import { contextBlock, systemPrompt } from './context';
-import { selectBackgroundModel } from './model';
-import { agentToolDefs, capabilityFor, runCapability, summarize, tierOf } from './tools';
+import { PiAgentRuntime, type AgathoRuntime, type AgathoToolCall, type CapabilityOutcome } from './pi-runtime';
+import { capabilityFor, piToolDefs, runCapability, summarize, tierOf } from './tools';
 
-/** Tool-calling rounds in one turn; enough to read, propose and confirm without looping forever. */
-const MAX_STEPS = 12;
-/** Wall clock for one turn, excluding time spent waiting on the user. */
-const TURN_BUDGET_MS = 5 * 60_000;
 /** A proposal nobody answers eventually declines itself rather than pinning the loop open. */
 const APPROVAL_TIMEOUT_MS = 15 * 60_000;
 /** Gated calls in one batch; a model asking for more than this has lost the plot. */
 const MAX_BATCH = 25;
-/** Provider messages retained across turns. */
-const MAX_HISTORY = 80;
 /** Streaming re-renders are batched to this interval. */
 const PUSH_INTERVAL_MS = 60;
 
@@ -35,54 +30,95 @@ export interface AgathoDeps {
   invoke(channel: string, req: unknown): Promise<unknown>;
   push(state: AgentState): void;
   log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void;
+  /** Resolved pi binary, or null when pi is not installed. */
+  piBinary(): string | null;
+  /** The bundled capability-bridge extension for pi. */
+  piExtension(): string;
+  /** Working directory for the assistant's pi process; the focused project when there is one. */
+  piCwd(): string;
+  /** Test seam: build the runtime for one conversation. */
+  createRuntime?(opts: ConstructorParameters<typeof PiAgentRuntime>[0]): AgathoRuntime;
+}
+
+/** The gated calls of the assistant message being executed, and the decision they share. */
+interface StepBatch {
+  actions: Map<string, number>;
+  proposal: AgentProposal;
+  decision: Promise<boolean>;
+  settings: AppSettings;
 }
 
 export class Agatho {
   private items: AgentItem[] = [];
-  private history: NativeMessage[] = [];
   private busy = false;
-  private model?: string;
-  private abort?: AbortController;
+  private runtime: AgathoRuntime | null = null;
+  /** Settings snapshot for the turn in flight; capabilities are built from it per step. */
+  private settings: AppSettings = {} as AppSettings;
+  /** The assistant bubble currently streaming. */
+  private stepId: string | null = null;
+  private stepText = '';
+  private batch: StepBatch | null = null;
+  /** Calls refused before execution (over a batch limit or malformed arguments). */
+  private readonly refused = new Map<string, string>();
   private pending?: { proposal: AgentProposal; decide: (approve: boolean) => void };
   private flushTimer?: ReturnType<typeof setTimeout>;
+  /** Memoized pi resolution: `which` touches the filesystem and state() is pushed while streaming. */
+  private piPath?: string | null;
+  private readonly nonce = randomUUID();
 
   constructor(private readonly deps: AgathoDeps) {}
 
   state(): AgentState {
-    const s = this.deps.getSettings();
-    const picked = selectBackgroundModel(s.providers, s.agentModel, s.utilityModel);
     return {
       items: this.items,
       busy: this.busy,
-      model: this.model,
-      unavailable: picked ? undefined : 'No provider is configured yet. Add an API key under Settings → Providers, then pick a model for Agatho.'
+      model: this.runtime?.model,
+      unavailable: this.resolvePi() ? undefined : 'pi is not installed. Install it under Settings → Harnesses and Agatho can start.'
     };
+  }
+
+  private resolvePi(): string | null {
+    if (this.piPath === undefined) this.piPath = this.deps.piBinary();
+    return this.piPath;
   }
 
   reset(): void {
     this.cancel();
+    void this.runtime?.dispose().catch(() => undefined);
+    this.runtime = null;
     this.items = [];
-    this.history = [];
-    this.model = undefined;
+    this.stepId = null;
+    this.stepText = '';
+    this.batch = null;
+    this.refused.clear();
     this.pushNow();
   }
 
+  /** Answers the running batch's proposal; the waiting tool call then runs or declines. */
+  resolveProposal(proposalId: string, approve: boolean): void {
+    if (!this.pending || this.pending.proposal.id !== proposalId) return;
+    const decide = this.pending.decide;
+    this.pending = undefined;
+    decide(approve);
+  }
+
   cancel(): void {
-    this.abort?.abort();
+    this.runtime?.abort();
     if (this.pending) {
       this.pending.proposal.status = 'cancelled';
       const decide = this.pending.decide;
       this.pending = undefined;
       decide(false);
     }
+    this.batch = null;
+    this.busy = false;
     this.pushNow();
   }
 
-  resolveProposal(proposalId: string, approve: boolean): void {
-    if (!this.pending || this.pending.proposal.id !== proposalId) return;
-    const decide = this.pending.decide;
-    this.pending = undefined;
-    decide(approve);
+  /** Stops the pi process; called once when the app quits. */
+  async dispose(): Promise<void> {
+    await this.runtime?.dispose().catch(() => undefined);
+    this.runtime = null;
   }
 
   async send(text: string, client?: AgentClientContext): Promise<void> {
@@ -94,150 +130,210 @@ export class Agatho {
     }
     this.add({ id: shortId('u'), kind: 'user', text: message });
 
-    const settings = this.deps.getSettings();
-    const picked = selectBackgroundModel(settings.providers, settings.agentModel, settings.utilityModel);
-    if (!picked) {
-      this.add({ id: shortId('e'), kind: 'error', text: 'No usable provider. Add an API key under Settings → Providers.' });
+    // Re-resolve so pi installed since the last message is picked up without a restart.
+    this.piPath = undefined;
+    const bin = this.resolvePi();
+    if (!bin) {
+      this.add({ id: shortId('e'), kind: 'error', text: this.state().unavailable ?? 'pi is not available.' });
       return;
     }
-    this.model = `${picked.provider.id}/${picked.model}`;
-
+    const settings = this.deps.getSettings();
+    this.settings = settings;
     const sessions = this.deps.listSessions();
     const active = client?.sessionId ? this.deps.getSession(client.sessionId) : undefined;
-    const system = systemPrompt(contextBlock({ settings, sessions, active, client }));
-    const tools = agentToolDefs();
-    const apiKey = await resolveProviderApiKey(picked.provider, this.deps.getSecret);
-    const step = isAnthropicProvider(picked.provider) ? anthropicStep : openaiStep;
-
-    this.history.push({ role: 'user', text: message });
-    this.trimHistory();
+    const prompt = systemPrompt(contextBlock({ settings, sessions, active, client }));
     this.busy = true;
-    const abort = new AbortController();
-    this.abort = abort;
-    const deadline = Date.now() + TURN_BUDGET_MS;
+    this.stepId = null;
+    this.stepText = '';
+    this.batch = null;
+    this.refused.clear();
     this.pushNow();
 
     try {
-      for (let round = 0; round < MAX_STEPS; round++) {
-        if (Date.now() > deadline) {
-          this.add({ id: shortId('e'), kind: 'error', text: 'Stopped: this turn ran too long.' });
-          break;
-        }
-        const assistantId = shortId('a');
-        let streamed = '';
-        const res = await step({
-          provider: picked.provider,
-          apiKey,
-          model: picked.model,
-          system,
-          history: this.history,
-          tools,
-          signal: abort.signal,
-          onText: (delta) => {
-            streamed += delta;
-            this.setAssistant(assistantId, streamed);
-          },
-          onReasoning: () => undefined
-        });
-
-        const finalText = res.text || streamed;
-        if (finalText.trim()) this.setAssistant(assistantId, finalText);
-        else this.remove(assistantId);
-        this.history.push({
-          role: 'assistant',
-          text: res.text,
-          toolCalls: res.toolCalls,
-          anthropicContent: res.rawContent,
-          anthropicModel: picked.model
-        });
-
-        if (!res.toolCalls.length) {
-          // A model too weak to call tools will answer in prose; that is a normal outcome, not a crash.
-          if (!finalText.trim()) this.add({ id: shortId('e'), kind: 'error', text: `${this.model} returned an empty reply.` });
-          break;
-        }
-        if (round === MAX_STEPS - 1) {
-          this.add({ id: shortId('e'), kind: 'error', text: 'Stopped: too many steps in one turn.' });
-          break;
-        }
-        await this.runCalls(res.toolCalls, settings);
-        this.trimHistory();
-        if (abort.signal.aborted) break;
-      }
-    } catch (e) {
-      if (abort.signal.aborted) this.add({ id: shortId('e'), kind: 'error', text: 'Stopped.' });
-      else {
-        const detail = errorMessage(e);
-        this.deps.log('warn', `agatho turn failed: ${detail}`);
-        this.add({ id: shortId('e'), kind: 'error', text: detail });
-      }
-    } finally {
+      const runtime = await this.ensureRuntime(bin, active);
+      await runtime.prompt(message, prompt);
+      this.pushNow();
+    } catch (error) {
       this.busy = false;
-      this.abort = undefined;
+      const detail = errorMessage(error);
+      this.deps.log('warn', `agatho turn failed: ${detail}`);
+      this.add({ id: shortId('e'), kind: 'error', text: detail });
       this.pushNow();
     }
   }
 
   /* ---------------------------------------------------------------- */
 
-  /** Runs one step's tool calls: reads immediately, everything else behind one approval. */
-  private async runCalls(calls: { id: string; name: string; args: Record<string, unknown> }[], settings: AppSettings): Promise<void> {
+  private async ensureRuntime(bin: string, active: SessionMeta | undefined): Promise<AgathoRuntime> {
+    if (this.runtime && !this.runtime.dead) return this.runtime;
+    await this.runtime?.dispose().catch(() => undefined);
+    // Events from a runtime that has been replaced (reset, crashed child) must not touch the
+    // transcript; only the runtime in this.runtime now is allowed to.
+    let created: AgathoRuntime | null = null;
+    const current = (): boolean => this.runtime === created;
+    const opts: ConstructorParameters<typeof PiAgentRuntime>[0] = {
+      bin,
+      extension: this.deps.piExtension(),
+      tools: piToolDefs(),
+      model: this.settings.agentModel,
+      cwd: active?.cwd || this.deps.piCwd(),
+      env: await this.piEnv(),
+      nonce: this.nonce,
+      log: (level, message) => this.deps.log(level, message),
+      events: {
+        stepStart: () => {
+          if (!current()) return;
+          this.stepId = shortId('a');
+          this.stepText = '';
+        },
+        text: (delta) => {
+          if (!current()) return;
+          if (!this.stepId) this.stepId = shortId('a');
+          this.stepText += delta;
+          this.setAssistant(this.stepId, this.stepText);
+        },
+        stepEnd: (text, calls) => {
+          if (!current()) return;
+          this.finishStep(text, calls);
+        },
+        settled: (error) => {
+          if (!current()) return;
+          this.busy = false;
+          this.batch = null;
+          if (error) this.add({ id: shortId('e'), kind: 'error', text: error });
+          this.pushNow();
+        },
+        exited: (detail) => {
+          if (!current()) return;
+          this.runtime = null;
+          if (this.busy || this.pending) {
+            this.busy = false;
+            this.batch = null;
+            this.add({ id: shortId('e'), kind: 'error', text: detail });
+            this.pushNow();
+          }
+        },
+        run: (call) => (current() ? this.runCall(call) : Promise.resolve({ ok: false, detail: 'Stopped.' }))
+      }
+    };
+    created = (this.deps.createRuntime ?? ((o) => new PiAgentRuntime(o)))(opts);
+    this.runtime = created;
+    return created;
+  }
+
+  /** Provider credentials pi should inherit, so Agatho works from the same keychain. */
+  private async piEnv(): Promise<NodeJS.ProcessEnv> {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [providerId, envKey] of Object.entries(PI_ENV_KEYS)) {
+      if (process.env[envKey]) continue;
+      const value = await this.deps.getSecret(providerId);
+      if (value) env[envKey] = value;
+    }
+    return env;
+  }
+
+  /** Settles the assistant bubble and, for gated calls, opens the batch the user reviews. */
+  private finishStep(text: string, calls: AgathoToolCall[]): void {
+    const id = this.stepId;
+    this.stepId = null;
+    this.stepText = '';
+    if (id) {
+      if (text.trim()) this.setAssistant(id, text);
+      else this.remove(id);
+    }
+    if (!calls.length) {
+      if (!text.trim()) this.add({ id: shortId('e'), kind: 'error', text: `${this.runtime?.model ?? 'pi'} returned an empty reply.` });
+      return;
+    }
     const planned = calls.map((call) => {
       const cap = capabilityFor(call.name);
       const badArgs = !!call.args && typeof call.args === 'object' && '__parseError' in call.args;
       return { call, cap, badArgs, tier: cap && !badArgs ? tierOf(cap, call.args) : ('read' as const) };
     });
-
     const gated = planned.filter((p) => p.cap && !p.badArgs && p.tier !== 'read');
-    let approved = false;
-    let proposal: AgentProposal | undefined;
-    if (gated.length) {
-      if (gated.length > MAX_BATCH) {
-        for (const p of planned) this.toolResult(p.call.id, 'Declined: too many changes were requested at once. Propose them in smaller batches.', true);
-        return;
-      }
-      const destructive = gated.some((p) => p.tier === 'destructive');
-      proposal = {
-        id: shortId('p'),
-        tier: destructive ? 'destructive' : 'write',
-        title: gated.length === 1 ? summarize(gated[0].cap!, gated[0].call.args) : `${gated.length} changes`,
-        actions: gated.map((p) => ({ capability: p.cap!.name, summary: summarize(p.cap!, p.call.args), args: p.call.args })),
-        status: 'pending'
-      };
-      this.add({ id: shortId('i'), kind: 'proposal', proposal });
-      approved = await this.awaitDecision(proposal);
-      proposal.status = approved ? 'applied' : this.abort?.signal.aborted ? 'cancelled' : 'rejected';
-      proposal.results = [];
+    if (!gated.length) return;
+    if (gated.length > MAX_BATCH) {
+      for (const p of gated) this.refused.set(p.call.id, 'Declined: too many changes were requested at once. Propose them in smaller batches.');
+      return;
+    }
+    const destructive = gated.some((p) => p.tier === 'destructive');
+    const proposal: AgentProposal = {
+      id: shortId('p'),
+      tier: destructive ? 'destructive' : 'write',
+      title: gated.length === 1 ? summarize(gated[0].cap!, gated[0].call.args) : `${gated.length} changes`,
+      actions: gated.map((p) => ({ capability: p.cap!.name, summary: summarize(p.cap!, p.call.args), args: p.call.args })),
+      status: 'pending'
+    };
+    const actions = new Map(gated.map((p, i) => [p.call.id, i]));
+    this.add({ id: shortId('i'), kind: 'proposal', proposal });
+    const decision = this.awaitDecision(proposal).then((approved) => {
+      if (approved) proposal.status = 'applied';
+      else if (proposal.status === 'pending') proposal.status = 'rejected';
+      proposal.results = proposal.actions.map(() => undefined as unknown as string);
       this.pushNow();
+      return approved;
+    });
+    this.batch = { actions, proposal, decision, settings: this.settings };
+  }
+
+  /** Runs one capability after the gate has decided; the model gets the outcome as its tool result. */
+  private async runCall(call: AgathoToolCall): Promise<CapabilityOutcome> {
+    const cap = capabilityFor(call.name);
+    if (!cap) {
+      this.deps.log('warn', `agatho asked for an unknown tool: ${call.name}`);
+      return { ok: false, detail: `Unknown tool "${call.name}". Use only the tools you were given.` };
+    }
+    const refused = this.refused.get(call.id);
+    if (refused) {
+      this.refused.delete(call.id);
+      return { ok: false, detail: refused };
+    }
+    if (!!call.args && typeof call.args === 'object' && '__parseError' in call.args) return { ok: false, detail: 'Arguments were not valid JSON. Send them again.' };
+
+    const batch = this.batch;
+    const gated = tierOf(cap, call.args) !== 'read';
+    let proposal: AgentProposal | undefined;
+    let actionIndex: number | undefined;
+    if (gated) {
+      if (batch && batch.actions.has(call.id)) {
+        proposal = batch.proposal;
+        actionIndex = batch.actions.get(call.id);
+        const approved = await batch.decision;
+        if (!approved) {
+          this.pushNow();
+          return { ok: false, detail: 'The user declined this action.' };
+        }
+      } else {
+        // A gated call the step never announced (a stale bridge request); ask about it alone.
+        proposal = {
+          id: shortId('p'),
+          tier: tierOf(cap, call.args) === 'destructive' ? 'destructive' : 'write',
+          title: summarize(cap, call.args),
+          actions: [{ capability: cap.name, summary: summarize(cap, call.args), args: call.args }],
+          status: 'pending'
+        };
+        this.add({ id: shortId('i'), kind: 'proposal', proposal });
+        const approved = await this.awaitDecision(proposal);
+        if (approved) proposal.status = 'applied';
+        else if (proposal.status === 'pending') proposal.status = 'rejected';
+        proposal.results = [];
+        this.pushNow();
+        if (!approved) return { ok: false, detail: 'The user declined this action.' };
+        actionIndex = 0;
+        this.batch = { actions: new Map([[call.id, 0]]), proposal, decision: Promise.resolve(true), settings: batch?.settings ?? this.settings };
+      }
     }
 
-    const ctx = { settings };
-    for (const p of planned) {
-      if (!p.cap) {
-        this.deps.log('warn', `agatho asked for an unknown tool: ${p.call.name}`);
-        this.toolResult(p.call.id, `Unknown tool "${p.call.name}". Use only the tools you were given.`, true);
-        continue;
-      }
-      if (p.badArgs) {
-        this.toolResult(p.call.id, 'Arguments were not valid JSON. Send them again.', true);
-        continue;
-      }
-      const gatedCall = p.tier !== 'read';
-      if (gatedCall && !approved) {
-        this.toolResult(p.call.id, 'The user declined this action.', true);
-        proposal?.results?.push('Declined');
-        continue;
-      }
-      const outcome = await runCapability(p.cap, p.call.args, ctx, this.deps.invoke);
-      this.toolResult(p.call.id, outcome.detail, !outcome.ok);
-      if (gatedCall) {
-        proposal?.results?.push(outcome.ok ? 'Done' : outcome.detail);
-        if (!outcome.ok && proposal) proposal.status = 'failed';
-      } else {
-        this.add({ id: shortId('t'), kind: 'tool', capability: p.cap.name, summary: summarize(p.cap, p.call.args), ok: outcome.ok, detail: outcome.ok ? undefined : outcome.detail });
-      }
-      this.pushNow();
+    const settings = batch?.settings ?? this.settings;
+    const outcome = await runCapability(cap, call.args, { settings }, this.deps.invoke);
+    if (proposal && actionIndex !== undefined && proposal.results) {
+      proposal.results[actionIndex] = outcome.ok ? 'Done' : outcome.detail;
+      if (!outcome.ok) proposal.status = 'failed';
+    } else if (!gated) {
+      this.add({ id: shortId('t'), kind: 'tool', capability: cap.name, summary: summarize(cap, call.args), ok: outcome.ok, detail: outcome.ok ? undefined : outcome.detail });
     }
+    this.pushNow();
+    return outcome;
   }
 
   private awaitDecision(proposal: AgentProposal): Promise<boolean> {
@@ -258,16 +354,13 @@ export class Agatho {
     });
   }
 
-  private toolResult(toolCallId: string, content: string, isError: boolean): void {
-    this.history.push({ role: 'tool', toolCallId, name: '', content, isError: isError || undefined });
-  }
-
   private add(item: AgentItem): void {
     this.items = [...this.items, item];
     this.pushNow();
   }
 
   private remove(id: string): void {
+    if (!this.items.some((i) => i.id === id)) return;
     this.items = this.items.filter((i) => i.id !== id);
     this.pushNow();
   }
@@ -277,14 +370,6 @@ export class Agatho {
     const item: AgentItem = { id, kind: 'assistant', text };
     this.items = idx >= 0 ? this.items.map((i, n) => (n === idx ? item : i)) : [...this.items, item];
     this.schedulePush();
-  }
-
-  /** Keeps whole turns: history always starts at a user message so tool results keep their call. */
-  private trimHistory(): void {
-    if (this.history.length <= MAX_HISTORY) return;
-    let i = this.history.length - MAX_HISTORY;
-    while (i < this.history.length && this.history[i].role !== 'user') i++;
-    if (i < this.history.length) this.history = this.history.slice(i);
   }
 
   private schedulePush(): void {

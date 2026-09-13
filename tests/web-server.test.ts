@@ -29,7 +29,8 @@ function stubRegistry(): HandlerRegistry {
       if (channel === 'sessions:list') return [{ id: 's1' }];
       if (channel === 'boom') throw new Error('boom');
       throw new Error(`Unknown channel: ${channel}`);
-    }
+    },
+    shutdown: async () => undefined
   };
 }
 

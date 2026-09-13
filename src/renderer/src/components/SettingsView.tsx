@@ -178,10 +178,21 @@ const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 function BackgroundModelFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Agatho runs on pi, so its model comes from pi's catalog rather than the app's providers.
+  const [piModels, setPiModels] = useState<ModelInfo[]>([]);
+  const [piError, setPiError] = useState<string | undefined>(undefined);
   useEffect(() => {
     void invoke('providers:list', undefined)
       .then(setProviders)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, []);
+  useEffect(() => {
+    void invoke('harness:models', { harness: 'pi' })
+      .then((r) => {
+        setPiModels(r?.models ?? []);
+        setPiError(r?.error);
+      })
+      .catch((e) => setPiError(e instanceof Error ? e.message : String(e)));
   }, []);
   const models = providers.filter((p) => p.enabled).flatMap((p) => p.models);
   return (
@@ -199,16 +210,19 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
       </Field>
       <h3>Agatho</h3>
       <p className="muted small">
-        The floating assistant. It sets up MCP servers, starts sessions and tidies branches by driving the app itself — every change it wants to make is
-        shown as a proposal you approve first. Drag it anywhere; click it to collapse.
+        The floating assistant. It runs on pi — the same coding agent as the Pi harness — and drives the app itself to set up MCP servers, start sessions
+        and tidy branches. pi only ever sees the app's capability list: every change Agatho wants to make is shown as a proposal you approve first. Drag it
+        anywhere; click it to collapse.
       </p>
       <Toggle checked={settings.agent?.enabled !== false} onChange={(v) => update({ agent: { ...(settings.agent ?? {}), enabled: v } })} label="Show Agatho" />
-      <Field label="Agatho's model" hint="Choosing among its capabilities is harder than naming a session, so a flash-tier model may struggle. Falls back to the utility model when unset.">
+      {!piModels.length && piError && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>{piError} Install pi under Harnesses to use Agatho.</span></div>}
+      <Field label="Agatho's model" hint="A pi model from ~/.pi/agent. Picking correctly among its capabilities is harder than naming a session, so a small model may struggle.">
         <div className="onboarding-model-picker">
           <ModelPicker
-            models={models}
+            models={piModels}
             selected={settings.agentModel}
-            clearOption={{ label: 'Use the utility model' }}
+            clearOption={{ label: "Use pi's default model" }}
+            emptyText={piError ?? 'No pi models available'}
             onSelect={(m) => update({ agentModel: m ? { provider: m.provider, model: m.id } : undefined })}
           />
         </div>
@@ -730,7 +744,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
       {bin('codex', 'codex path override')}
       <h3>Pi</h3>
       {bin('pi', 'pi path override')}
-      <Field label="Extra pi arguments" hint="Space separated, appended to every pi launch (e.g. --no-skills).">
+      <Field label="Extra pi arguments" hint="Space separated, appended to every pi session launch (e.g. --no-skills). Agatho's own pi run is hermetic and ignores these.">
         <input value={settings.pi.extraArgs.join(' ')} onChange={(e) => update({ pi: { extraArgs: e.target.value.split(/\s+/).filter(Boolean) } })} />
       </Field>
       <h3>DeepSeek Harness / npx</h3>

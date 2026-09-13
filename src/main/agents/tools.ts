@@ -2,21 +2,14 @@
  *  handler registry. Anything not on the allowlist fails here rather than reaching a handler. */
 import { AGENT_CAPABILITIES, CAPABILITIES_BY_NAME, type AgentCapability, type CapabilityContext } from '../../shared/agent-manifest';
 import type { RiskTier } from '../../shared/agent';
-import type { NativeToolDef } from '../harness/native/tools';
 import { errorMessage, truncate } from '../util/async';
 
 /** How much of a tool result the model sees; enough for a branch list, not enough to blow the context. */
 const RESULT_CHARS = 8000;
 
-export function agentToolDefs(): NativeToolDef[] {
-  return AGENT_CAPABILITIES.map((c) => ({
-    name: c.name,
-    description: c.description,
-    parameters: c.parameters,
-    // The base tier: `probe_mcp_server` only becomes mutating once a stdio transport is named.
-    mutating: c.tier({}) !== 'read',
-    isEdit: false
-  }));
+/** The manifest as plain JSON-schema definitions for pi's capability bridge extension. */
+export function piToolDefs(): { name: string; description: string; parameters: Record<string, unknown> }[] {
+  return AGENT_CAPABILITIES.map((c) => ({ name: c.name, description: c.description, parameters: c.parameters }));
 }
 
 export function capabilityFor(name: string): AgentCapability | undefined {
