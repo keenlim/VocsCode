@@ -5,7 +5,8 @@ repo-level servers have a right-panel tab reading `<repo>/.mcp.json`. The effect
 injected into Claude, both Codex adapters, ACP agents and pi (through the bundled
 `vocs-code-mcp` extension); Cursor gets import/export. "Test connection" runs the app's own
 MCP client. GitNexus ships as a built-in server, on by default in every repo and scoped
-strictly to that repo's index (§13). §10 lists what P1 and P2 still hold — the native loop's
+strictly to that repo's index, served by one shared process behind a per-session scope proxy
+(§13). §10 lists what P1 and P2 still hold — the native loop's
 client mode, live status, write-back to harness stores.
 
 ## 1. The idea
@@ -446,33 +447,32 @@ Not in P0, by design: the native loop still runs without MCP tools (its capabili
 `mcpServerStatus()` is not read yet, so the panel's "In this session" section says
 "configured, not probed"; the Codex app-server still hard-declines elicitation requests.
 
-## 13. Built-in GitNexus, strictly repo-scoped
+## 13. Built-in GitNexus, one shared server
 
 **Status: shipped.** GitNexus is an app-shipped server, so every repo has it without anyone
-adding it, and each session is confined to its own repo's index. Two serving modes are chosen
-globally on the MCP page (`AppSettings.gitnexus.mode`); the default is **per-repo**.
+adding it, and each session is confined to its own repo's index. There is one topology: a single
+`gitnexus serve` process for the whole app, which every session reaches through a per-session
+**scope proxy**.
 
 GitNexus keeps all indexes in one global registry (`~/.gitnexus/registry.json`) and its `mcp`
-command serves every entry, with no scoping flag. Isolation is therefore the app's job, and the
-two modes achieve it differently.
+command serves every entry, with no scoping flag. Isolation is therefore the app's job.
 
-**Per-repo mode (default).** `src/main/mcp/gitnexus.ts` writes a per-project `GITNEXUS_HOME`
-under `userData/gitnexus-homes/<hash(projectRoot)>` whose `registry.json` contains only the
-session repo (matched against `projectRoot` and `cwd`) plus any repo the user has promoted. Each
-session spawns its own `gitnexus mcp`, so a session in repo Y can never query repo X's graph.
-The repo's MCP tab shows an on/off switch (`disabledBuiltin`).
-
-**Shared mode.** `src/main/mcp/shared-server.ts` starts one `gitnexus serve` process for the app
+**The server.** `src/main/mcp/shared-server.ts` starts one `gitnexus serve` process for the app
 (MCP over Streamable HTTP at `POST /api/mcp`, from the global registry), lazily on the first
-shared-mode session and stopped on quit. Sessions do not talk to it directly: the app injects a
-stdio **scope proxy** (`resources/mcp/gitnexus-scope.mjs`), which forwards to the shared server
-while enforcing the session's allow-list — it pins the `repo` argument to the session repo,
-rejects calls that name a repo outside the allow-list, hides the cross-repo `group_*` tools,
-filters `list_repos`, and filters resources. `gitnexusGlobal` extends that allow-list. This is
-the only mode where isolation is policy rather than construction, so the proxy is the security
+session that needs it and stopped on quit. It prefers the installed `gitnexus` binary (resolved
+with `which`) over `npx -y gitnexus@latest`; when it will not start, sessions get no GitNexus
+server at all rather than a broken one.
+
+**The scope proxy.** Sessions never talk to the server directly: the app injects a stdio proxy
+(`resources/mcp/gitnexus-scope.mjs`) carrying the shared endpoint (`VOCS_GITNEXUS_URL`) and the
+session's allow-list (`VOCS_GITNEXUS_ALLOW`) — the session repo, matched against `projectRoot`
+and `cwd`, plus any repo the user promoted. The proxy forwards to the shared server while
+enforcing that list: it pins the `repo` argument to the session repo, rejects calls that name a
+repo outside the allow-list, hides the cross-repo `group_*` tools, filters `list_repos`, and
+filters resources. Isolation is policy rather than construction, so the proxy is the security
 boundary and must cover every cross-repo surface GitNexus exposes.
 
-**Global scope** (either mode) is a per-repo switch, not a move to the global list:
+**Global scope** is a per-repo switch, not a move to the global list:
 `mcpProjectState[root].gitnexusGlobal` adds repo X's registry entry to every other repo's
 allow-list. It is the one place a repo's index leaves its own boundary, and the toggle sits next
 to the built-in row on the repo's MCP tab.
@@ -481,11 +481,15 @@ Rules:
 
 - The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
   `gitnexus` server is shadowed, not injected twice).
-- It injects into every harness whose `mcp` support is `inject` or `client`. In per-repo mode it
-  is on by default per repo and switched off with `disabledBuiltin`; a shared server is on
-  everywhere, and the per-repo switch is ignored.
-- Prefer the installed `gitnexus` binary (via `which`) over `npx -y gitnexus@latest`.
+- It injects into every harness whose `mcp` support is `inject` or `client`, on by default. A
+  repo keeps itself out of the shared server with `disabledBuiltin` — the switch above the share
+  toggle on the repo's MCP tab.
 - Indexing is still the user's action: an unindexed repo is not injected at all, and the tab
   says to run `gitnexus analyze` rather than failing the session.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
   matches an index built in the worktree.
+
+The earlier per-repo mode (a private `GITNEXUS_HOME` per project holding a one-entry registry,
+and a `gitnexus mcp` process per session) is gone: `src/main/mcp/gitnexus.ts` now only reads the
+global registry and computes each session's allow-list. `AppSettings.gitnexus.mode` no longer
+exists, and a value left on disk by an older build is dropped when settings are normalized.

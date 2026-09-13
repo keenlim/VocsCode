@@ -1,8 +1,8 @@
 /**
- * Shared-mode GitNexus: one `gitnexus serve` process for the whole app, serving MCP over
- * Streamable HTTP at `/api/mcp` from the *global* registry. Sessions do not talk to it
- * directly — they get the scope proxy, which pins each call to the session's repo. Started
- * lazily on the first shared-mode session and stopped on quit. No Electron imports.
+ * One `gitnexus serve` process for the whole app, serving MCP over Streamable HTTP at
+ * `/api/mcp` from the *global* registry. Sessions do not talk to it directly — they get the
+ * scope proxy, which pins each call to the session's repo. Started lazily on the first session
+ * that needs it and stopped on quit. No Electron imports.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import net from 'node:net';

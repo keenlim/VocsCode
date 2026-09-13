@@ -52,11 +52,9 @@ export interface SessionManagerDeps {
   pushSessions: (sessions: SessionMeta[]) => void;
   notify: (sessionId: string, title: string, body: string) => void;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
-  /** Where per-project GitNexus homes are written (the app's userData dir). */
-  gitnexusHomeBase?: string;
-  /** Shared mode: the shared GitNexus MCP endpoint, started lazily. */
+  /** The shared GitNexus MCP endpoint, started lazily. */
   sharedGitnexus?: () => Promise<string | null>;
-  /** Shared mode: path to the scope proxy the harness spawns. */
+  /** Path to the scope proxy the harness spawns in place of the GitNexus binary. */
   gitnexusProxyPath?: string;
 }
 
@@ -494,7 +492,7 @@ export class SessionManager {
       mcpServers: () => {
         const m = this.get(id) ?? meta;
         return resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, gitnexusHomeBase: this.deps.gitnexusHomeBase },
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
           { getSecret: this.deps.getSecret, sharedGitnexus: this.deps.sharedGitnexus, gitnexusProxyPath: this.deps.gitnexusProxyPath, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
         );
       },

@@ -14,7 +14,7 @@ import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import { isOutsideWorkspace } from './harness/permissions';
-import { gitnexusHomeBase, globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
+import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
 import { fallbackModels, fetchProviderModels, resolveProviderApiKey, testProvider } from './models/providers';
 import { enrichModelsFromProviders } from './models/static-models';
@@ -385,7 +385,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   const mcpScope = (sessionId: string) => {
     const m = sessions.get(sessionId);
     if (!m) throw new Error('Session not found');
-    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, gitnexusHomeBase: gitnexusHomeBase(deps.desktop.userDataPath()) };
+    return { settings: settings.get(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness };
   };
   handle('mcp:stores', () => globalStoreInfo());
   handle('mcp:project', ({ sessionId }) => projectInfo(mcpScope(sessionId)));

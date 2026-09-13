@@ -204,7 +204,6 @@ export function defaultSettings(): AppSettings {
     acpAgents: BUILTIN_ACP_AGENTS.map((a) => ({ ...a })),
     mcpServers: [],
     mcpProjectState: {},
-    gitnexus: { mode: 'per-repo' },
     providers: BUILTIN_PROVIDERS.map((p) => ({ ...p, models: [] })),
     modelOverrides: {},
     sidebarWidth: 280,
@@ -347,8 +346,6 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     claude: { ...d.claude, ...(stored.claude ?? {}) },
     codex: { ...d.codex, ...(stored.codex ?? {}) },
     pi: { ...d.pi, ...(stored.pi ?? {}) },
-    // A corrupted or older value falls back to the isolated per-repo default.
-    gitnexus: { mode: stored.gitnexus?.mode === 'shared' ? 'shared' : 'per-repo' },
     goalDefaults: { ...d.goalDefaults, ...(stored.goalDefaults ?? {}) },
     terminal: { ...d.terminal, ...(stored.terminal ?? {}), customShellArgs: Array.isArray(stored.terminal?.customShellArgs) ? stored.terminal.customShellArgs.filter((a) => typeof a === 'string') : [] },
     defaultModelByHarness: { ...(stored.defaultModelByHarness ?? {}) },
@@ -371,6 +368,8 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     providers: [],
     acpAgents: []
   };
+  // The GitNexus serving-mode key is retired; drop it so the spread over `stored` cannot keep it.
+  delete (merged as AppSettings & { gitnexus?: unknown }).gitnexus;
   // Wrong-shaped arrays in settings.json must not break boot: coerce to arrays before use.
   const storedProviders = Array.isArray(stored.providers) ? stored.providers : [];
   for (const bp of BUILTIN_PROVIDERS) {

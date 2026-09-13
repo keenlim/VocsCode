@@ -29,7 +29,6 @@ const globalServer = { id: 'github', transport: 'stdio' as const, command: 'npx'
 function info(over: Partial<McpProjectInfo> = {}): McpProjectInfo {
   return {
     projectRoot: 'G:/repo',
-    mode: 'per-repo',
     file: 'G:/repo/.mcp.json',
     display: 'G:/repo/.mcp.json',
     exists: true,
@@ -147,21 +146,24 @@ describe('MCP panel tab', () => {
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
   });
 
-  it('drops the per-repo on/off in shared mode but keeps the share switch', async () => {
+  it('keeps the repo switch on the one shared server and says the server is shared', async () => {
     const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
-    invoke.mockResolvedValue(info({ mode: 'shared', builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
     await act(async () => {
       render(<McpTab session={session()} />);
     });
     const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
     expect(builtinSection?.textContent).toContain('shared server');
-    // Only the share toggle is present; the repo can no longer switch GitNexus off on its own.
+    expect(builtinSection?.textContent).toContain('Served by the one shared GitNexus server');
+    expect(builtinSection?.textContent).not.toContain('not indexed');
+    // Both switches stay reachable: the repo can still keep itself out of the shared server.
     const toggles = builtinSection?.querySelectorAll('input[type="checkbox"]') ?? [];
-    expect(toggles.length).toBe(1);
+    expect(toggles.length).toBe(2);
+    expect((toggles[0] as HTMLInputElement).checked).toBe(true);
     await act(async () => {
       fireEvent.click(toggles[0] as HTMLInputElement);
     });
-    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { gitnexusGlobal: true } });
+    expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
   });
 
   it('surfaces a broken .mcp.json instead of silently ignoring it', async () => {

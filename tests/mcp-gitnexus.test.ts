@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AppSettings, McpServerDef } from '../src/shared/types';
@@ -12,7 +12,6 @@ import {
   gitnexusSharedRoots,
   isBuiltinServerId,
   isGitnexusIndexed,
-  prepareGitnexusHome,
   readGitnexusRegistry,
   realGitnexusHome,
   visibleGitnexusEntries
@@ -71,35 +70,6 @@ describe('GitNexus visibility is strict', () => {
   });
 });
 
-describe('per-project GitNexus home', () => {
-  it('writes a filtered registry and stays stable per project', async () => {
-    const base = await mkdtemp(path.join(tmpdir(), 'gn-base-'));
-    const real = await mkdtemp(path.join(tmpdir(), 'gn-real-'));
-    dirs.push(base, real);
-    await mkdir(real, { recursive: true });
-    await writeFile(path.join(real, 'registry.json'), JSON.stringify([entry('Y', 'G:/work/y'), entry('X', 'G:/work/x'), entry('Z', 'D:/other/z')]), 'utf8');
-
-    const settings = { mcpProjectState: { 'G:/work/x': { gitnexusGlobal: true } } } as unknown as AppSettings;
-    const home = await prepareGitnexusHome({ baseDir: base, projectRoot: 'G:/work/y', cwd: 'G:/work/y', settings, realHome: real });
-    const home2 = await prepareGitnexusHome({ baseDir: base, projectRoot: 'G:/work/y', cwd: 'G:/work/y', settings, realHome: real });
-    expect(home2).toBe(home);
-
-    const written = JSON.parse(await readFile(path.join(home, 'registry.json'), 'utf8')) as { name: string }[];
-    expect(written.map((e) => e.name).sort()).toEqual(['X', 'Y']);
-
-    const isolated = await prepareGitnexusHome({ baseDir: base, projectRoot: 'G:/work/y', cwd: 'G:/work/y', settings: { mcpProjectState: {} } as unknown as AppSettings, realHome: real });
-    const isolatedWritten = JSON.parse(await readFile(path.join(isolated, 'registry.json'), 'utf8')) as { name: string }[];
-    expect(isolatedWritten.map((e) => e.name)).toEqual(['Y']);
-  });
-
-  it('creates the home with an empty registry when nothing is indexed', async () => {
-    const base = await mkdtemp(path.join(tmpdir(), 'gn-base-'));
-    dirs.push(base);
-    const home = await prepareGitnexusHome({ baseDir: base, projectRoot: 'G:/work/y', cwd: 'G:/work/y', settings: { mcpProjectState: {} } as unknown as AppSettings, realHome: path.join(base, 'nope') });
-    expect(JSON.parse(await readFile(path.join(home, 'registry.json'), 'utf8'))).toEqual([]);
-  });
-});
-
 describe('built-in GitNexus in the effective set', () => {
   const def = gitnexusBaseDef();
   const none: McpServerDef[] = [];
@@ -141,20 +111,21 @@ describe('built-in GitNexus in the effective set', () => {
   });
 });
 
-describe('GitNexus serving mode', () => {
+describe('GitNexus serving (one shared server)', () => {
   const saved = process.env.GITNEXUS_HOME;
   afterEach(() => {
     if (saved === undefined) delete process.env.GITNEXUS_HOME;
     else process.env.GITNEXUS_HOME = saved;
   });
 
-  it('defaults to per-repo and keeps only an explicit shared mode', () => {
-    expect(normalizeSettings(undefined).gitnexus).toEqual({ mode: 'per-repo' });
-    expect(normalizeSettings({ gitnexus: { mode: 'shared' } } as never).gitnexus).toEqual({ mode: 'shared' });
-    expect(normalizeSettings({ gitnexus: { mode: 'bogus' } } as never).gitnexus).toEqual({ mode: 'per-repo' });
+  it('drops the retired serving-mode setting, even one left on disk', () => {
+    const setting = (s: unknown) => (normalizeSettings(s as never) as unknown as { gitnexus?: unknown }).gitnexus;
+    expect(setting(undefined)).toBeUndefined();
+    expect(setting({ gitnexus: { mode: 'per-repo' } })).toBeUndefined();
+    expect(setting({ gitnexus: { mode: 'shared' } })).toBeUndefined();
   });
 
-  it('injects a private-home process in per-repo mode and the scope proxy in shared mode', async () => {
+  it('injects the scope proxy for an indexed repo, never a per-repo process', async () => {
     const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
     const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
     const base = await mkdtemp(path.join(tmpdir(), 'gn-base-'));
@@ -162,53 +133,113 @@ describe('GitNexus serving mode', () => {
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
 
-    const settings = { mcpProjectState: {}, gitnexus: { mode: 'per-repo' } } as unknown as AppSettings;
-    const scope = { settings, cwd: project, projectRoot: project, harness: 'claude' as const, gitnexusHomeBase: base };
-    const perRepo = await resolveForSession(scope, { getSecret: async () => undefined });
-    expect(perRepo.map((r) => r.def.id)).toEqual([GITNEXUS_SERVER_ID]);
-    expect(perRepo[0].def.env?.GITNEXUS_HOME).toBeTruthy();
-    // The command is normalized for the platform (a Windows `gitnexus.cmd` becomes `cmd /c …`).
-    expect(perRepo[0].def.args?.at(-1)).toBe('mcp');
-
-    const sharedScope = { ...scope, settings: { ...settings, gitnexus: { mode: 'shared' } } as AppSettings };
     const proxyPath = path.join(base, 'gitnexus-scope.mjs');
-    const shared = await resolveForSession(sharedScope, {
-      getSecret: async () => undefined,
-      sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
-      gitnexusProxyPath: proxyPath
-    });
-    expect(shared.map((r) => r.def.id)).toEqual([GITNEXUS_SERVER_ID]);
-    expect(shared[0].def.args).toEqual([proxyPath]);
-    expect(shared[0].def.env?.VOCS_GITNEXUS_URL).toBe('http://127.0.0.1:4799/api/mcp');
-    expect(JSON.parse(shared[0].def.env?.VOCS_GITNEXUS_ALLOW ?? '[]')).toEqual([{ name: 'proj', path: project }]);
+    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const out = await resolveForSession(
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
+      {
+        getSecret: async () => undefined,
+        sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
+        gitnexusProxyPath: proxyPath
+      }
+    );
+    expect(out.map((r) => r.def.id)).toEqual([GITNEXUS_SERVER_ID]);
+    expect(out[0].def.args).toEqual([proxyPath]);
+    expect(out[0].def.env?.VOCS_GITNEXUS_URL).toBe('http://127.0.0.1:4799/api/mcp');
+    expect(JSON.parse(out[0].def.env?.VOCS_GITNEXUS_ALLOW ?? '[]')).toEqual([{ name: 'proj', path: project }]);
   });
 
-  it('injects nothing in shared mode when the shared server is unavailable', async () => {
+  it('serves through the proxy even when an older settings file still asked for per-repo', async () => {
     const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
     const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
     const base = await mkdtemp(path.join(tmpdir(), 'gn-base-'));
     dirs.push(project, home, base);
     await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
     process.env.GITNEXUS_HOME = home;
-    const settings = { mcpProjectState: {}, gitnexus: { mode: 'shared' } } as unknown as AppSettings;
+    const proxyPath = path.join(base, 'gitnexus-scope.mjs');
+    const settings = { mcpProjectState: {}, mcpServers: [], gitnexus: { mode: 'per-repo' } } as unknown as AppSettings;
     const out = await resolveForSession(
-      { settings, cwd: project, projectRoot: project, harness: 'claude', gitnexusHomeBase: base },
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
+      {
+        getSecret: async () => undefined,
+        sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
+        gitnexusProxyPath: proxyPath
+      }
+    );
+    expect(out.map((r) => r.def.id)).toEqual([GITNEXUS_SERVER_ID]);
+    expect(out[0].def.args).toEqual([proxyPath]);
+    expect(out[0].def.env?.GITNEXUS_HOME).toBeUndefined();
+  });
+
+  it('injects nothing when the shared server is unavailable', async () => {
+    const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
+    const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
+    dirs.push(project, home);
+    await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
+    process.env.GITNEXUS_HOME = home;
+    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const out = await resolveForSession(
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
       { getSecret: async () => undefined, sharedGitnexus: async () => null, gitnexusProxyPath: '/tmp/p.mjs' }
     );
     expect(out).toEqual([]);
   });
 
-  it('ignores a stale per-repo disable switch in shared mode', async () => {
+  it('injects nothing for a repo with no index, even with the server running', async () => {
     const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
-    dirs.push(project);
+    const other = await mkdtemp(path.join(tmpdir(), 'gn-other-'));
+    const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
+    dirs.push(project, other, home);
+    await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('other', other)]), 'utf8');
+    process.env.GITNEXUS_HOME = home;
+    const settings = { mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const out = await resolveForSession(
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
+      {
+        getSecret: async () => undefined,
+        sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
+        gitnexusProxyPath: '/tmp/p.mjs'
+      }
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('keeps a repo out of the shared server when its switch is off', async () => {
+    const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
+    const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
+    dirs.push(project, home);
+    await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
+    process.env.GITNEXUS_HOME = home;
     const settings = {
       mcpProjectState: { [project]: { disabledBuiltin: [GITNEXUS_SERVER_ID] } },
-      gitnexus: { mode: 'shared' },
+      mcpServers: []
+    } as unknown as AppSettings;
+    const out = await resolveForSession(
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
+      {
+        getSecret: async () => undefined,
+        sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
+        gitnexusProxyPath: '/tmp/p.mjs'
+      }
+    );
+    expect(out).toEqual([]);
+    const info = await projectInfo({ settings, cwd: project, projectRoot: project, harness: 'claude' });
+    expect(info.builtin[0]).toMatchObject({ enabled: false, indexed: true, shared: false });
+    expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: false, reason: 'disabled' });
+  });
+
+  it('hands the switch and the share toggle to the panel', async () => {
+    const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
+    const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
+    dirs.push(project, home);
+    await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
+    process.env.GITNEXUS_HOME = home;
+    const settings = {
+      mcpProjectState: { [project]: { gitnexusGlobal: true } },
       mcpServers: []
     } as unknown as AppSettings;
     const info = await projectInfo({ settings, cwd: project, projectRoot: project, harness: 'claude' });
-    expect(info.mode).toBe('shared');
-    expect(info.builtin[0].enabled).toBe(true);
+    expect(info.builtin[0]).toMatchObject({ enabled: true, indexed: true, shared: true });
     expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: true });
   });
 });

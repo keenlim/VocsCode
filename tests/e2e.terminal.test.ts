@@ -101,28 +101,23 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
-      // The MCP tab ships GitNexus built in: on by default, scoped to this repo, not shared.
+      // The MCP tab ships GitNexus built in: served by the one shared server, on by default, and
+      // scoped to this repo until the repo shares its graph. Both switches stay reachable.
       await win.click('.panel-tab:has-text("MCP")');
       const builtin = win.locator('.mcp-section', { has: win.locator('h3', { hasText: 'Built-in' }) });
       await builtin.waitFor({ timeout: 20_000 });
       expect(await builtin.innerText()).toContain('gitnexus');
+      expect(await builtin.innerText()).toContain('shared server');
       const builtinToggles = builtin.locator('input[type="checkbox"]');
       expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
       expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally
 
-      // The MCP page chooses between one shared server and per-repo servers; the repo tab follows.
+      // The serving mode is no longer a choice: the MCP page describes the one shared server
+      // instead of offering per-repo servers.
       await win.click('.sidebar-link:has-text("MCP")');
       await win.waitForSelector('.mcp-page', { timeout: 20_000 });
-      await win.click('.mcp-page button:has-text("One shared server")');
-      await win.locator('[data-testid="session-row"]').first().click();
-      await win.click('.panel-tab:has-text("MCP")');
-      await expect
-        .poll(async () => builtin.innerText(), { timeout: 20_000 })
-        .toContain('shared server');
-      // Restore the default so the rest of the run is unaffected.
-      await win.click('.sidebar-link:has-text("MCP")');
-      await win.waitForSelector('.mcp-page', { timeout: 20_000 });
-      await win.click('.mcp-page button:has-text("Per-repo servers")');
+      expect(await win.locator('.mcp-page button:has-text("Per-repo servers")').count()).toBe(0);
+      expect(await win.locator('.mcp-page button:has-text("One shared server")').count()).toBe(0);
       await win.locator('[data-testid="session-row"]').first().click();
 
       // The project is a brand-new folder, so the Git tab guides setup. Initializing turns the
