@@ -134,9 +134,16 @@ export interface McpProjectState {
   disabledGlobal?: string[];
   /** Repo-file server ids the user has trusted here. */
   enabledRepo?: string[];
+  /** Built-in server ids switched off for this repo. */
+  disabledBuiltin?: string[];
+  /**
+   * Built-in GitNexus only: share this repo's knowledge graph with sessions in other repos.
+   * Off (the default) keeps a session strictly scoped to its own repo's index.
+   */
+  gitnexusGlobal?: boolean;
 }
 
-export type McpScope = 'global' | 'repo';
+export type McpScope = 'global' | 'repo' | 'builtin';
 
 /** How a harness takes MCP servers: nothing, injected by us, run by us, or its own store. */
 export type McpSupport = 'none' | 'inject' | 'client' | 'inherit';
@@ -164,6 +171,17 @@ export interface McpStoreInfo {
   error?: string;
 }
 
+/** State of one built-in server (GitNexus) for a repo. */
+export interface McpBuiltinInfo {
+  def: McpServerDef;
+  /** Whether it will be handed to this session's harness. */
+  enabled: boolean;
+  /** Whether this repo's index is shared with sessions in other repos. */
+  shared: boolean;
+  /** Whether this repo has an index GitNexus can see for the session. */
+  indexed: boolean;
+}
+
 /** Everything the right-panel MCP tab needs for one session. */
 export interface McpProjectInfo {
   projectRoot: string;
@@ -176,6 +194,8 @@ export interface McpProjectInfo {
   error?: string;
   global: McpServerDef[];
   state: McpProjectState;
+  /** Always-present servers the app ships with, headed by GitNexus. */
+  builtin: McpBuiltinInfo[];
   detected: McpStoreInfo[];
   effective: McpEffectiveEntry[];
   harness: HarnessId;

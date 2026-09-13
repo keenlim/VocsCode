@@ -2,10 +2,10 @@
  * Vocs Code approvals extension for pi (loaded with `pi -e <this file>`).
  *
  * pi has no built-in permission prompts, so this extension gates mutating tools
- * (bash, edit, write) according to the Vocs Code permission mode and asks the
- * host through the RPC extension-UI channel. The `select` title carries a JSON
- * payload prefixed with VCODE_APPROVAL:: which the desktop app renders as an
- * approval card.
+ * (bash, edit, write) and every MCP tool the vocs-code-mcp bridge registers
+ * (`mcp__*`) according to the Vocs Code permission mode and asks the host through
+ * the RPC extension-UI channel. The `select` title carries a JSON payload prefixed
+ * with VCODE_APPROVAL:: which the desktop app renders as an approval card.
  *
  * Modes (VOCS_CODE_PERMISSION_MODE, re-read from VOCS_CODE_MODE_FILE before each call):
  *   ask          -> confirm bash/edit/write
@@ -63,6 +63,9 @@ const MARKER = 'VCODE_APPROVAL::';
 const BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const MUTATING = new Set(['bash', 'powershell', 'edit', 'write']);
 const EDITS = new Set(['edit', 'write']);
+/** Tools the MCP bridge extension registers. A server's tool can do anything, so it always asks
+ * unless the mode is full-auto; unlike shell commands we have no way to classify it. */
+const MCP_PREFIX = 'mcp__';
 const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
 
 // Best-effort detection of obviously destructive shell commands; not exhaustive.
@@ -179,7 +182,8 @@ export default function vocsCodeApprovals(pi: PiLike): void {
   pi.on('tool_call', async (event, ctx) => {
     await refreshMode();
     const tool = event.toolName;
-    if (!MUTATING.has(tool)) return undefined;
+    const isMcp = tool.startsWith(MCP_PREFIX);
+    if (!MUTATING.has(tool) && !isMcp) return undefined;
     if (mode === 'full-auto') return undefined;
     const decline = (reason: string) => {
       if (event.toolCallId && ctx.ui?.notify) {
@@ -194,7 +198,8 @@ export default function vocsCodeApprovals(pi: PiLike): void {
     const dangerous = !!command && isDangerous(command);
     const outside = EDITS.has(tool) && await isOutsideCwd(ctx.cwd ?? process.cwd(), event.input?.path);
     if (!dangerous && !outside) {
-      if (mode === 'auto') return undefined;
+      // auto never classifies an MCP tool as safe; it always asks below full access.
+      if (mode === 'auto' && !isMcp) return undefined;
       if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
       if (sessionAllowed.has(tool)) return undefined;
     }

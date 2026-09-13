@@ -266,10 +266,15 @@ describe('mcp handlers', () => {
     });
     const raw = JSON.parse(fsSync.readFileSync(path.join(ws, '.mcp.json'), 'utf8'));
     expect(Object.keys(raw.mcpServers)).toEqual(['good']);
-    const info = (await registry.invoke('mcp:project', { sessionId: 's_test' })) as { repo: { id: string }[]; effective: { enabled: boolean; reason?: string }[] };
+    const info = (await registry.invoke('mcp:project', { sessionId: 's_test' })) as {
+      repo: { id: string }[];
+      effective: { def: { id: string }; enabled: boolean; reason?: string; scope: string }[];
+    };
     expect(info.repo.map((s) => s.id)).toEqual(['good']);
-    // Written, but inert: nothing is active until the user enables it for this repo.
-    expect(info.effective).toEqual([{ def: expect.objectContaining({ id: 'good' }), scope: 'repo', enabled: false, reason: 'not-enabled' }]);
+    // Written, but inert: nothing the repo defines is active until the user enables it for this repo.
+    expect(info.effective.find((e) => e.def.id === 'good')).toEqual({ def: expect.objectContaining({ id: 'good' }), scope: 'repo', enabled: false, reason: 'not-enabled' });
+    // GitNexus ships built in and is offered to an inject harness by default.
+    expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: true, def: expect.objectContaining({ id: 'gitnexus' }) });
   });
 
   it('keeps the per-repo trust switch in settings, keyed by project root', async () => {

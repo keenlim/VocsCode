@@ -13,6 +13,7 @@ import { setGitLog } from './git';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
+import { gitnexusHomeBase } from './mcp';
 import { RuntimeResolver } from './runtime';
 import { SearchIndex } from './search';
 import { SecretStore } from './secrets';
@@ -126,6 +127,7 @@ async function main(): Promise<void> {
     runtime,
     analytics,
     getSecret: (id) => secrets.get(id),
+    gitnexusHomeBase: gitnexusHomeBase(userData),
     pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);

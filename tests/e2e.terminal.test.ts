@@ -90,6 +90,15 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
+      // The MCP tab ships GitNexus built in: on by default, scoped to this repo, not shared.
+      await win.click('.panel-tab:has-text("MCP")');
+      const builtin = win.locator('.mcp-section', { has: win.locator('h3', { hasText: 'Built-in' }) });
+      await builtin.waitFor({ timeout: 20_000 });
+      expect(await builtin.innerText()).toContain('gitnexus');
+      const builtinToggles = builtin.locator('input[type="checkbox"]');
+      expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
+      expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally
+
       // The project is a brand-new folder, so the Git tab guides setup. Initializing turns the
       // guide into the branches view with the GitHub continuation; the first commit runs through
       // real git, proving the panel's actions reach the repository rather than only its own state.

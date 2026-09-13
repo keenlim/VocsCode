@@ -51,6 +51,8 @@ export interface SessionManagerDeps {
   pushSessions: (sessions: SessionMeta[]) => void;
   notify: (sessionId: string, title: string, body: string) => void;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /** Where per-project GitNexus homes are written (the app's userData dir). */
+  gitnexusHomeBase?: string;
 }
 
 interface ActiveSession {
@@ -487,7 +489,7 @@ export class SessionManager {
       mcpServers: () => {
         const m = this.get(id) ?? meta;
         return resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness },
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, gitnexusHomeBase: this.deps.gitnexusHomeBase },
           { getSecret: this.deps.getSecret, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
         );
       },

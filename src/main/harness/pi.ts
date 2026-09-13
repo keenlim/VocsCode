@@ -125,6 +125,7 @@ export class PiAdapter implements HarnessAdapter {
     if (!bin) throw new Error('pi is not installed. Run `npm install -g @earendil-works/pi-coding-agent` or set the path in Settings.');
     const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
     const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
+    const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
 
@@ -135,7 +136,15 @@ export class PiAdapter implements HarnessAdapter {
       log: (level, message) => this.ctx.log(level, `[pi] ${message}`)
     });
 
+    // The MCP bridge extension reads this file and registers each server's tools with pi.
+    const mcpServers = await this.ctx.mcpServers();
     const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '--session-dir', sessionDir];
+    let mcpConfigFile: string | null = null;
+    if (mcpServers.length) {
+      args.push('-e', mcpExt);
+      mcpConfigFile = path.join(sessionDir, 'mcp.json');
+      await fs.writeFile(mcpConfigFile, JSON.stringify({ servers: mcpServers.map((r) => r.def) }, null, 2) + '\n', 'utf8');
+    }
     if (meta.harnessRef.piSessionFile) args.push('--session', meta.harnessRef.piSessionFile);
     if (meta.config.model) {
       if (meta.config.model.provider) args.push('--provider', meta.config.model.provider);
@@ -153,6 +162,7 @@ export class PiAdapter implements HarnessAdapter {
     this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
     await this.writeEffortConfig(intendedEffort, meta.config.model);
     const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE: '1' };
+    if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
       if (!env[envKey]) {
         const key = await this.ctx.getApiKey(pid);
