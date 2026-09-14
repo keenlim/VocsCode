@@ -136,7 +136,8 @@ function makeCtx(overrides: Partial<SessionMeta> = {}): { ctx: HarnessContext; m
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson: async () => null,
     writeJson: async () => undefined,
-    mcpServers: async () => []
+    mcpServers: async () => [],
+    ownedMcpIds: () => []
   } as unknown as HarnessContext;
   return { ctx, meta, events, items, logs };
 }

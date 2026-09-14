@@ -108,6 +108,8 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await builtin.waitFor({ timeout: 20_000 });
       expect(await builtin.innerText()).toContain('gitnexus');
       expect(await builtin.innerText()).toContain('shared server');
+      // This harness's own MCP config is not one the app writes, so nothing is claimed from it.
+      expect(await builtin.innerText()).not.toContain('is switched off here');
       const builtinToggles = builtin.locator('input[type="checkbox"]');
       expect(await builtinToggles.nth(0).isChecked()).toBe(true); // enabled by default
       expect(await builtinToggles.nth(1).isChecked()).toBe(false); // not shared globally

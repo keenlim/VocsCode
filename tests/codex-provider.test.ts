@@ -113,7 +113,7 @@ function settingsWithOpenRouter(): AppSettings {
   return { ...base, providers: [...base.providers.filter((p) => p.id !== 'openrouter'), openRouterProvider()] };
 }
 
-function makeCtx(meta: SessionMeta, settings: AppSettings): { ctx: HarnessContext; events: SessionEvent[]; keys: string[] } {
+function makeCtx(meta: SessionMeta, settings: AppSettings, owned: string[] = []): { ctx: HarnessContext; events: SessionEvent[]; keys: string[] } {
   const events: SessionEvent[] = [];
   const keys: string[] = [];
   const ctx = {
@@ -135,7 +135,8 @@ function makeCtx(meta: SessionMeta, settings: AppSettings): { ctx: HarnessContex
     log: vi.fn(),
     readJson: async () => null,
     writeJson: async () => undefined,
-    mcpServers: async () => []
+    mcpServers: async () => [],
+    ownedMcpIds: () => owned
   } as unknown as HarnessContext;
   return { ctx, events, keys };
 }
@@ -254,6 +255,21 @@ describe('codex custom provider wiring', () => {
     expect(thread?.params.config?.model_providers).toBeUndefined();
     expect(mocks.spawnCalls[0].opts.env.OPENROUTER_API_KEY).toBeUndefined();
     expect(keys).not.toContain('openrouter');
+    await adapter.dispose();
+  });
+
+  it('switches this app\u2019s own server name off in the thread config when the session gets none', async () => {
+    const meta = makeMeta();
+    const { ctx } = makeCtx(meta, defaultSettings(), ['gitnexus']);
+    const child = makeFakeChild();
+    mocks.spawnChildren.push(child);
+    const server = scriptServer(child);
+
+    const adapter = new CodexAppServerAdapter(ctx);
+    await adapter.start();
+
+    const thread = server.requests.find((r) => r.method === 'thread/start');
+    expect(thread?.params.config?.mcp_servers).toEqual({ gitnexus: { enabled: false } });
     await adapter.dispose();
   });
 });

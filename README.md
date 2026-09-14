@@ -41,7 +41,7 @@ That installs everything (including dev dependencies, even if your environment s
 
 **Built for long days.** Live model and effort switching, cost and context tracking, a real terminal in the side panel, slash commands and `@file` mentions, and notifications when a turn needs you.
 
-**MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters, ACP agents and Pi pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo. GitNexus ships built in, scoped to each repo's code graph: one shared server serves every session, and each one sees only its own repo's graph.
+**MCP where you want it.** Add a server once — globally, or in a repo's `.mcp.json` — and Claude, both Codex adapters, ACP agents and Pi pick it up. Test a server before you rely on it; secrets stay in your keychain, never in the repo. GitNexus ships built in, scoped to each repo's code graph: one shared server serves every session, and each one sees only its own repo's graph. A same-named entry in Codex’s own config is switched off for the session, so the shared server is the only one that runs.
 
 **Private by default.** Keys in your keychain, encrypted at rest. Sessions resume after restart, whatever agent you used.
 

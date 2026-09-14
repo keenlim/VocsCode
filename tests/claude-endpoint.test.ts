@@ -49,6 +49,7 @@ function stubCtx(s: AppSettings, model: ModelRef | undefined, apiKey: string | u
     effort: () => undefined,
     getApiKey: async () => apiKey,
     mcpServers: async () => [],
+    ownedMcpIds: () => [],
     emit: (e: SessionEvent) => events.push(e),
     requestApproval: async () => ({ optionId: 'deny' }) as never,
     updateRef: () => {},

@@ -161,6 +161,11 @@ export function McpTab({ session }: { session: SessionMeta }) {
               <div className="muted small">
                 Served by the one shared GitNexus server. This session sees only this repo's graph, plus any repo you share.
               </div>
+              {b.claimed && (
+                <div className="muted small">
+                  Any same-named entry in the {harnessName} config is switched off here, so the shared server is the only GitNexus that runs.
+                </div>
+              )}
               <div className="mcp-row-head pad-t">
                 <Toggle checked={b.shared} onChange={(v) => void setGitnexusShared(v)} />
                 <span className="muted small">Share this repo's code graph with other repos</span>

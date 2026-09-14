@@ -486,6 +486,13 @@ Rules:
   toggle on the repo's MCP tab.
 - Indexing is still the user's action: an unindexed repo is not injected at all, and the tab
   says to run `gitnexus analyze` rather than failing the session.
+- Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a
+  `[mcp_servers.gitnexus]` left there would start a second, unscoped copy beside the shared one.
+  Both Codex adapters pass `ownedMcpIds()` to `toCodex`, which writes
+  `mcp_servers.gitnexus = { enabled: false }` for any owned name the session is not receiving:
+  the name is switched off, and a real entry of the same name is never replaced. Both Codex
+  harnesses belong to the set whose config the app writes, so the built-in row on the MCP tab
+  says this (`claimed`); a harness whose config the app does not write is injected and left alone.
 - A worktree session shares the main checkout's switches (`projectRoot`), but its `cwd` also
   matches an index built in the worktree.
 

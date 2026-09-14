@@ -116,7 +116,7 @@ describe('MCP panel tab', () => {
 
   it('ships GitNexus on by default and lets the repo share its graph', async () => {
     const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
-    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: false }] }));
     await act(async () => {
       render(<McpTab session={session()} />);
     });
@@ -134,7 +134,7 @@ describe('MCP panel tab', () => {
 
   it('turns the built-in off for this repo only', async () => {
     const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
-    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: false }] }));
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: false, claimed: false }] }));
     await act(async () => {
       render(<McpTab session={session()} />);
     });
@@ -148,7 +148,7 @@ describe('MCP panel tab', () => {
 
   it('keeps the repo switch on the one shared server and says the server is shared', async () => {
     const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
-    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true }] }));
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: false }] }));
     await act(async () => {
       render(<McpTab session={session()} />);
     });
@@ -164,6 +164,26 @@ describe('MCP panel tab', () => {
       fireEvent.click(toggles[0] as HTMLInputElement);
     });
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
+  });
+
+  it('says the harness config entry is switched off when this app claims the name', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ harness: 'codex', builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: true }] }));
+    await act(async () => {
+      render(<McpTab session={session('codex')} />);
+    });
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    expect(builtinSection?.textContent).toContain('Any same-named entry in the Codex (app-server) config is switched off here');
+  });
+
+  it('stays quiet about the harness config for a harness whose config this app does not write', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ harness: 'cursor', support: 'inherit', builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: false }] }));
+    await act(async () => {
+      render(<McpTab session={session('cursor')} />);
+    });
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    expect(builtinSection?.textContent).not.toContain('is switched off here');
   });
 
   it('surfaces a broken .mcp.json instead of silently ignoring it', async () => {
