@@ -11,7 +11,7 @@ export const ANALYTICS_SCHEMA_VERSION = 2;
  * Bumped whenever a classification rule changes meaning. Stored on every record, so a chart can
  * say which rules produced its numbers and the store can reclassify old records from their raw facts.
  */
-export const OUTCOME_CLASSIFIER_VERSION = 1;
+export const OUTCOME_CLASSIFIER_VERSION = 2;
 
 /**
  * Coarse outcome of one execution. `failure` is the only class counted as an unexpected failure;
@@ -65,6 +65,7 @@ export type ErrorCategory =
   | 'cancelled'
   | 'declined'
   | 'killed'
+  | 'process_terminated'
   // unknown
   | 'process_nonzero_unknown'
   | 'unknown_failure'
@@ -144,6 +145,7 @@ export const CATEGORY_CLASS: Record<ErrorCategory, OutcomeClass> = {
   cancelled: 'control',
   declined: 'control',
   killed: 'control',
+  process_terminated: 'control',
   process_nonzero_unknown: 'unknown',
   unknown_failure: 'unknown',
   legacy_unclassified: 'unknown'
@@ -186,6 +188,7 @@ export const CATEGORY_SOURCE: Record<ErrorCategory, ErrorSource> = {
   cancelled: 'user',
   declined: 'user',
   killed: 'environment',
+  process_terminated: 'unknown',
   process_nonzero_unknown: 'unknown',
   unknown_failure: 'unknown',
   legacy_unclassified: 'unknown'
@@ -228,6 +231,7 @@ export const CATEGORY_LABEL: Record<ErrorCategory, string> = {
   cancelled: 'Cancelled',
   declined: 'Declined',
   killed: 'Killed by signal',
+  process_terminated: 'Process terminated',
   process_nonzero_unknown: 'Non-zero exit, unclassified',
   unknown_failure: 'Failure, unclassified',
   legacy_unclassified: 'Legacy record, not classifiable'

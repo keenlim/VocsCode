@@ -141,6 +141,13 @@ describe('exit-semantics registry', () => {
     expect(classifyProcessOutcome({ ...base, exe: 'unknown-thing', exitCode: 3 })).toBeNull();
     expect(classifyProcessOutcome({ ...base, exe: 'unknown-thing', exitCode: 127 })).toMatchObject({ category: 'command_not_found' });
     expect(classifyProcessOutcome({ ...base, exe: 'unknown-thing', exitCode: 130 })).toMatchObject({ category: 'cancelled' });
+    // Forced termination and signals: never the program's own status, so never a result or a failure.
+    expect(classifyProcessOutcome({ ...base, exe: 'npm', exitCode: 0xffffffff })).toMatchObject({ category: 'process_terminated', confidence: 'high' });
+    expect(classifyProcessOutcome({ ...base, exe: 'npm', exitCode: -1 })).toMatchObject({ category: 'process_terminated' });
+    expect(classifyProcessOutcome({ ...base, exe: 'node', exitCode: -9 })).toMatchObject({ category: 'killed', confidence: 'high' });
+    expect(classifyProcessOutcome({ ...base, exe: 'node', exitCode: -15 })).toMatchObject({ category: 'cancelled' });
+    // A killed test runner is not a failing test run: the termination beats the operation fallback.
+    expect(classifyProcessOutcome({ ...base, exe: 'npx', exitCode: 0xffffffff, operation: 'run_tests' })).toMatchObject({ category: 'process_terminated' });
     expect(classifyProcessOutcome({ ...base, exe: 'anything', exitCode: 0 })).toBeNull();
     expect(classifyProcessOutcome({ ...base, exe: 'npx', exitCode: 1, operation: 'run_tests' })).toMatchObject({ category: 'test_failures_reported', confidence: 'medium' });
     expect(registeredExecutables()).toContain('rg');
@@ -226,6 +233,22 @@ describe('outcome classification fixtures', () => {
   it('14 · a cancellation is control flow', () => {
     expect(run(pi('npm run deploy:staging 2>&1 | tail -15', 'Command aborted')).derived).toMatchObject({ outcome: 'control', category: 'cancelled', source: 'user' });
     expect(run(claude('sleep 100', 'Exit code 130\nRequest interrupted by user')).derived.category).toBe('cancelled');
+  });
+
+  it('14b · a forced termination is control flow, not a failure or a test result', () => {
+    const killed = (command: string, exitCode: number, output = ''): ExecutionInput => ({ harness: 'pi', tool: 'bash', hint: 'execute', status: 'error', output, exitCode, input: { command }, platform: 'win32' });
+    // 0xFFFFFFFF and its signed twin -1 mean the process never returned a status of its own.
+    expect(run(killed('npm test', 0xffffffff)).derived).toMatchObject({ outcome: 'control', category: 'process_terminated', source: 'unknown' });
+    expect(run(killed('npm test', -1)).derived.category).toBe('process_terminated');
+    expect(run(killed('node server.js', -9)).derived).toMatchObject({ outcome: 'control', category: 'killed', confidence: 'high' });
+    expect(run(killed('npm run dev', -15)).derived).toMatchObject({ outcome: 'control', category: 'cancelled' });
+    // The command being a test runner must not turn a killed run into reported test failures.
+    expect(run(killed('npm test', 0xffffffff)).derived.category).not.toBe('test_failures_reported');
+    // Output that names a cause still wins: the termination is how it ended, the error is why.
+    expect(run(killed('node server.js', 0xffffffff, 'TypeError: x is not a function')).derived).toMatchObject({ outcome: 'failure', category: 'program_error' });
+    // A harness control signal is more specific than the bare termination code.
+    expect(run(killed('npm test', 0xffffffff, 'command timed out after 30s')).derived.category).toBe('timeout');
+    expect(run(killed('npm run dev', 0xffffffff, 'Command aborted')).derived.category).toBe('cancelled');
   });
 
   it('15 · a declined tool call is control flow attributed to the user', () => {
