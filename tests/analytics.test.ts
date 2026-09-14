@@ -849,3 +849,111 @@ describe('subagent accounting', () => {
     expect(s.harnessTools.find((t) => t.name === 'subagent')?.calls).toBe(37);
   });
 });
+
+describe('codex cached-input migration', () => {
+  // 2026-09-13 UTC noon, matching the day bucket the v1 fixture below was written for.
+  const T = Date.UTC(2026, 8, 13, 12);
+  /** A version-1 store with one day of usage: codex ran deepseek-flash (inflated input) beside a clean pi session. */
+  function v1Store(dir: string, models: Record<string, { inputTokens: number; cacheReadTokens: number }>): void {
+    const day = { outputTokens: 10, reasoningTokens: 0, costUsd: 0, turns: 2, toolCalls: 0, speedTokens: 0, speedMs: 0 };
+    const slice = (u: { inputTokens: number; cacheReadTokens: number }, sessions: string[]): Record<string, unknown> => ({
+      ...u, outputTokens: 10, reasoningTokens: 0, costUsd: 0, turns: 2, toolCalls: 0, speedTokens: 0, speedMs: 0, label: '', sessions
+    });
+    const ids = Object.keys(models).map((_, i) => `s${i + 1}`);
+    const codexIn = Object.values(models).reduce((a, u) => a + u.inputTokens, 0);
+    const codexCr = Object.values(models).reduce((a, u) => a + u.cacheReadTokens, 0);
+    const file = {
+      version: 1,
+      days: {
+        '2026-09-13': {
+          ...day,
+          inputTokens: codexIn + 50,
+          cacheReadTokens: codexCr + 50,
+          by: {
+            harness: {
+              codex: { ...slice({ inputTokens: codexIn, cacheReadTokens: codexCr }, ids) },
+              pi: { ...slice({ inputTokens: 50, cacheReadTokens: 50 }, ['piS']) }
+            },
+            model: Object.fromEntries([...Object.entries(models).map(([key, u], i) => [key, slice(u, [ids[i]])]), ['deepseek-other/x', slice({ inputTokens: 50, cacheReadTokens: 50 }, ['piS'])]]),
+            project: { '/repo': { ...slice({ inputTokens: codexIn + 50, cacheReadTokens: codexCr + 50 }, [...ids, 'piS']) } }
+          }
+        }
+      },
+      recorded: { s1: { inputTokens: models[Object.keys(models)[0]]!.inputTokens, cacheReadTokens: models[Object.keys(models)[0]]!.cacheReadTokens } },
+      sessions: {
+        s1: { id: 's1', title: 'codex 1', harness: 'codex', provider: 'deepseek', model: 'deepseek-flash', projectRoot: '/repo', createdAt: T, updatedAt: T, usage: { inputTokens: models[Object.keys(models)[0]]!.inputTokens, outputTokens: 10, cacheReadTokens: models[Object.keys(models)[0]]!.cacheReadTokens }, toolCalls: 0 },
+        piS: { id: 'piS', title: 'pi', harness: 'pi', provider: 'deepseek', model: 'other', projectRoot: '/repo', createdAt: T, updatedAt: T, usage: { inputTokens: 50, outputTokens: 10, cacheReadTokens: 50 }, toolCalls: 0 }
+      },
+      tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {}
+    };
+    fsSync.writeFileSync(path.join(dir, 'analytics.json'), JSON.stringify(file));
+  }
+
+  it('removes the cached subset exactly when codex ran a single model, and leaves other harnesses alone', async () => {
+    const dir = tmpDir();
+    v1Store(dir, { 'deepseek/deepseek-flash': { inputTokens: 150, cacheReadTokens: 140 } });
+    const pi = meta('piS', 'pi', usage({ inputTokens: 50, cacheReadTokens: 50 }));
+    const codex = meta('s1', 'codex', usage({ inputTokens: 150, cacheReadTokens: 140 }), { activeModel: { provider: 'deepseek', model: 'deepseek-flash' } });
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([codex, pi]);
+    const summary = store.summary(0, T);
+    // codex carried 140 cached tokens inside both its input and cache reads; the true prompt is 60 + 190.
+    expect(summary.days[0].usage.inputTokens).toBe(60);
+    expect(summary.days[0].usage.cacheReadTokens).toBe(190);
+    const by = summary.days[0].usage.by!;
+    expect(by.harness.codex!.inputTokens).toBe(10);
+    expect(by.harness.codex!.cacheReadTokens).toBe(140);
+    expect(by.harness.pi!.inputTokens).toBe(50);
+    expect(by.harness.pi!.cacheReadTokens).toBe(50);
+    expect(by.model['deepseek/deepseek-flash']!.inputTokens).toBe(10);
+    expect(by.model['deepseek/deepseek-flash']!.cacheReadTokens).toBe(140);
+    expect(by.model['deepseek-other/x']!.inputTokens).toBe(50);
+    expect(by.project['/repo']!.inputTokens).toBe(60);
+    expect(summary.sessions.find((s) => s.id === 's1')!.usage.inputTokens).toBe(10);
+    expect(codex.usage.inputTokens).toBe(10);
+    expect(pi.usage.inputTokens).toBe(50);
+
+    await store.flush();
+    const stored = JSON.parse(fsSync.readFileSync(path.join(dir, 'analytics.json'), 'utf8')) as { version: number };
+    expect(stored.version).toBe(2);
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([codex, pi]);
+    expect(fresh.summary(0, T).days[0].usage.inputTokens).toBe(60);
+    expect(fresh.summary(0, T).days[0].usage.cacheReadTokens).toBe(190);
+  });
+
+  it('spreads the removal across several codex models by their cache reads, summing to the whole', async () => {
+    const dir = tmpDir();
+    v1Store(dir, {
+      'deepseek/deepseek-flash': { inputTokens: 100, cacheReadTokens: 90 },
+      'openai/gpt-x': { inputTokens: 50, cacheReadTokens: 50 }
+    });
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([
+      meta('s1', 'codex', usage({ inputTokens: 100, cacheReadTokens: 90 }), { activeModel: { provider: 'deepseek', model: 'deepseek-flash' } }),
+      meta('s2', 'codex', usage({ inputTokens: 50, cacheReadTokens: 50 }), { activeModel: { provider: 'openai', model: 'gpt-x' } })
+    ]);
+    const by = store.summary(0, T).days[0].usage.by!;
+    // codex slice: 150 in / 140 cached -> 10 uncached; the 140 removed split 90:50.
+    expect(by.harness.codex!.inputTokens).toBe(10);
+    expect(by.model['deepseek/deepseek-flash']!.inputTokens).toBe(100 - 90);
+    expect(by.model['openai/gpt-x']!.inputTokens).toBe(50 - 50);
+    const modelIn = Object.values(by.model).reduce((a, s) => a + s.inputTokens, 0);
+    expect(modelIn).toBe(by.harness.pi!.inputTokens + by.harness.codex!.inputTokens);
+  });
+
+  it('repairs the delta baseline of a session that continues after the upgrade', async () => {
+    const dir = tmpDir();
+    v1Store(dir, { 'deepseek/deepseek-flash': { inputTokens: 150, cacheReadTokens: 140 } });
+    const codex = meta('s1', 'codex', usage({ inputTokens: 150, cacheReadTokens: 140 }), { activeModel: { provider: 'deepseek', model: 'deepseek-flash' } });
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([codex]);
+    // The fixed adapter now reports cumulative totals without the cached subset: the delta against
+    // the repaired baseline (150-140=10) must count only the new uncached tokens.
+    store.recordUsage(codex, usage({ inputTokens: 20, cacheReadTokens: 200 }), T);
+    await store.flush();
+    const day = store.summary(0, T).days[0].usage;
+    expect(day.inputTokens).toBe(60 + 10);
+    expect(day.cacheReadTokens).toBe(190 + 60);
+  });
+});
