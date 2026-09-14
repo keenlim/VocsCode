@@ -12,6 +12,7 @@ import { invoke, on } from '../api';
 import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
+import { SubagentAgents } from './SubagentAgents';
 
 const LIVE_REFRESH_MS = 400;
 /** Bursts of activity (a tool call starting and ending) collapse into one refetch. */
@@ -52,6 +53,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
   const [detail, setDetail] = useState<SubagentRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [steerText, setSteerText] = useState('');
+  const [view, setView] = useState<'runs' | 'agents'>('runs');
   const reveal = useStore((s) => s.subagentReveal);
   const consumeReveal = useStore((s) => s.consumeSubagentReveal);
   const isPi = session.config.harness === 'pi';
@@ -142,6 +144,18 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="subagents">
+      <div className="subagent-views">
+        <button type="button" className={`panel-tab ${view === 'runs' ? 'active' : ''}`} onClick={() => setView('runs')} data-testid="subagent-view-runs">
+          Runs
+        </button>
+        <button type="button" className={`panel-tab ${view === 'agents' ? 'active' : ''}`} onClick={() => setView('agents')} data-testid="subagent-view-agents">
+          Agents
+        </button>
+      </div>
+      {view === 'agents' ? (
+        <SubagentAgents session={session} />
+      ) : (
+        <>
       {error && <div className="callout warn small">{error}</div>}
       {runs.length === 0 ? (
         <div className="panel-empty">
@@ -224,6 +238,8 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
             </div>
           )}
         </div>
+      )}
+        </>
       )}
     </div>
   );

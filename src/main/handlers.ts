@@ -9,6 +9,7 @@ import path from 'node:path';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { Vesta } from './agents';
+import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
@@ -493,6 +494,40 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));
   handle('subagents:stop', ({ id, runId }) => sessions.subagentCommand(id, runId, 'stop'));
   handle('subagents:steer', ({ id, runId, message }) => sessions.subagentCommand(id, runId, 'steer', message));
+  // Project subagent definitions. The project root is the session's (its main checkout), and the
+  // templates come from the bundled pi resources, so both live with everything else pi loads.
+  const projectRootOf = (id: string): string | null => sessions.get(id)?.config.projectRoot ?? null;
+  const templateDir = (): string | undefined => {
+    try {
+      return path.join(runtime.resource('pi', 'agents'));
+    } catch {
+      return undefined;
+    }
+  };
+  handle('agents:list', async ({ id }) => {
+    const root = projectRootOf(id);
+    if (!root) return { agents: [], templates: [], git: false, ignored: false };
+    return listProjectAgents(root, templateDir());
+  });
+  handle('agents:get', async ({ id, name }) => {
+    const root = projectRootOf(id);
+    return root ? readProjectAgent(root, name) : null;
+  });
+  handle('agents:save', async ({ id, fields, prompt }) => {
+    const root = projectRootOf(id);
+    if (!root) return { ok: false, error: 'Session not found' };
+    return saveProjectAgent(root, fields, prompt);
+  });
+  handle('agents:delete', async ({ id, name }) => {
+    const root = projectRootOf(id);
+    if (!root) return { ok: false, error: 'Session not found' };
+    return deleteProjectAgent(root, name);
+  });
+  handle('agents:track', async ({ id, name, tracked }) => {
+    const root = projectRootOf(id);
+    if (!root) return { ok: false, error: 'Session not found' };
+    return setProjectAgentTracked(root, name, tracked);
+  });
   handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {
     // Shells hold their cwd open; take them down before the worktree is removed.
