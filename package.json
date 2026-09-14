@@ -40,7 +40,7 @@
     "test:smoke": "vitest run tests/smoke.live.test.ts",
     "typecheck:relay": "tsc --noEmit -p relay/tsconfig.json",
     "typecheck:page": "tsc --noEmit -p relay/tsconfig.page.json",
-    "relay:page": "esbuild relay/src/page.ts --bundle --format=iife --outfile=relay/public/app.js"
+    "relay:page": "esbuild relay/src/page.ts --bundle --format=iife --outfile=relay/public/app/app.js"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

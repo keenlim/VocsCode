@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { RelayClient } from '../relay/src/web-client';
+import { RelayClient, relayBaseFor } from '../relay/src/web-client';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { RemoteHost } from '../src/main/remote/host';
 import { RemoteAudit } from '../src/main/remote/audit';
@@ -14,6 +14,19 @@ import { importAesKey, sealBlob } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The web app is served by the relay that routes it, so its base is its own origin; the
+ *  landing page owns the hostname and forwards `/app`, `/v1` and `/ws` to the relay Worker. */
+describe('relay base resolution', () => {
+  it('defaults to the page origin and honours a trimmed override', () => {
+    expect(relayBaseFor('https://code.vocs.io')).toBe('https://code.vocs.io');
+    expect(relayBaseFor('https://code.vocs.io/')).toBe('https://code.vocs.io');
+    expect(relayBaseFor('https://code.vocs.io', 'https://relay.example/')).toBe('https://relay.example');
+    // An empty override (the `?relay=` param left blank) must not win over the origin.
+    expect(relayBaseFor('http://localhost:8787', '')).toBe('http://localhost:8787');
+    expect(relayBaseFor('http://localhost:8787', '   ')).toBe('http://localhost:8787');
+  });
+});
 
 describe('relay web client (browser-side protocol)', () => {
   let relay: FakeRelay;
@@ -46,8 +59,7 @@ describe('relay web client (browser-side protocol)', () => {
     };
   }
 
-  it('pairs via the browser flow, handshakes and serves read-only invokes', async () => {
-    // Desktop side (as in remote-e2e.test.ts).
+  it('pairs via the browser flow, handshakes and serves read-only invokes', async () => {    // Desktop side (as in remote-e2e.test.ts).
     const calls: string[] = [];
     const registry = {
       channels: () => ['sessions:list', 'sessions:send', 'sessions:create', 'settings:update'],
