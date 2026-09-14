@@ -25,6 +25,7 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 | `vocs-memory` stdio MCP server (5 tools) | `resources/mcp/vocs-memory.mjs` |
 | Built-in server registration + per-repo switches | `src/main/mcp/memory.ts`, `src/main/mcp/index.ts` |
 | Knowledge panel | `src/renderer/src/components/KnowledgeTab.tsx` |
+| Live anchor resolution | `src/main/knowledge/anchors.ts` — each page anchor is checked against GitNexus when the detail view opens |
 | Session history recall (L3) | `session_history_search` in `resources/mcp/vocs-memory.mjs`, scoped to the project and redacted |
 | Session priming | `SessionManager.create` → `appendSystemPrompt` |
 | Git boundaries → episodes → distillation | `src/main/handlers.ts` (`git:commit`, `git:pr`, `git:merge`) |
@@ -152,8 +153,14 @@ Rules that keep it honest:
   proposed page > episodic observation (L3) > model inference. Layer 2 never silently overrides
   AGENTS.md; when the two disagree, the wiki proposes an edit to the rules, and a human decides.
 - **Staleness is cheap and visible.** A page whose `file` source changed after `updated_at`, or
-  whose source or anchor file disappeared, is flagged in the panel and in `knowledge_status`.
-  Supersession is a reviewed transition (`supersedes` on the new proposal), not a heuristic.
+  whose source or anchor file disappeared, is flagged in the panel. Supersession is a reviewed
+  transition (`supersedes` on the new proposal), not a heuristic.
+- **Anchors are checked live, never stored.** The detail view asks GitNexus about every symbol the
+  page names and shows `resolved` (with the current line range and a "Now in …" note when the symbol
+  moved files), `unresolved`, or `not checked` when GitNexus is off or the repo is unindexed. A
+  file-only anchor is answered from disk. Results are cached for five minutes; the page itself still
+  holds nothing but the pointer. Agents resolve anchors the same way they resolve anything else — by
+  calling GitNexus themselves.
 
 ## Promotion policy (recorded)
 

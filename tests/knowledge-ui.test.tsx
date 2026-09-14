@@ -181,6 +181,54 @@ describe('Project knowledge panel', () => {
     expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'gotchas/pty', action: 'accept' });
   });
 
+  it('shows what GitNexus says about each anchor', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:read')
+        return {
+          page: {
+            meta: {
+              id: 'conventions/harness-lifecycle',
+              title: 'Harness lifecycle',
+              kind: 'convention',
+              status: 'current',
+              scope: 'repo',
+              keywords: [],
+              sources: [],
+              anchors: [
+                { file: 'src/main/session-manager.ts', symbol: 'buildContext' },
+                { file: 'src/main/gone.ts', symbol: 'gone' }
+              ],
+              related: [],
+              supersedes: [],
+              contradicts: []
+            },
+            body: 'Body.',
+            path: 'conventions/harness-lifecycle.md'
+          },
+          related: [],
+          anchors: [
+            { file: 'src/main/session-manager.ts', symbol: 'buildContext', status: 'resolved', lines: { start: 520, end: 562 } },
+            { file: 'src/main/gone.ts', symbol: 'gone', status: 'unresolved', note: "Symbol 'gone' not found" }
+          ],
+          stale: false,
+          staleReasons: []
+        };
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-conventions/harness-lifecycle'));
+    });
+    const anchors = screen.getByText('GitNexus anchors').parentElement!;
+    expect(anchors.textContent).toContain('resolved');
+    expect(anchors.textContent).toContain('lines 520-562');
+    expect(anchors.textContent).toContain('unresolved');
+    expect(anchors.textContent).toContain("Symbol 'gone' not found");
+  });
+
   it('offers generation when the project has no wiki yet', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
