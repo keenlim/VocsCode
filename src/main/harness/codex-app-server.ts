@@ -313,8 +313,10 @@ export class CodexAppServerAdapter implements HarnessAdapter {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
       const current = this.usage.snapshot();
+      // Codex counts cached input inside its input tokens (OpenAI convention); store the uncached
+      // remainder so cache reads are not counted twice in rates and cost estimates.
       const cumulative = {
-        inputTokens: t.inputTokens,
+        inputTokens: Math.max(0, t.inputTokens - t.cachedInputTokens),
         outputTokens: t.outputTokens,
         cacheReadTokens: t.cachedInputTokens,
         cacheWriteTokens: t.cacheWriteInputTokens,

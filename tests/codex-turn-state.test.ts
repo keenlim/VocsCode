@@ -5,6 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { CodexAppServerAdapter } from '../src/main/harness/codex-app-server';
+import { emptyUsage } from '../src/main/models/static-models';
 import type { HarnessContext } from '../src/main/harness/types';
 import type { SessionEvent } from '../src/shared/types';
 
@@ -18,7 +19,7 @@ function fixture() {
   const events: SessionEvent[] = [];
   const ctx = {
     emit: (e: SessionEvent) => events.push(e),
-    session: () => ({ cwd: process.cwd(), usage: {} }),
+    session: () => ({ cwd: process.cwd(), usage: emptyUsage() }),
     permissionMode: () => 'auto',
     updateMeta: vi.fn(),
     updateRef: vi.fn(),
@@ -44,7 +45,7 @@ function fixture() {
   const statuses = () => events.filter((e): e is Extract<SessionEvent, { type: 'status' }> => e.type === 'status').map((e) => e.status);
   const complete = (status: 'completed' | 'failed' = 'completed') =>
     notifications.get('turn/completed')!({ turn: { id: 'turn-1', status, error: null, durationMs: 12 } });
-  return { adapter, events, pending, statuses, complete };
+  return { adapter, events, pending, statuses, complete, notifications };
 }
 
 describe('codex turn/start lifecycle', () => {
@@ -100,5 +101,21 @@ describe('codex turn/start lifecycle', () => {
     await expect(sending).rejects.toThrow('transport closed');
     expect(adapter.busy).toBe(false);
     expect(statuses().filter((s) => s === 'idle')).toHaveLength(1);
+  });
+});
+
+describe('codex token usage accounting', () => {
+  it('stores input tokens excluding the cached subset codex counts inside them', () => {
+    const { events, notifications } = fixture();
+    notifications.get('thread/tokenUsage/updated')!({
+      tokenUsage: {
+        total: { inputTokens: 1_000_000, cachedInputTokens: 900_000, cacheWriteInputTokens: 0, outputTokens: 5_000, reasoningOutputTokens: 1_000, totalTokens: 905_000 },
+        last: { totalTokens: 905_000 },
+        modelContextWindow: 272_000
+      }
+    });
+    const usage = [...events].reverse().find((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    // Cached tokens are a subset of the input count: 100k uncached + 900k cache reads, not 1.9M prompt tokens.
+    expect(usage?.totals).toMatchObject({ inputTokens: 100_000, outputTokens: 5_000, cacheReadTokens: 900_000, cacheWriteTokens: 0, reasoningTokens: 1_000 });
   });
 });

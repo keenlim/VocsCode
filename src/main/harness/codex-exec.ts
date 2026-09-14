@@ -158,7 +158,9 @@ export class CodexExecAdapter implements HarnessAdapter {
         return;
       case 'turn.completed': {
         const u = ev.usage;
-        this.usage.addUsage({ inputTokens: u.input_tokens, outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens });
+        // input_tokens includes cached_input_tokens (OpenAI convention); count the uncached
+        // remainder as input so cache reads are not counted twice in rates and cost estimates.
+        this.usage.addUsage({ inputTokens: Math.max(0, u.input_tokens - u.cached_input_tokens), outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens });
         const completed = this.usage.finishTurn();
         this.ctx.emit({ type: 'usage', totals: completed.totals });
         this.ctx.emit({
