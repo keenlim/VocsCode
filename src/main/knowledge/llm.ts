@@ -10,6 +10,7 @@ import { selectBackgroundModel } from '../agents/model';
 import { resolveProviderApiKey } from '../models/providers';
 import { isAnthropicProvider } from '../harness/native/drivers';
 import { errorMessage } from '../util/async';
+import { parseLeadingJson } from '../util/json';
 
 export interface KnowledgeCompletionRequest {
   system: string;
@@ -143,15 +144,7 @@ async function attemptOnce(opts: {
 export function parseJsonReply<T = unknown>(text: string | null): T | null {
   if (!text) return null;
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const source = fence ? fence[1] : text;
-  const start = source.indexOf('{');
-  const end = source.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try {
-    return JSON.parse(source.slice(start, end + 1)) as T;
-  } catch {
-    return null;
-  }
+  return parseLeadingJson<T>(fence ? fence[1] : text);
 }
 
 /**

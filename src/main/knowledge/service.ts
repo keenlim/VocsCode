@@ -37,6 +37,7 @@ import {
 import { errorMessage } from '../util/async';
 import { KnowledgeStore, proposalMeta, writeFileAtomic, type StoredPage } from './store';
 import { bootstrapKnowledge, distillKnowledge, type KnowledgeJobResult, type KnowledgeSynthDeps } from './synth';
+import type { AnchorResolver } from './anchors';
 
 export type { KnowledgeScope, KnowledgeSettings } from '../../shared/knowledge';
 
@@ -48,6 +49,8 @@ export interface KnowledgeServiceDeps {
   store?: KnowledgeStore;
   /** Injected by tests; production wires the provider clients in llm.ts. */
   synth?: Omit<KnowledgeSynthDeps, 'store' | 'log' | 'transcript' | 'settings'>;
+  /** Resolves page anchors through GitNexus; absent leaves them unresolved (the panel says so). */
+  anchors?: AnchorResolver;
 }
 
 export interface KnowledgeProposeResult {
@@ -150,7 +153,8 @@ export class KnowledgeService {
     }
     const related = all.filter((p) => relatedIds.has(p.meta.id) && p.meta.id !== id).map((p) => this.summarize(p));
     const { stale, reasons } = await this.store.staleness(scope, page);
-    return { page: toPage(page), related, stale, staleReasons: reasons };
+    const anchors = this.deps.anchors ? await this.deps.anchors.resolve(scope, page.meta.anchors) : page.meta.anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'Anchor resolution is unavailable.' }));
+    return { page: toPage(page), related, anchors, stale, staleReasons: reasons };
   }
 
   /**

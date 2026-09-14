@@ -14,6 +14,8 @@ import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
 import { KnowledgeService } from './knowledge/service';
 import { createKnowledgeCompleter } from './knowledge/llm';
+import { createGitnexusAnchorResolver } from './knowledge/anchors';
+import { gitnexusSharedRoots, readGitnexusRegistry, realGitnexusHome, visibleGitnexusEntries } from './mcp/gitnexus';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
 import { SharedGitnexusServer } from './mcp/shared-server';
@@ -173,7 +175,17 @@ async function main(): Promise<void> {
     },
     synth: {
       completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
-    }
+    },
+    anchors: createGitnexusAnchorResolver({
+      // A cold shared server is started lazily; the panel must not wait on it forever.
+      url: () => Promise.race([sharedGitnexus.ensure(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000))]),
+      repoName: async (scope) => {
+        const registry = await readGitnexusRegistry(realGitnexusHome());
+        const entry = visibleGitnexusEntries(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd, sharedRoots: gitnexusSharedRoots(settings.get()) })[0];
+        return entry?.name ?? null;
+      },
+      log
+    })
   });
 
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).

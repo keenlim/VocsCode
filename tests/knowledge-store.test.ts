@@ -258,6 +258,26 @@ describe('knowledge search and digest', () => {
     expect(await svc.store.rejectedClaims(scope)).toContain('A throwaway claim.');
   });
 
+  it('resolves page anchors for the detail view, and says so when it cannot', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const anchors = [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }];
+    await store.write(scope, pageMeta({ anchors }), 'body');
+    const withResolver = new KnowledgeService({
+      log: () => undefined,
+      settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings,
+      store,
+      anchors: { resolve: async (_scope, list) => list.map((a) => ({ ...a, status: 'resolved' as const, uid: 'Method:src/main/session-manager.ts:SessionManager.buildContext#2' })) }
+    });
+    const resolved = await withResolver.detail(scope, 'conventions/harness-lifecycle');
+    expect(resolved?.anchors[0]).toMatchObject({ status: 'resolved', uid: 'Method:src/main/session-manager.ts:SessionManager.buildContext#2' });
+
+    // No resolver wired (a run without GitNexus) must still render a page with anchors.
+    const bare = await service().detail(scope, 'conventions/harness-lifecycle');
+    expect(bare?.anchors[0]).toMatchObject({ status: 'unavailable', note: 'Anchor resolution is unavailable.' });
+  });
+
   it('accepts every pending item at once and leaves history alone', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };

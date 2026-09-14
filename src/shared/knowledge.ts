@@ -67,6 +67,18 @@ export interface KnowledgeAnchor {
   symbol?: string;
 }
 
+/** What GitNexus says about one anchor *now*; never stored in the page. */
+export interface KnowledgeAnchorResolution extends KnowledgeAnchor {
+  status: 'resolved' | 'unresolved' | 'unavailable';
+  note?: string;
+  /** Where the symbol lives now, when it was found (it may have moved out of the page's file). */
+  foundFile?: string;
+  foundName?: string;
+  /** GitNexus's own identifier, for a jump into the graph. */
+  uid?: string;
+  lines?: { start: number; end: number };
+}
+
 export interface KnowledgeReview {
   state: 'unreviewed' | 'reviewed' | 'rejected';
   by?: string;
@@ -113,6 +125,8 @@ export interface KnowledgePageDetail {
   page: KnowledgePage;
   /** Pages that name this one in `related` or wikilinks, in either direction. */
   related: KnowledgePageSummary[];
+  /** Each anchor with GitNexus's current answer, in the order the page lists them. */
+  anchors: KnowledgeAnchorResolution[];
   /** True when a file source no longer exists or changed since the page was written. */
   stale: boolean;
   staleReasons: string[];
