@@ -448,6 +448,8 @@ export class PiAdapter implements HarnessAdapter {
           item.changes = [{ path: toolPath(item.input as Record<string, unknown>) ?? '', kind: 'update' }];
         }
         if (typeof details?.exitCode === 'number') item.exitCode = details.exitCode;
+        // Our subagent tools report the run id on the result, which is what the panel links on.
+        if (SUBAGENT_TOOLS.has(e.toolName) && typeof details?.runId === 'string') item.runId = details.runId;
         if (e.toolName === 'Agent' || e.toolName === 'get_subagent_result') this.captureSubagentResult(details);
         this.ctx.emit({ type: 'item.upsert', item: { ...item } });
         return;

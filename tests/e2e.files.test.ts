@@ -84,7 +84,8 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
     await win.waitForSelector('.file-preview-head .mono:has-text("src/hello.ts")', { timeout: 10_000 });
     await win.waitForSelector('.file-preview pre:has-text("line300 =")', { timeout: 10_000 });
     // The mention carried a line number, so the panel scrolled it into view instead of staying at the top.
-    const scrollTop = await win.locator('.panel-body').evaluate((el) => el.scrollTop);
+    // The panel is split in two, so name the half the Files tab lives in rather than any panel body.
+    const scrollTop = await win.locator('.panel-section.panel-top .panel-body').evaluate((el) => el.scrollTop);
     expect(scrollTop).toBeGreaterThan(0);
 
     await fs.mkdir(shots, { recursive: true });

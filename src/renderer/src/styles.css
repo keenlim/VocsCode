@@ -2447,6 +2447,22 @@ h4 {
   min-height: 0;
 }
 
+/* The panel's two halves: workspace views on top, live session services below. The split fraction
+   lives on --panel-split so a drag updates one custom property instead of re-rendering. */
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-section.panel-top {
+  flex: 0 0 calc(var(--panel-split, 0.62) * 100%);
+}
+.panel-section.panel-bottom {
+  flex: 1 1 0;
+  border-top: 1px solid var(--border);
+}
+
 /* Pane resize handles: a wide hit area straddling the pane's edge, with a hairline that lights up. */
 .resizer {
   position: absolute;
@@ -2463,6 +2479,176 @@ h4 {
 }
 .resizer-panel {
   left: -3px;
+}
+.resizer-split {
+  position: relative;
+  top: auto;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 7px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+.resizer-split::after {
+  top: 2px;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 3px;
+}
+body.resizing-row {
+  cursor: row-resize;
+  user-select: none;
+}
+
+/* Subagents tab: a run list over one run's transcript and per-call table. */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.subagents .panel-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+.subagent-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.subagent-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.subagent-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: inherit;
+}
+.subagent-row:hover {
+  background: var(--bg-hover);
+}
+.subagent-row.active {
+  background: var(--bg-active);
+}
+.subagent-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.subagent-agent {
+  font-weight: 600;
+}
+.subagent-desc {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-meta {
+  font-size: 11px;
+}
+.subagent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  min-height: 0;
+}
+.subagent-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.subagent-detail-stats {
+  font-size: 11px;
+}
+.subagent-steer {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.subagent-steer input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.subagent-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.subagent-item {
+  font-size: 12px;
+}
+.subagent-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+.subagent-tool-output {
+  margin: 2px 0 0;
+  padding: 4px 6px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+.subagent-text {
+  white-space: pre-wrap;
+}
+.subagent-calls {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.subagent-calls th,
+.subagent-calls td {
+  text-align: left;
+  padding: 3px 5px;
+  border-top: 1px solid var(--border);
+}
+.subagent-calls th.num,
+.subagent-calls td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .resizer::after {
   content: '';

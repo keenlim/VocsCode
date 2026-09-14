@@ -30,6 +30,8 @@ import { builtinServerIds, resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
+import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
+import type { SubagentRun, SubagentRunSummary } from '../shared/subagents';
 import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -461,6 +463,45 @@ export class SessionManager {
     }
     this.deps.log('info', `[${id}] session ${archived ? 'archived' : 'unarchived'}${archived && removeWt && meta.worktreeBranch ? ` (worktree removed${forceWt ? ', forced' : ''})` : ''}`);
     return this.patch(id, { archived });
+  }
+
+  /**
+   * Subagent runs recorded for a session, newest first. Detail never enters the parent transcript,
+   * so the panel reads the run files instead; a missing session or directory is simply "none".
+   */
+  async subagentRuns(id: string): Promise<SubagentRunSummary[]> {
+    const meta = this.get(id);
+    if (!meta) return [];
+    return listSubagentRuns(this.deps.store.sessionDir(id));
+  }
+
+  /** One subagent run with its transcript and per-call rows, or null when it is gone. */
+  async subagentRun(id: string, runId: string): Promise<SubagentRun | null> {
+    const meta = this.get(id);
+    if (!meta) return null;
+    return readSubagentRun(this.deps.store.sessionDir(id), runId);
+  }
+
+  /**
+   * Stops or steers one subagent run by sending the extension command straight to the harness.
+   * The command is not a user message: it must not appear in the transcript or start a turn, so it
+   * bypasses `send` and talks to the live adapter. Only pi sessions have subagents at all.
+   */
+  async subagentCommand(id: string, runId: string, kind: 'stop' | 'steer', message?: string): Promise<{ ok: boolean; error?: string }> {
+    const meta = this.get(id);
+    if (!meta) return { ok: false, error: 'Session not found' };
+    if (meta.config.harness !== 'pi') return { ok: false, error: 'Subagents run in pi sessions only' };
+    if (!isValidRunId(runId)) return { ok: false, error: 'Invalid run id' };
+    if (kind === 'steer' && !message?.trim()) return { ok: false, error: 'Message cannot be empty' };
+    const active = this.active.get(id);
+    if (!active) return { ok: false, error: 'Session is not running' };
+    const text = kind === 'stop' ? `/vocs-subagent-stop ${runId}` : `/vocs-subagent-steer ${runId} ${message!.trim()}`;
+    try {
+      await active.adapter.send({ text });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
   }
 
   transcript(id: string): Promise<TranscriptItem[]> {

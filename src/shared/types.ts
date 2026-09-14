@@ -776,6 +776,8 @@ export type TranscriptItem =
       parentId?: string | null;
       /** Model id that produced this call when the harness reports it per message (Claude); a subagent's differs from the session's. */
       model?: string;
+      /** Subagent run this card reports, so it can link into the Subagents panel. */
+      runId?: string;
     }
   | {
       id: string;
@@ -1028,6 +1030,8 @@ export interface AppSettings {
   windowBounds?: { x?: number; y?: number; width: number; height: number };
   sidebarWidth: number;
   panelWidth: number;
+  /** Share of the panel's height owned by its upper half (0.2–0.8); the lower half takes the rest. */
+  panelSplit: number;
   recentProjects: string[];
   /** Project folders that stay in the sidebar even when they have no sessions left. */
   folders: string[];

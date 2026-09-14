@@ -161,7 +161,7 @@ export function App() {
   return (
     <div className="shell">
       <TitleBar />
-      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px` }}>
+      <div className={`app ${sidebarOpen ? '' : 'no-sidebar'} ${panelOpen && session && view === 'chat' ? '' : 'no-panel'}`} style={{ ['--sidebar' as string]: `${settings.sidebarWidth}px`, ['--panel' as string]: `${settings.panelWidth}px`, ['--panel-split' as string]: `${Math.min(0.8, Math.max(0.2, settings.panelSplit ?? 0.62))}` }}>
         {sidebarOpen && <div className="sidebar-backdrop" onClick={toggleSidebar} />}
         {sidebarOpen && <Sidebar />}
         <main className="main">
