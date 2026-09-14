@@ -4,6 +4,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { McpServerDef, McpStoreInfo } from '../../../shared/types';
+import { MCP_BUILTIN_IDS } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
 import { McpServerForm, emptyServer, serverSummary } from './McpServerForm';
@@ -22,6 +23,13 @@ export function McpView() {
   const [editing, setEditing] = useState<McpServerDef | null>(null);
 
   const servers = useMemo(() => settings?.mcpServers ?? [], [settings]);
+  // The built-in is not a user entry; a same-named leftover in the store is inert and hidden here.
+  const userServers = useMemo(() => servers.filter((d) => !MCP_BUILTIN_IDS.includes(d.id)), [servers]);
+  const builtinOff = (id: string) => (settings?.mcpDisabledBuiltins ?? []).includes(id);
+  const setBuiltinGlobally = (id: string, on: boolean) => {
+    const cur = settings?.mcpDisabledBuiltins ?? [];
+    return invoke('settings:update', { mcpDisabledBuiltins: on ? cur.filter((x) => x !== id) : [...new Set([...cur, id])] });
+  };
 
   const load = useCallback(async () => {
     try {
@@ -41,8 +49,8 @@ export function McpView() {
   };
 
   const upsert = async (def: McpServerDef) => {
-    const exists = servers.some((s) => s.id === def.id);
-    await save(exists ? servers.map((s) => (s.id === def.id ? { ...s, ...def } : s)) : [...servers, def]);
+    const exists = userServers.some((s) => s.id === def.id);
+    await save(exists ? userServers.map((s) => (s.id === def.id ? { ...s, ...def } : s)) : [...userServers, def]);
     setEditing(null);
     toast(exists ? 'Server updated' : 'Server added', 'success');
   };
@@ -50,7 +58,7 @@ export function McpView() {
   const remove = async (def: McpServerDef) => {
     const ok = await askConfirm({ title: `Remove "${def.id}"?`, body: <>It stops being offered to every harness. Nothing on disk is deleted.</>, confirmLabel: 'Remove', danger: true });
     if (!ok) return;
-    await save(servers.filter((s) => s.id !== def.id));
+    await save(userServers.filter((s) => s.id !== def.id));
     if (editing?.id === def.id) setEditing(null);
   };
 
@@ -64,7 +72,7 @@ export function McpView() {
   const q = query.trim().toLowerCase();
   const match = (d: McpServerDef) => !q || d.id.toLowerCase().includes(q) || (d.description ?? '').toLowerCase().includes(q) || serverSummary(d).toLowerCase().includes(q);
   const activeStore = stores?.find((s) => s.id === tab);
-  const shown = tab === OWN_TAB ? servers.filter(match) : (activeStore?.servers ?? []).filter(match);
+  const shown = tab === OWN_TAB ? userServers.filter(match) : (activeStore?.servers ?? []).filter(match);
 
   return (
     <div className="skills mcp-page">
@@ -73,7 +81,7 @@ export function McpView() {
           <Button variant="ghost" size="sm" icon="chevronRight" className="rot180" onClick={() => setView('chat')} title="Back" />
           <Icon name="server" size={16} /> MCP servers
           <span className="muted small">
-            {servers.length} global{servers.length === 1 ? '' : ''}
+            {userServers.length} global{userServers.length === 1 ? '' : ''}
           </span>
         </div>
         <div className="skills-actions">
@@ -96,7 +104,7 @@ export function McpView() {
       <div className="skills-tabs">
         <button type="button" className={`atab ${tab === OWN_TAB ? 'active' : ''}`} onClick={() => setTab(OWN_TAB)}>
           Vocs Code
-          <span className="atab-count">{servers.length}</span>
+          <span className="atab-count">{userServers.length}</span>
         </button>
         {(stores ?? []).map((s) => (
           <button key={s.id} type="button" className={`atab ${tab === s.id ? 'active' : ''}`} title={s.path} onClick={() => setTab(s.id)}>
@@ -115,18 +123,18 @@ export function McpView() {
             </p>
             <div className="mcp-card">
               <div className="mcp-row-head">
+                <Toggle checked={!builtinOff('gitnexus')} onChange={(v) => void setBuiltinGlobally('gitnexus', v)} />
                 <Icon name="server" size={12} />
                 <span className="mcp-name">GitNexus</span>
                 <Badge tone="blue">built-in</Badge>
               </div>
-              <div className="muted small">Ships with Vocs Code and is offered to every repo, served by one shared process.</div>
-              <div className="muted small pad-t">
-                One GitNexus process serves every indexed repo. Each session still only sees its own graph
-                (plus any repo you share), enforced by this app. Turn it off for a single repo on that
-                repo's MCP panel tab.
+              <div className="muted small">
+                Ships with Vocs Code — one shared process serves every indexed repo, and each session
+                sees only its own graph (plus any repo you share). Turn it off for a single repo on
+                that repo's MCP panel tab.
               </div>
             </div>
-            {servers.length === 0 && !editing && (
+            {userServers.length === 0 && !editing && (
               <EmptyState icon="server" title="No MCP servers yet">
                 <p>An MCP server gives your agents extra tools — a code host, a database, a browser. Add one here and every harness that supports MCP picks it up on its next session.</p>
                 <Button variant="primary" icon="plus" onClick={() => setEditing(emptyServer())}>
@@ -137,12 +145,12 @@ export function McpView() {
             {shown.map((def) =>
               editing && editing.id === def.id ? (
                 <div key={def.id} className="mcp-card editing">
-                  <McpServerForm value={editing} takenIds={servers.map((s) => s.id)} onSave={(d) => void upsert(d)} onCancel={() => setEditing(null)} />
+                  <McpServerForm value={editing} takenIds={[...userServers.map((s) => s.id), ...MCP_BUILTIN_IDS]} onSave={(d) => void upsert(d)} onCancel={() => setEditing(null)} />
                 </div>
               ) : (
                 <div key={def.id} className="mcp-card">
                   <div className="mcp-row-head">
-                    <Toggle checked={!def.disabled} onChange={(v) => void save(servers.map((s) => (s.id === def.id ? { ...s, disabled: v ? undefined : true } : s)))} />
+                    <Toggle checked={!def.disabled} onChange={(v) => void save(userServers.map((s) => (s.id === def.id ? { ...s, disabled: v ? undefined : true } : s)))} />
                     <span className="mcp-name">{def.id}</span>
                     <Badge tone={def.transport === 'stdio' ? 'neutral' : 'blue'}>{def.transport}</Badge>
                     {def.harnesses?.map((h) => (
@@ -159,12 +167,12 @@ export function McpView() {
                 </div>
               )
             )}
-            {editing && !servers.some((s) => s.id === editing.id) && (
+            {editing && !userServers.some((s) => s.id === editing.id) && (
               <div className="mcp-card editing">
-                <McpServerForm value={editing} takenIds={servers.map((s) => s.id)} onSave={(d) => void upsert(d)} onCancel={() => setEditing(null)} />
+                <McpServerForm value={editing} takenIds={[...userServers.map((s) => s.id), ...MCP_BUILTIN_IDS]} onSave={(d) => void upsert(d)} onCancel={() => setEditing(null)} />
               </div>
             )}
-            {q && shown.length === 0 && servers.length > 0 && <div className="skill-none">No servers match “{query}”.</div>}
+            {q && shown.length === 0 && userServers.length > 0 && <div className="skill-none">No servers match “{query}”.</div>}
           </>
         ) : (
           <HarnessStore store={activeStore} loading={stores === null} shown={shown} onImport={importFrom} />

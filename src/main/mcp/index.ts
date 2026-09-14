@@ -98,7 +98,7 @@ async function sharedGitnexusDef(scope: SessionScope, def: McpServerDef, deps: M
 async function resolveBuiltins(scope: SessionScope, state: McpProjectState, deps: McpHostDeps): Promise<ResolvedServer[]> {
   const support = HARNESS_BY_ID[scope.harness].capabilities.mcp;
   const defs = builtinDefs();
-  const chosen = builtinEntries({ builtin: defs, state, harness: scope.harness, support }).filter((e) => e.enabled);
+  const chosen = builtinEntries({ builtin: defs, state, globalDisabled: scope.settings.mcpDisabledBuiltins, harness: scope.harness, support }).filter((e) => e.enabled);
   const out: ResolvedServer[] = [];
   for (const { def } of chosen) {
     let materialized: McpServerDef | null = def;
@@ -148,10 +148,13 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
   const injectable = support === 'inject' || support === 'client';
   const registry = await readGitnexusRegistry(realGitnexusHome());
   const indexed = isGitnexusIndexed(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd });
+  const globalDisabled = scope.settings.mcpDisabledBuiltins ?? [];
   const builtin: McpBuiltinInfo[] = defs.map((def) => ({
     def,
-    // The one shared server is on by default; this switch keeps a repo out of it.
-    enabled: injectable && !(state.disabledBuiltin ?? []).includes(def.id),
+    // The one shared server is on by default; the MCP page can switch it off everywhere, and
+    // this switch keeps a single repo out of it.
+    enabled: injectable && !globalDisabled.includes(def.id) && !(state.disabledBuiltin ?? []).includes(def.id),
+    disabledGlobally: globalDisabled.includes(def.id),
     shared: state.gitnexusGlobal === true,
     indexed,
     claimed: canClaimBuiltins(scope.harness)
@@ -168,7 +171,7 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     builtin,
     detected,
     effective: [
-      ...builtinEntries({ builtin: defs, state, harness: scope.harness, support }),
+      ...builtinEntries({ builtin: defs, state, globalDisabled, harness: scope.harness, support }),
       ...effectiveEntries({ global: globals, repo: repoDefs, state, harness: scope.harness, support, builtin: defs })
     ],
     harness: scope.harness,

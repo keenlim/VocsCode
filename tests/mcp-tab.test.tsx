@@ -146,6 +146,16 @@ describe('MCP panel tab', () => {
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { disabledBuiltin: ['gitnexus'] } });
   });
 
+  it('marks a built-in stuck off by the MCP page switch as off everywhere', async () => {
+    const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
+    invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: false, disabledGlobally: true, shared: false, indexed: true, claimed: false }] }));
+    await act(async () => {
+      render(<McpTab session={session()} />);
+    });
+    const builtinSection = screen.getByText('Built-in').closest('.mcp-section');
+    expect(builtinSection?.textContent).toContain('off everywhere');
+  });
+
   it('keeps the repo switch on the one shared server and says the server is shared', async () => {
     const gitnexus = { id: 'gitnexus', transport: 'stdio' as const, command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] };
     invoke.mockResolvedValue(info({ builtin: [{ def: gitnexus, enabled: true, shared: false, indexed: true, claimed: false }] }));

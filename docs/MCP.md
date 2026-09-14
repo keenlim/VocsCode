@@ -480,10 +480,13 @@ to the built-in row on the repo's MCP tab.
 Rules:
 
 - The built-in always wins over a same-id global or `.mcp.json` entry (the user's old manual
-  `gitnexus` server is shadowed, not injected twice).
-- It injects into every harness whose `mcp` support is `inject` or `client`, on by default. A
-  repo keeps itself out of the shared server with `disabledBuiltin` — the switch above the share
-  toggle on the repo's MCP tab.
+  `gitnexus` server is shadowed, not injected twice). Such an entry is dropped from the settings
+  store on load, and the MCP page neither lists it nor offers a same-id id to the add form.
+- It injects into every harness whose `mcp` support is `inject` or `client`, on by default. The
+  MCP page's built-in row switches it off everywhere (`mcpDisabledBuiltins`); a repo keeps itself
+  out of the shared server with `disabledBuiltin` — the switch above the share toggle on the
+  repo's MCP tab. Either switch alone is enough to keep a session from receiving it, and the
+  repo tab marks a built-in stuck off by the page switch with `off everywhere`.
 - Indexing is still the user's action: an unindexed repo is not injected at all, and the tab
   says to run `gitnexus analyze` rather than failing the session.
 - Codex loads its own `~/.codex/config.toml` underneath whatever a session is handed, so a

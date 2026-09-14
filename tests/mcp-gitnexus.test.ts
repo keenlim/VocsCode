@@ -85,6 +85,12 @@ describe('built-in GitNexus in the effective set', () => {
     expect(e.reason).toBe('disabled');
   });
 
+  it('is off when the MCP page switched it off everywhere', () => {
+    const [e] = builtinEntries({ builtin: [def], state: {}, globalDisabled: [GITNEXUS_SERVER_ID], harness: 'claude', support: 'inject' });
+    expect(e.enabled).toBe(false);
+    expect(e.reason).toBe('disabled');
+  });
+
   it('is not injected into harnesses that read their own store or take nothing', () => {
     for (const support of ['none', 'inherit'] as const) {
       const [e] = builtinEntries({ builtin: [def], state: {}, harness: 'cursor', support });
@@ -123,6 +129,15 @@ describe('GitNexus serving (one shared server)', () => {
     expect(setting(undefined)).toBeUndefined();
     expect(setting({ gitnexus: { mode: 'per-repo' } })).toBeUndefined();
     expect(setting({ gitnexus: { mode: 'shared' } })).toBeUndefined();
+  });
+
+  it('keeps the app-wide switch and drops a user entry claiming the built-in id', () => {
+    const s = normalizeSettings({
+      mcpDisabledBuiltins: [GITNEXUS_SERVER_ID, '', 5 as never, GITNEXUS_SERVER_ID],
+      mcpServers: [{ id: GITNEXUS_SERVER_ID, transport: 'stdio', command: 'npx', args: ['-y', 'gitnexus@latest', 'mcp'] }]
+    } as never);
+    expect(s.mcpDisabledBuiltins).toEqual([GITNEXUS_SERVER_ID]);
+    expect(s.mcpServers).toEqual([]);
   });
 
   it('injects the scope proxy for an indexed repo, never a per-repo process', async () => {
@@ -225,6 +240,27 @@ describe('GitNexus serving (one shared server)', () => {
     expect(out).toEqual([]);
     const info = await projectInfo({ settings, cwd: project, projectRoot: project, harness: 'claude' });
     expect(info.builtin[0]).toMatchObject({ enabled: false, indexed: true, shared: false });
+    expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: false, reason: 'disabled' });
+  });
+
+  it('injects nothing anywhere when the MCP page switch is off', async () => {
+    const project = await mkdtemp(path.join(tmpdir(), 'gn-proj-'));
+    const home = await mkdtemp(path.join(tmpdir(), 'gn-home-'));
+    dirs.push(project, home);
+    await writeFile(path.join(home, 'registry.json'), JSON.stringify([entry('proj', project)]), 'utf8');
+    process.env.GITNEXUS_HOME = home;
+    const settings = { mcpDisabledBuiltins: [GITNEXUS_SERVER_ID], mcpProjectState: {}, mcpServers: [] } as unknown as AppSettings;
+    const out = await resolveForSession(
+      { settings, cwd: project, projectRoot: project, harness: 'claude' },
+      {
+        getSecret: async () => undefined,
+        sharedGitnexus: async () => 'http://127.0.0.1:4799/api/mcp',
+        gitnexusProxyPath: '/tmp/p.mjs'
+      }
+    );
+    expect(out).toEqual([]);
+    const info = await projectInfo({ settings, cwd: project, projectRoot: project, harness: 'claude' });
+    expect(info.builtin[0]).toMatchObject({ enabled: false, disabledGlobally: true, indexed: true });
     expect(info.effective[0]).toMatchObject({ scope: 'builtin', enabled: false, reason: 'disabled' });
   });
 

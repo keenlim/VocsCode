@@ -11,13 +11,13 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { AppSettings, McpServerDef } from '../../shared/types';
+import { MCP_BUILTIN_IDS, type AppSettings, type McpServerDef } from '../../shared/types';
 
-export const GITNEXUS_SERVER_ID = 'gitnexus';
+export const GITNEXUS_SERVER_ID = MCP_BUILTIN_IDS[0];
 
 /** The one built-in server today; the id list is the shadow/exclusion key everywhere else. */
 export function isBuiltinServerId(id: string): boolean {
-  return id === GITNEXUS_SERVER_ID;
+  return MCP_BUILTIN_IDS.includes(id);
 }
 
 /** The built-in definition, before the per-session env is attached. */

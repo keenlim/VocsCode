@@ -1,6 +1,7 @@
 /** Persisted settings, with the built-in provider and ACP agent presets and their normalization. */
 import path from 'node:path';
 import type { AcpAgentPreset, AppSettings, FolderStyle, HarnessId, McpProjectState, McpServerDef, McpTransport, ModelRef, ProviderConfig } from '../shared/types';
+import { MCP_BUILTIN_IDS } from '../shared/types';
 import { isAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESSES, isEffortLevel } from '../shared/harness-meta';
 import { pruneModelOverrides } from '../shared/model-overrides';
@@ -274,7 +275,9 @@ export function normalizeMcpServers(stored: unknown): McpServerDef[] {
     if (!raw || typeof raw !== 'object') continue;
     const s = raw as Record<string, unknown>;
     const id = typeof s.id === 'string' ? s.id.trim() : '';
-    if (!isValidServerId(id) || out.some((x) => x.id === id)) continue;
+    // An entry claiming a built-in id is a leftover from before the built-in existed; the resolve
+    // path shadows it anyway, so drop it rather than show a dead row on the MCP page.
+    if (!isValidServerId(id) || MCP_BUILTIN_IDS.includes(id) || out.some((x) => x.id === id)) continue;
     const transport: McpTransport = s.transport === 'http' || s.transport === 'sse' ? s.transport : 'stdio';
     const def: McpServerDef = { id, transport };
     if (transport === 'stdio') {
@@ -364,6 +367,9 @@ export function normalizeSettings(stored: Partial<AppSettings> | undefined): App
     agent: normalizeAgentSettings(stored.agent),
     modelOverrides: pruneModelOverrides(stored.modelOverrides),
     mcpServers: normalizeMcpServers(stored.mcpServers),
+    mcpDisabledBuiltins: Array.isArray(stored.mcpDisabledBuiltins)
+      ? [...new Set(stored.mcpDisabledBuiltins.filter((x): x is string => typeof x === 'string' && !!x))]
+      : [],
     mcpProjectState: normalizeMcpProjectState(stored.mcpProjectState),
     providers: [],
     acpAgents: []
