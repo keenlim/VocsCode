@@ -174,11 +174,11 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
 const FONT_SIZES = [10, 11, 12, 13, 14, 15, 16, 18, 20];
 const SCROLLBACKS = [1_000, 5_000, 10_000, 20_000, 50_000, 100_000];
 
-/** General → the two background models: chores (session titles) and Agatho, plus its on/off switch. */
+/** General → the two background models: chores (session titles) and Vesta, plus its on/off switch. */
 function BackgroundModelFields({ settings, update }: { settings: AppSettings; update: (p: Partial<AppSettings>) => void }) {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [error, setError] = useState<string | null>(null);
-  // Agatho runs on pi, so its model comes from pi's catalog rather than the app's providers.
+  // Vesta runs on pi, so its model comes from pi's catalog rather than the app's providers.
   const [piModels, setPiModels] = useState<ModelInfo[]>([]);
   const [piError, setPiError] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -208,15 +208,15 @@ function BackgroundModelFields({ settings, update }: { settings: AppSettings; up
           />
         </div>
       </Field>
-      <h3>Agatho</h3>
+      <h3>Vesta</h3>
       <p className="muted small">
         The floating assistant. It runs on pi — the same coding agent as the Pi harness — and drives the app itself to set up MCP servers, start sessions
-        and tidy branches. pi only ever sees the app's capability list: every change Agatho wants to make is shown as a proposal you approve first. Drag it
+        and tidy branches. pi only ever sees the app's capability list: every change Vesta wants to make is shown as a proposal you approve first. Drag it
         anywhere; click it to collapse.
       </p>
-      <Toggle checked={settings.agent?.enabled !== false} onChange={(v) => update({ agent: { ...(settings.agent ?? {}), enabled: v } })} label="Show Agatho" />
-      {!piModels.length && piError && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>{piError} Install pi under Harnesses to use Agatho.</span></div>}
-      <Field label="Agatho's model" hint="A pi model from ~/.pi/agent. Picking correctly among its capabilities is harder than naming a session, so a small model may struggle.">
+      <Toggle checked={settings.agent?.enabled !== false} onChange={(v) => update({ agent: { ...(settings.agent ?? {}), enabled: v } })} label="Show Vesta" />
+      {!piModels.length && piError && <div className="info-line info-error"><Icon name="alert" size={13} /> <span>{piError} Install pi under Harnesses to use Vesta.</span></div>}
+      <Field label="Vesta's model" hint="A pi model from ~/.pi/agent. Picking correctly among its capabilities is harder than naming a session, so a small model may struggle.">
         <div className="onboarding-model-picker">
           <ModelPicker
             models={piModels}
@@ -744,7 +744,7 @@ function Harnesses({ settings, update }: { settings: AppSettings; update: (p: Pa
       {bin('codex', 'codex path override')}
       <h3>Pi</h3>
       {bin('pi', 'pi path override')}
-      <Field label="Extra pi arguments" hint="Space separated, appended to every pi session launch (e.g. --no-skills). Agatho's own pi run is hermetic and ignores these.">
+      <Field label="Extra pi arguments" hint="Space separated, appended to every pi session launch (e.g. --no-skills). Vesta's own pi run is hermetic and ignores these.">
         <input value={settings.pi.extraArgs.join(' ')} onChange={(e) => update({ pi: { extraArgs: e.target.value.split(/\s+/).filter(Boolean) } })} />
       </Field>
       <h3>DeepSeek Harness / npx</h3>

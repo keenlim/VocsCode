@@ -1,5 +1,5 @@
 /**
- * Agatho's floating panel. What matters here is that a proposal is legible before it is
+ * Vesta's floating panel. What matters here is that a proposal is legible before it is
  * approved — every target named, destructive batches marked — and that approving goes through
  * the confirm dialog rather than straight to the main process.
  * @vitest-environment jsdom
@@ -7,7 +7,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { Agatho } from '../src/renderer/src/components/Agatho';
+import { Vesta } from '../src/renderer/src/components/Vesta';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
 import type { AgentItem, AgentState } from '../src/shared/agent';
@@ -25,7 +25,7 @@ function setup(items: AgentItem[], agentState: Partial<AgentState> = {}, agentSe
   } as never);
   return render(
     <>
-      <Agatho />
+      <Vesta />
       <ConfirmHost />
     </>
   );
@@ -53,14 +53,14 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe('Agatho panel', () => {
+describe('Vesta panel', () => {
   it('collapses to an avatar and stays hidden when switched off', () => {
     const { unmount } = setup([], {}, { enabled: true, collapsed: true });
-    expect(screen.getByLabelText('Open Agatho')).toBeTruthy();
-    expect(screen.queryByPlaceholderText('Ask Agatho…')).toBeNull();
+    expect(screen.getByLabelText('Open Vesta')).toBeTruthy();
+    expect(screen.queryByPlaceholderText('Ask Vesta…')).toBeNull();
     unmount();
     setup([], {}, { enabled: false, collapsed: false });
-    expect(screen.queryByLabelText('Agatho')).toBeNull();
+    expect(screen.queryByLabelText('Vesta')).toBeNull();
   });
 
   it('names every target of a destructive batch before it is approved', () => {
@@ -99,7 +99,7 @@ describe('Agatho panel', () => {
 
   it('sends the focused session as context so "this project" resolves', async () => {
     setup([]);
-    fireEvent.change(screen.getByPlaceholderText('Ask Agatho…'), { target: { value: 'which branches are stale?' } });
+    fireEvent.change(screen.getByPlaceholderText('Ask Vesta…'), { target: { value: 'which branches are stale?' } });
     fireEvent.click(screen.getByLabelText('Send'));
     await act(async () => undefined);
     expect(invoke).toHaveBeenCalledWith('agent:send', { text: 'which branches are stale?', context: { sessionId: 's1', view: 'mcp' } });
@@ -110,13 +110,58 @@ describe('Agatho panel', () => {
     expect(screen.getByText('No provider is configured yet.')).toBeTruthy();
   });
 
+  it('accepts a pasted image, shows it in the composer, and sends it with the message', async () => {
+    setup([]);
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pixel.png', { type: 'image/png' });
+    const composer = screen.getByPlaceholderText('Ask Vesta…');
+    await act(async () => {
+      fireEvent.paste(composer, { clipboardData: { files: [file] } });
+    });
+    const thumb = screen.getByAltText('pixel.png') as HTMLImageElement;
+    expect(thumb.getAttribute('src')).toContain('data:image/png;base64,');
+    fireEvent.change(composer, { target: { value: 'what is this?' } });
+    fireEvent.click(screen.getByLabelText('Send'));
+    await act(async () => undefined);
+    expect(invoke).toHaveBeenCalledWith(
+      'agent:send',
+      expect.objectContaining({ text: 'what is this?', images: [{ mimeType: 'image/png', data: 'iVBORw==', name: 'pixel.png' }] })
+    );
+    expect(screen.queryByAltText('pixel.png')).toBeNull();
+  });
+
+  it('sends a pasted image on its own, and lets it be removed before sending', async () => {
+    setup([]);
+    const file = new File([new Uint8Array([137, 80, 78, 71])], 'pixel.png', { type: 'image/png' });
+    const composer = screen.getByPlaceholderText('Ask Vesta…');
+    await act(async () => {
+      fireEvent.paste(composer, { clipboardData: { files: [file] } });
+    });
+    expect(screen.getByLabelText('Send').hasAttribute('disabled')).toBe(false);
+    fireEvent.click(screen.getByLabelText('Remove image'));
+    await act(async () => undefined);
+    expect(screen.queryByAltText('pixel.png')).toBeNull();
+    expect(screen.getByLabelText('Send').hasAttribute('disabled')).toBe(true);
+
+    await act(async () => {
+      fireEvent.paste(composer, { clipboardData: { files: [file] } });
+    });
+    fireEvent.click(screen.getByLabelText('Send'));
+    await act(async () => undefined);
+    expect(invoke).toHaveBeenCalledWith('agent:send', expect.objectContaining({ text: '', images: [expect.objectContaining({ mimeType: 'image/png' })] }));
+  });
+
+  it('draws images on the user row of the transcript', () => {
+    setup([{ id: 'u1', kind: 'user', text: 'what is this?', images: [{ mimeType: 'image/png', data: 'iVBORw==', name: 'pixel.png' }] }]);
+    expect((screen.getByAltText('pixel.png') as HTMLImageElement).getAttribute('src')).toBe('data:image/png;base64,iVBORw==');
+  });
+
   it('shows which model answered', () => {
     setup([{ id: 'a1', kind: 'assistant', text: 'Done.' }], { model: 'anthropic/claude-haiku-4-5' });
     expect(screen.getByText('anthropic/claude-haiku-4-5')).toBeTruthy();
   });
 });
 
-describe('Agatho panel placement', () => {
+describe('Vesta panel placement', () => {
   /** The panel is fixed-position and anchored by its bottom edge; jsdom has no layout engine. */
   const viewport = (w: number, h: number) => {
     for (const [key, value] of [
@@ -162,7 +207,7 @@ describe('Agatho panel placement', () => {
   it('keeps the avatar in reach when the stored position is off the bottom of a shorter window', () => {
     viewport(1024, 600);
     setup([], {}, { enabled: true, collapsed: true, x: 9000, y: 5000 });
-    const avatar = screen.getByLabelText('Open Agatho') as HTMLElement;
+    const avatar = screen.getByLabelText('Open Vesta') as HTMLElement;
     expect(avatar.style.bottom).toBe('8px');
     expect(avatar.style.left).toBe(`${1024 - 52 - 8}px`);
   });

@@ -1,4 +1,4 @@
-/** Agatho's capability allowlist: the only part of the IPC surface the model can reach.
+/** Vesta's capability allowlist: the only part of the IPC surface the model can reach.
  *
  *  The handler registry serves 100+ channels, including keychain writes and raw PTY input,
  *  so the default is closed: a capability exists here or it does not exist at all. Each entry
@@ -307,7 +307,7 @@ export const AGENT_CAPABILITIES: AgentCapability[] = [
 
 export const CAPABILITIES_BY_NAME = new Map(AGENT_CAPABILITIES.map((c) => [c.name, c]));
 
-/** Channels Agatho may reach. Used by tests to prove the surface stays deliberate. */
+/** Channels Vesta may reach. Used by tests to prove the surface stays deliberate. */
 export function agentChannels(): IpcChannel[] {
   return Array.from(new Set(AGENT_CAPABILITIES.map((c) => c.channel)));
 }

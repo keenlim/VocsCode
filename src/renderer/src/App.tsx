@@ -2,7 +2,7 @@
 import React, { useEffect } from 'react';
 import { invoke } from './api';
 import { useActiveSession, useStore, toastError } from './store';
-import { Agatho } from './components/Agatho';
+import { Vesta } from './components/Vesta';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { CommandPalette } from './components/CommandPalette';
 import { Composer } from './components/Composer';
@@ -206,7 +206,7 @@ export function App() {
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
       <ConfirmHost />
-      {settings.onboardingDone && <Agatho />}
+      {settings.onboardingDone && <Vesta />}
       <Toasts />
     </div>
   );

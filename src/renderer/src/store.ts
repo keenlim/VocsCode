@@ -91,9 +91,9 @@ interface State {
   /** Pending jump-to-match: Transcript scrolls to the item once its session is loaded. */
   searchJump: { sessionId: string; itemId: string; n: number } | null;
   showThinking: boolean;
-  /** Agatho's transcript, mirrored from the main process. */
+  /** Vesta's transcript, mirrored from the main process. */
   agent: AgentState;
-  /** Text another part of the UI wants Agatho's composer to start from. */
+  /** Text another part of the UI wants Vesta's composer to start from. */
   agentPrefill: { text: string; nonce: number } | null;
   toasts: Toast[];
   changesVersion: number;
@@ -129,8 +129,8 @@ interface State {
   jumpToSearchMatch(sessionId: string, itemId?: string): void;
   toggleThinking(): void;
   setAgentState(s: AgentState): void;
-  /** Expands Agatho and seeds its composer; used by the "Set up with Agatho" entry points. */
-  openAgatho(prefill?: string): void;
+  /** Expands Vesta and seeds its composer; used by the "Set up with Vesta" entry points. */
+  openVesta(prefill?: string): void;
   toast(text: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   refreshAvailability(): Promise<void>;
@@ -586,7 +586,7 @@ export const useStore = create<State>((set, get) => ({
   setAgentState(agent) {
     set({ agent });
   },
-  openAgatho(prefill) {
+  openVesta(prefill) {
     const current = get().settings?.agent ?? {};
     set((s) => ({ agentPrefill: prefill ? { text: prefill, nonce: (s.agentPrefill?.nonce ?? 0) + 1 } : null }));
     void invoke('settings:update', { agent: { ...current, enabled: true, collapsed: false } }).catch(toastError);

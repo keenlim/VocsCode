@@ -1,5 +1,4 @@
-/** Picks the provider and model for background work: session titles and Agatho.
- *  One resolver so the two callers cannot drift apart. */
+/** Picks the provider and model for background work outside a session: session titles today. */
 import type { ModelRef, ProviderConfig } from '../../shared/types';
 import { STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
 

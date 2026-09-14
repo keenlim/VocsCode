@@ -1,12 +1,12 @@
-# Agatho
+# Vesta
 
 Status: **P0 shipped.** A floating in-app assistant that drives Vocs Code itself — setting up MCP servers, starting sessions, tidying branches — through a fixed allowlist of app capabilities.
 
-The name is from the *agathos daimon*, the benevolent household spirit of Greek religion: something that lives with you and does small useful things.
+The name is from Vesta, the Roman goddess of the hearth and home — the Roman counterpart of the *agathos daimon*, the benevolent household spirit: something that lives with you and does small useful things.
 
 ## Why it exists
 
-Configuring an MCP server by hand means knowing the transport, the command line or endpoint, and which environment variable holds the token. That is a lot of ceremony for "set up this server". Agatho turns it into a sentence — and the same machinery generalises, because everything the user can do in this app is already an IPC channel.
+Configuring an MCP server by hand means knowing the transport, the command line or endpoint, and which environment variable holds the token. That is a lot of ceremony for "set up this server". Vesta turns it into a sentence — and the same machinery generalises, because everything the user can do in this app is already an IPC channel.
 
 ## Shape
 
@@ -17,11 +17,11 @@ src/main/agents/pi-runtime.ts  the pi process: spawn, RPC events, the capability
 src/main/agents/context.ts     system prompt + per-turn app context
 src/main/agents/tools.ts       manifest -> tool defs; runs one capability
 src/main/agents/index.ts       the gate: batch, approve, apply, confirm
-resources/pi/vocs-code-agatho.ts  registers the allowlist tools with pi
-src/renderer/src/components/Agatho.tsx   the floating panel
+resources/pi/vocs-code-vesta.ts  registers the allowlist tools with pi
+src/renderer/src/components/Vesta.tsx   the floating panel
 ```
 
-Agatho runs on **pi**, the same coding agent the Pi harness uses, started once per conversation in
+Vesta runs on **pi**, the same coding agent the Pi harness uses, started once per conversation in
 RPC mode. It is a hermetic run: no session file, no built-in tools, and no user extensions, skills,
 prompt templates or context files — only the capability bridge. The bridge extension registers one
 pi tool per allowlist entry and forwards every call back to the app over pi's extension-UI channel,
@@ -29,7 +29,7 @@ where this code decides, gates and performs it. Neither the tool list nor any ca
 lives in the extension; both come from the app at spawn time. A turn's system prompt is rewritten
 before every message, so the app-context block stays fresh without restarting pi.
 
-Agatho has no shell, no filesystem and no network of its own: if a job needs any of those, it says
+Vesta has no shell, no filesystem and no network of its own: if a job needs any of those, it says
 so. `unavailable` is set when pi is not installed, and the panel shows where to install it.
 
 ## The allowlist is the security boundary
@@ -41,7 +41,8 @@ so. `unavailable` is set when pi is not installed, and the panel shows where to 
 - Tiers: `read` runs immediately; `write` and `destructive` become a **proposal** the user approves. Destructive proposals additionally route through the confirm dialog, listing every target by name.
 - The tier is a function of the request, not just the channel. An `http` MCP probe is a network read; a **stdio** probe runs a command line the model chose, so it is gated.
 - Projections keep payloads out of the prompt as well as the context: `get_app_settings` deliberately drops the provider table.
-- Secrets never reach the model. Agatho learns only that `${GITHUB_TOKEN}` is *required*; the value goes from the renderer to the OS keychain and never enters the transcript, the history or a provider request.
+- Secrets never reach the model. Vesta learns only that `${GITHUB_TOKEN}` is *required*; the value goes from the renderer to the OS keychain and never enters the transcript, the history or a provider request.
+- Pasted images are not capabilities: they go straight to the model through pi's prompt, so they add nothing to the allowlist and never reach a handler themselves.
 - `agent:*` is blocked on the WebSocket transport (`isRemoteBlocked` in `web-server.ts`), which otherwise forwards every channel.
 
 ## Adding a capability
@@ -68,14 +69,14 @@ Rules of thumb:
 - Give bulky replies a `project`, or the model's context fills with session metadata.
 - Anything that deletes, pushes, merges or spends money is `destructive`.
 
-`tests/agatho.test.ts` asserts the boundary: no forbidden channel is reachable, nothing gated runs unapproved, and `tests/handler-registry.test.ts` proves every allowlisted channel actually exists.
-`tests/agatho-pi.integration.test.ts` (opt-in, `VOCS_CODE_PI_INTEGRATION=1`) runs the real installed
+`tests/vesta.test.ts` asserts the boundary: no forbidden channel is reachable, nothing gated runs unapproved, and `tests/handler-registry.test.ts` proves every allowlisted channel actually exists.
+`tests/vesta-pi.integration.test.ts` (opt-in, `VOCS_CODE_PI_INTEGRATION=1`) runs the real installed
 pi with a scripted provider and proves the bridge itself: the extension registers the allowlist,
 pi dispatches the calls, and the gate answers them.
 
 ## Model
 
-Agatho uses pi's own providers and models. `settings.agentModel` pins one from pi's catalog (the
+Vesta uses pi's own providers and models. `settings.agentModel` pins one from pi's catalog (the
 Settings → General picker lists them); unset means pi's default model, which is also what a pi
 session would use. The panel shows the model pi reports for the run, so a weak pick is diagnosable
 rather than mysterious. If the pinned model no longer resolves, pi reports the error in the

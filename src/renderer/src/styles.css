@@ -5485,17 +5485,17 @@ body.resizing {
 }
 
 /* ------------------------------------------------------------------ */
-/* Agatho: the floating in-app assistant                              */
+/* Vesta: the floating in-app assistant                              */
 /* ------------------------------------------------------------------ */
 
-.agatho {
+.vesta {
   position: fixed;
   z-index: 60;
   font-size: 12.5px;
   touch-action: none;
 }
 
-.agatho-avatar {
+.vesta-avatar {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5506,16 +5506,16 @@ body.resizing {
   box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
   transition: transform 0.12s ease;
 }
-.agatho-avatar:hover {
+.vesta-avatar:hover {
   transform: scale(1.06);
 }
-.agatho-avatar:active {
+.vesta-avatar:active {
   cursor: grabbing;
 }
-.agatho-avatar.busy {
-  animation: agatho-pulse 1.4s ease-in-out infinite;
+.vesta-avatar.busy {
+  animation: vesta-pulse 1.4s ease-in-out infinite;
 }
-@keyframes agatho-pulse {
+@keyframes vesta-pulse {
   0%,
   100% {
     box-shadow: 0 6px 20px rgb(0 0 0 / 0.28);
@@ -5525,7 +5525,7 @@ body.resizing {
   }
 }
 
-.agatho-panel {
+.vesta-panel {
   display: flex;
   flex-direction: column;
   max-height: 460px;
@@ -5536,7 +5536,7 @@ body.resizing {
   overflow: hidden;
 }
 
-.agatho-head {
+.vesta-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -5546,13 +5546,13 @@ body.resizing {
   cursor: grab;
   user-select: none;
 }
-.agatho-head:active {
+.vesta-head:active {
   cursor: grabbing;
 }
-.agatho-head .spacer {
+.vesta-head .spacer {
   flex: 1;
 }
-.agatho-model {
+.vesta-model {
   font-size: 10px;
   color: var(--fg-muted);
   max-width: 130px;
@@ -5561,7 +5561,7 @@ body.resizing {
   white-space: nowrap;
 }
 
-.agatho-list {
+.vesta-list {
   flex: 1;
   overflow-y: auto;
   padding: 10px;
@@ -5571,101 +5571,106 @@ body.resizing {
   min-height: 120px;
 }
 
-.agatho-empty {
+.vesta-empty {
   display: flex;
   gap: 8px;
   color: var(--fg-muted);
   line-height: 1.5;
 }
-.agatho-empty em {
+.vesta-empty em {
   font-style: normal;
   color: var(--fg);
 }
 
-.agatho-msg {
+.vesta-msg {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.5;
 }
-.agatho-user {
+.vesta-user {
   align-self: flex-end;
   max-width: 85%;
   padding: 5px 9px;
   border-radius: var(--radius-sm);
   background: var(--accent-soft);
 }
-.agatho-err {
+.vesta-err {
   display: flex;
   align-items: flex-start;
   gap: 5px;
   color: var(--red);
 }
 
-.agatho-tool {
+.vesta-tool {
   display: flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   color: var(--fg-muted);
 }
-.agatho-tool.failed {
+.vesta-tool.failed {
   color: var(--red);
 }
 
-.agatho-proposal {
+.vesta-proposal {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   padding: 8px;
   background: var(--bg-sunken);
 }
-.agatho-proposal.danger {
+.vesta-proposal.danger {
   border-color: var(--red);
   background: var(--red-soft);
 }
-.agatho-proposal-head {
+.vesta-proposal-head {
   display: flex;
   align-items: center;
   gap: 5px;
   font-weight: 600;
   margin-bottom: 6px;
 }
-.agatho-proposal ul,
-.agatho-confirm-list {
+.vesta-proposal ul,
+.vesta-confirm-list {
   margin: 0 0 8px;
   padding-left: 16px;
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
-.agatho-proposal li em {
+.vesta-proposal li em {
   font-style: normal;
   margin-left: 6px;
   font-size: 11px;
 }
-.agatho-proposal li em.ok {
+.vesta-proposal li em.ok {
   color: var(--green);
 }
-.agatho-proposal li em.bad {
+.vesta-proposal li em.bad {
   color: var(--red);
 }
-.agatho-proposal-actions {
+.vesta-proposal-actions {
   display: flex;
   gap: 6px;
 }
-.agatho-proposal-status {
+.vesta-proposal-status {
   font-size: 11px;
   color: var(--fg-muted);
   text-transform: capitalize;
 }
 
-.agatho-compose {
+.vesta-compose {
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 6px;
   padding: 8px;
   border-top: 1px solid var(--border);
 }
-.agatho-compose textarea {
+.vesta-compose-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+.vesta-compose textarea {
   flex: 1;
   resize: none;
   font: inherit;
@@ -5675,8 +5680,29 @@ body.resizing {
   background: var(--bg);
   color: var(--fg);
 }
-.agatho-compose .icon-btn.danger {
+.vesta-compose .icon-btn.danger {
   color: var(--red);
+}
+.vesta-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 2px;
+}
+.vesta-attachments .attachment img {
+  height: 52px;
+}
+.vesta-msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.vesta-msg-images img {
+  max-width: 100%;
+  max-height: 140px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
 }
 
 /* Settings → Pi */

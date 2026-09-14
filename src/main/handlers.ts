@@ -8,8 +8,8 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
-import { Agatho } from './agents';
-import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId } from '../shared/types';
+import { Vesta } from './agents';
+import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
@@ -86,7 +86,7 @@ export interface HandlerRegistry {
   /** Every channel this registry serves — the host binds each to its transport. */
   channels(): IpcChannel[];
   invoke(channel: string, req: unknown): Promise<unknown>;
-  /** Stops background children the registry owns (Agatho's pi process). */
+  /** Stops background children the registry owns (Vesta's pi process). */
   shutdown(): Promise<void>;
 }
 
@@ -505,9 +505,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   handle('approvals:respond', ({ sessionId, requestId, decision }) => sessions.respondApproval(sessionId, requestId, decision));
 
-  // Agatho reaches the app through this same registry, but only via the capability allowlist in
+  // Vesta reaches the app through this same registry, but only via the capability allowlist in
   // shared/agent-manifest.ts — the registry itself serves keychain writes and raw PTY input.
-  const agatho = new Agatho({
+  const vesta = new Vesta({
     getSettings: () => settings.get(),
     listSessions: () => sessions.list(),
     getSession: (id) => sessions.get(id),
@@ -515,19 +515,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     invoke: invokeChannel,
     push: (state) => deps.push(PUSH_CHANNELS.agentState, state),
     log: deps.log,
-    // Agatho runs on pi (docs/AGATHO.md); it is absent until pi is installed, which the panel says.
+    // Vesta runs on pi (docs/VESTA.md); it is absent until pi is installed, which the panel says.
     piBinary: () => runtime.resolve('pi')?.path ?? null,
-    piExtension: () => runtime.resource('pi', 'vocs-code-agatho.ts'),
+    piExtension: () => runtime.resource('pi', 'vocs-code-vesta.ts'),
     piCwd: () => homedir()
   });
-  handle('agent:state', () => agatho.state());
+  handle('agent:state', () => vesta.state());
   // A turn streams over push:agentState, so the invoke returns as soon as it is accepted.
-  handle('agent:send', ({ text, context }) => {
-    void agatho.send(String(text ?? ''), context).catch((e: unknown) => deps.log('warn', `agatho send failed: ${errorMessage(e)}`));
+  handle('agent:send', ({ text, context, images }) => {
+    void vesta.send(String(text ?? ''), context, normalizeAgentImages(images)).catch((e: unknown) => deps.log('warn', `vesta send failed: ${errorMessage(e)}`));
   });
-  handle('agent:cancel', () => agatho.cancel());
-  handle('agent:resolve', ({ proposalId, approve }) => agatho.resolveProposal(String(proposalId ?? ''), approve === true));
-  handle('agent:reset', () => agatho.reset());
+  handle('agent:cancel', () => vesta.cancel());
+  handle('agent:resolve', ({ proposalId, approve }) => vesta.resolveProposal(String(proposalId ?? ''), approve === true));
+  handle('agent:reset', () => vesta.reset());
 
   // Remote access (docs/REMOTE-ACCESS.md). The enrollment and device tokens live in the
   // secret store, never in settings; enable() stores them and opens the relay socket.
@@ -697,8 +697,23 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   return {
     channels: () => Array.from(handlers.keys()),
     invoke: invokeChannel,
-    shutdown: () => agatho.dispose()
+    shutdown: () => vesta.dispose()
   };
+}
+
+/** Pasted images crossing IPC: keep only well-formed image attachments, so a malformed payload
+ *  cannot reach the harness with, say, a non-image mime type or a missing body. */
+function normalizeAgentImages(raw: unknown): ImageAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: ImageAttachment[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { mimeType, data, name } = entry as Partial<ImageAttachment>;
+    if (typeof mimeType !== 'string' || !/^image\/[a-z0-9.+-]+$/i.test(mimeType)) continue;
+    if (typeof data !== 'string' || !data) continue;
+    out.push({ mimeType, data, ...(typeof name === 'string' && name ? { name } : {}) });
+  }
+  return out.length ? out : undefined;
 }
 
 function fuzzyMatch(hay: string, needle: string): boolean {

@@ -1,12 +1,14 @@
-/** Agatho: a floating assistant that drives the app through its capability allowlist.
+/** Vesta: a floating assistant that drives the app through its capability allowlist.
  *  Portalled to the body and mounted outside the view switch, so it stays put wherever
  *  the user goes and wherever they drag it. */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { AgentItem, AgentProposal } from '../../../shared/agent';
 import { AGENT_NAME } from '../../../shared/agent';
+import type { ImageAttachment } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore, toastError } from '../store';
+import { fileToAttachment } from './Composer';
 import { askConfirm, Button, Icon, Spinner } from './ui';
 
 const PANEL_W = 360;
@@ -37,7 +39,7 @@ function clamp(p: Point, w: number, h: number): Point {
   };
 }
 
-export function Agatho() {
+export function Vesta() {
   const settings = useStore((s) => s.settings);
   const agent = useStore((s) => s.agent);
   const activeId = useStore((s) => s.activeId);
@@ -45,10 +47,12 @@ export function Agatho() {
   const prefill = useStore((s) => s.agentPrefill);
   const stored = settings?.agent;
 
-  // Collapsed lives in settings so other parts of the UI can open Agatho (see store.openAgatho).
+  // Collapsed lives in settings so other parts of the UI can open Vesta (see store.openVesta).
   const collapsed = stored?.collapsed !== false;
   const [pos, setPos] = useState<Point | null>(null);
   const [text, setText] = useState('');
+  /** Images pasted into the composer, waiting for the next send. */
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   /** Measured height of the rendered panel, so growth can be anchored at the bottom edge. */
   const [panelH, setPanelH] = useState(0);
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -136,11 +140,22 @@ export function Agatho() {
 
   const toggle = () => persist({ collapsed: !collapsed });
 
+  const onPaste = async (e: React.ClipboardEvent) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    e.preventDefault();
+    const pasted = await Promise.all(files.map(fileToAttachment));
+    setImages((prev) => [...prev, ...pasted]);
+    inputRef.current?.focus();
+  };
+
   const send = () => {
     const message = text.trim();
-    if (!message || agent.busy) return;
+    if (agent.busy || (!message && !images.length)) return;
+    const outgoing = images;
     setText('');
-    void invoke('agent:send', { text: message, context: { sessionId: activeId ?? undefined, view } }).catch(toastError);
+    setImages([]);
+    void invoke('agent:send', { text: message, context: { sessionId: activeId ?? undefined, view }, images: outgoing.length ? outgoing : undefined }).catch(toastError);
   };
 
   if (!settings || settings.agent?.enabled === false || !pos) return null;
@@ -158,7 +173,7 @@ export function Agatho() {
     return createPortal(
       <div
         ref={boxRef}
-        className={`agatho agatho-avatar ${agent.busy ? 'busy' : ''}`}
+        className={`vesta vesta-avatar ${agent.busy ? 'busy' : ''}`}
         style={style}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -181,11 +196,11 @@ export function Agatho() {
   }
 
   return createPortal(
-    <div ref={boxRef} className="agatho agatho-panel" style={style} role="dialog" aria-label={AGENT_NAME}>
-      <div className="agatho-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+    <div ref={boxRef} className="vesta vesta-panel" style={style} role="dialog" aria-label={AGENT_NAME}>
+      <div className="vesta-head" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
         <Icon name="sparkles" size={15} />
         <strong>{AGENT_NAME}</strong>
-        {agent.model && <span className="agatho-model" title="Model answering — set it under Settings → General">{agent.model}</span>}
+        {agent.model && <span className="vesta-model" title="Model answering — set it under Settings → General">{agent.model}</span>}
         <span className="spacer" />
         <button className="icon-btn" title="Clear the conversation" aria-label="Clear the conversation" onClick={() => void invoke('agent:reset', undefined).catch(toastError)}>
           <Icon name="trash" size={13} />
@@ -195,68 +210,94 @@ export function Agatho() {
         </button>
       </div>
 
-      <div className="agatho-list" ref={listRef}>
+      <div className="vesta-list" ref={listRef}>
         {agent.unavailable ? (
-          <div className="agatho-empty">
+          <div className="vesta-empty">
             <Icon name="alert" size={15} />
             <span>{agent.unavailable}</span>
           </div>
         ) : agent.items.length === 0 ? (
-          <div className="agatho-empty">
+          <div className="vesta-empty">
             <span>
-              I can set up MCP servers, start sessions and tidy branches. Try <em>“set up the https://mcp.example.com/mcp server”</em> or{' '}
-              <em>“which branches here are older than a day?”</em>
+              I can set up MCP servers, start sessions and tidy branches — and I can look at an image you paste in. Try{' '}
+              <em>“set up the https://mcp.example.com/mcp server”</em> or <em>“which branches here are older than a day?”</em>
             </span>
           </div>
         ) : (
-          agent.items.map((item) => <AgathoRow key={item.id} item={item} />)
+          agent.items.map((item) => <VestaRow key={item.id} item={item} />)
         )}
       </div>
 
-      <div className="agatho-compose">
-        <textarea
-          ref={inputRef}
-          value={text}
-          rows={2}
-          placeholder={`Ask ${AGENT_NAME}…`}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
-        {agent.busy ? (
-          <button className="icon-btn danger" title="Stop" aria-label="Stop" onClick={() => void invoke('agent:cancel', undefined).catch(toastError)}>
-            <Icon name="stop" size={14} />
-          </button>
-        ) : (
-          <button className="icon-btn" title="Send" aria-label="Send" disabled={!text.trim()} onClick={send}>
-            <Icon name="send" size={14} />
-          </button>
+      <div className="vesta-compose">
+        {images.length > 0 && (
+          <div className="vesta-attachments">
+            {images.map((im, i) => (
+              <div key={i} className="attachment">
+                <img src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'Pasted image'} />
+                <button type="button" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label="Remove image">
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
         )}
+        <div className="vesta-compose-row">
+          <textarea
+            ref={inputRef}
+            value={text}
+            rows={2}
+            placeholder={`Ask ${AGENT_NAME}…`}
+            onChange={(e) => setText(e.target.value)}
+            onPaste={onPaste}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+          />
+          {agent.busy ? (
+            <button className="icon-btn danger" title="Stop" aria-label="Stop" onClick={() => void invoke('agent:cancel', undefined).catch(toastError)}>
+              <Icon name="stop" size={14} />
+            </button>
+          ) : (
+            <button className="icon-btn" title="Send" aria-label="Send" disabled={!text.trim() && !images.length} onClick={send}>
+              <Icon name="send" size={14} />
+            </button>
+          )}
+        </div>
       </div>
     </div>,
     document.body
   );
 }
 
-function AgathoRow({ item }: { item: AgentItem }) {
+function VestaRow({ item }: { item: AgentItem }) {
   switch (item.kind) {
     case 'user':
-      return <div className="agatho-msg agatho-user">{item.text}</div>;
+      return (
+        <div className="vesta-msg vesta-user">
+          {!!item.images?.length && (
+            <div className="vesta-msg-images">
+              {item.images.map((im, i) => (
+                <img key={i} src={`data:${im.mimeType};base64,${im.data}`} alt={im.name ?? 'Pasted image'} />
+              ))}
+            </div>
+          )}
+          {item.text}
+        </div>
+      );
     case 'assistant':
-      return <div className="agatho-msg agatho-assistant">{item.text}</div>;
+      return <div className="vesta-msg vesta-assistant">{item.text}</div>;
     case 'error':
       return (
-        <div className="agatho-msg agatho-err">
+        <div className="vesta-msg vesta-err">
           <Icon name="alert" size={12} /> {item.text}
         </div>
       );
     case 'tool':
       return (
-        <div className={`agatho-tool ${item.ok ? '' : 'failed'}`} title={item.detail}>
+        <div className={`vesta-tool ${item.ok ? '' : 'failed'}`} title={item.detail}>
           <Icon name={item.ok ? 'check' : 'alert'} size={11} /> <span>{item.summary}</span>
         </div>
       );
@@ -273,7 +314,7 @@ function ProposalCard({ proposal }: { proposal: AgentProposal }) {
       const ok = await askConfirm({
         title: proposal.actions.length === 1 ? proposal.actions[0].summary : `Apply ${proposal.actions.length} destructive changes?`,
         body: (
-          <ul className="agatho-confirm-list">
+          <ul className="vesta-confirm-list">
             {proposal.actions.map((a, i) => (
               <li key={i}>{a.summary}</li>
             ))}
@@ -287,8 +328,8 @@ function ProposalCard({ proposal }: { proposal: AgentProposal }) {
     await invoke('agent:resolve', { proposalId: proposal.id, approve }).catch(toastError);
   };
   return (
-    <div className={`agatho-proposal ${danger ? 'danger' : ''} ${proposal.status}`}>
-      <div className="agatho-proposal-head">
+    <div className={`vesta-proposal ${danger ? 'danger' : ''} ${proposal.status}`}>
+      <div className="vesta-proposal-head">
         <Icon name={danger ? 'alert' : 'bolt'} size={12} />
         <span>{proposal.title}</span>
       </div>
@@ -301,7 +342,7 @@ function ProposalCard({ proposal }: { proposal: AgentProposal }) {
         ))}
       </ul>
       {pending ? (
-        <div className="agatho-proposal-actions">
+        <div className="vesta-proposal-actions">
           <Button size="sm" variant={danger ? 'danger' : 'primary'} onClick={() => void decide(true)}>
             {proposal.actions.length === 1 ? 'Apply' : `Apply all ${proposal.actions.length}`}
           </Button>
@@ -310,7 +351,7 @@ function ProposalCard({ proposal }: { proposal: AgentProposal }) {
           </Button>
         </div>
       ) : (
-        <div className="agatho-proposal-status">{proposal.status}</div>
+        <div className="vesta-proposal-status">{proposal.status}</div>
       )}
     </div>
   );

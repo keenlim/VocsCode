@@ -1,4 +1,4 @@
-/** Agatho: the in-app assistant. The agent loop is pi's (src/main/harness/pi.ts runs the same
+/** Vesta: the in-app assistant. The agent loop is pi's (src/main/harness/pi.ts runs the same
  *  runtime for whole sessions); what lives here is the part that must not be delegated: the
  *  capability allowlist, the risk tiers, and the rule that nothing which changes state runs
  *  before the user approves it.
@@ -7,11 +7,11 @@
  *  call reaches this class over the bridge in ./pi-runtime.ts before anything is invoked. */
 import { randomUUID } from 'node:crypto';
 import type { AgentClientContext, AgentItem, AgentProposal, AgentState } from '../../shared/agent';
-import type { AppSettings, SessionMeta } from '../../shared/types';
+import type { AppSettings, ImageAttachment, SessionMeta } from '../../shared/types';
 import { PI_ENV_KEYS } from '../harness/pi';
 import { errorMessage, shortId } from '../util/async';
 import { contextBlock, systemPrompt } from './context';
-import { PiAgentRuntime, type AgathoRuntime, type AgathoToolCall, type CapabilityOutcome } from './pi-runtime';
+import { PiAgentRuntime, type VestaRuntime, type VestaToolCall, type CapabilityOutcome } from './pi-runtime';
 import { capabilityFor, piToolDefs, runCapability, summarize, tierOf } from './tools';
 
 /** A proposal nobody answers eventually declines itself rather than pinning the loop open. */
@@ -21,7 +21,7 @@ const MAX_BATCH = 25;
 /** Streaming re-renders are batched to this interval. */
 const PUSH_INTERVAL_MS = 60;
 
-export interface AgathoDeps {
+export interface VestaDeps {
   getSettings(): AppSettings;
   listSessions(): SessionMeta[];
   getSession(id: string): SessionMeta | undefined;
@@ -37,7 +37,7 @@ export interface AgathoDeps {
   /** Working directory for the assistant's pi process; the focused project when there is one. */
   piCwd(): string;
   /** Test seam: build the runtime for one conversation. */
-  createRuntime?(opts: ConstructorParameters<typeof PiAgentRuntime>[0]): AgathoRuntime;
+  createRuntime?(opts: ConstructorParameters<typeof PiAgentRuntime>[0]): VestaRuntime;
 }
 
 /** The gated calls of the assistant message being executed, and the decision they share. */
@@ -48,10 +48,10 @@ interface StepBatch {
   settings: AppSettings;
 }
 
-export class Agatho {
+export class Vesta {
   private items: AgentItem[] = [];
   private busy = false;
-  private runtime: AgathoRuntime | null = null;
+  private runtime: VestaRuntime | null = null;
   /** Settings snapshot for the turn in flight; capabilities are built from it per step. */
   private settings: AppSettings = {} as AppSettings;
   /** The assistant bubble currently streaming. */
@@ -66,14 +66,14 @@ export class Agatho {
   private piPath?: string | null;
   private readonly nonce = randomUUID();
 
-  constructor(private readonly deps: AgathoDeps) {}
+  constructor(private readonly deps: VestaDeps) {}
 
   state(): AgentState {
     return {
       items: this.items,
       busy: this.busy,
       model: this.runtime?.model,
-      unavailable: this.resolvePi() ? undefined : 'pi is not installed. Install it under Settings → Harnesses and Agatho can start.'
+      unavailable: this.resolvePi() ? undefined : 'pi is not installed. Install it under Settings → Harnesses and Vesta can start.'
     };
   }
 
@@ -121,14 +121,15 @@ export class Agatho {
     this.runtime = null;
   }
 
-  async send(text: string, client?: AgentClientContext): Promise<void> {
+  async send(text: string, client?: AgentClientContext, images?: ImageAttachment[]): Promise<void> {
     const message = text.trim();
-    if (!message) return;
+    const attachments = images?.length ? images : undefined;
+    if (!message && !attachments) return;
     if (this.busy) {
-      this.add({ id: shortId('e'), kind: 'error', text: 'Agatho is still working on the previous message. Stop it first.' });
+      this.add({ id: shortId('e'), kind: 'error', text: 'Vesta is still working on the previous message. Stop it first.' });
       return;
     }
-    this.add({ id: shortId('u'), kind: 'user', text: message });
+    this.add({ id: shortId('u'), kind: 'user', text: message, images: attachments });
 
     // Re-resolve so pi installed since the last message is picked up without a restart.
     this.piPath = undefined;
@@ -151,12 +152,12 @@ export class Agatho {
 
     try {
       const runtime = await this.ensureRuntime(bin, active);
-      await runtime.prompt(message, prompt);
+      await runtime.prompt(message, prompt, attachments);
       this.pushNow();
     } catch (error) {
       this.busy = false;
       const detail = errorMessage(error);
-      this.deps.log('warn', `agatho turn failed: ${detail}`);
+      this.deps.log('warn', `vesta turn failed: ${detail}`);
       this.add({ id: shortId('e'), kind: 'error', text: detail });
       this.pushNow();
     }
@@ -164,12 +165,12 @@ export class Agatho {
 
   /* ---------------------------------------------------------------- */
 
-  private async ensureRuntime(bin: string, active: SessionMeta | undefined): Promise<AgathoRuntime> {
+  private async ensureRuntime(bin: string, active: SessionMeta | undefined): Promise<VestaRuntime> {
     if (this.runtime && !this.runtime.dead) return this.runtime;
     await this.runtime?.dispose().catch(() => undefined);
     // Events from a runtime that has been replaced (reset, crashed child) must not touch the
     // transcript; only the runtime in this.runtime now is allowed to.
-    let created: AgathoRuntime | null = null;
+    let created: VestaRuntime | null = null;
     const current = (): boolean => this.runtime === created;
     const opts: ConstructorParameters<typeof PiAgentRuntime>[0] = {
       bin,
@@ -221,7 +222,7 @@ export class Agatho {
     return created;
   }
 
-  /** Provider credentials pi should inherit, so Agatho works from the same keychain. */
+  /** Provider credentials pi should inherit, so Vesta works from the same keychain. */
   private async piEnv(): Promise<NodeJS.ProcessEnv> {
     const env: NodeJS.ProcessEnv = {};
     for (const [providerId, envKey] of Object.entries(PI_ENV_KEYS)) {
@@ -233,7 +234,7 @@ export class Agatho {
   }
 
   /** Settles the assistant bubble and, for gated calls, opens the batch the user reviews. */
-  private finishStep(text: string, calls: AgathoToolCall[]): void {
+  private finishStep(text: string, calls: VestaToolCall[]): void {
     const id = this.stepId;
     this.stepId = null;
     this.stepText = '';
@@ -277,10 +278,10 @@ export class Agatho {
   }
 
   /** Runs one capability after the gate has decided; the model gets the outcome as its tool result. */
-  private async runCall(call: AgathoToolCall): Promise<CapabilityOutcome> {
+  private async runCall(call: VestaToolCall): Promise<CapabilityOutcome> {
     const cap = capabilityFor(call.name);
     if (!cap) {
-      this.deps.log('warn', `agatho asked for an unknown tool: ${call.name}`);
+      this.deps.log('warn', `vesta asked for an unknown tool: ${call.name}`);
       return { ok: false, detail: `Unknown tool "${call.name}". Use only the tools you were given.` };
     }
     const refused = this.refused.get(call.id);

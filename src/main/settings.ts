@@ -227,7 +227,7 @@ function normalizeModelRef(stored: unknown): ModelRef | undefined {
   return m && typeof m.provider === 'string' && typeof m.model === 'string' ? { provider: m.provider, model: m.model } : undefined;
 }
 
-/** Agatho's panel placement; a hand-edited or stale position must not push it off screen. */
+/** Vesta's panel placement; a hand-edited or stale position must not push it off screen. */
 function normalizeAgentSettings(stored: unknown): AppSettings['agent'] {
   const a = (stored ?? {}) as Record<string, unknown>;
   const coord = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : undefined);

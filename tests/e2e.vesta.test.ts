@@ -1,4 +1,4 @@
-/** Real Electron -> preload -> Agatho -> installed Pi, with an offline scripted model.
+/** Real Electron -> preload -> Vesta -> installed Pi, with an offline scripted model.
  *
  *  Proves the things the unit suites cannot: the panel is anchored by its bottom edge and grows
  *  upward, a read capability runs through the real pi bridge without asking, and a declined write
@@ -26,11 +26,11 @@ function invoke<K extends IpcChannel>(win: Page, channel: K, request: IpcRequest
 
 const scripted = (calls: unknown[]) => JSON.stringify({ calls });
 
-describe.runIf(enabled)('electron e2e: Agatho on pi', () => {
+describe.runIf(enabled)('electron e2e: Vesta on pi', () => {
   it('anchors at the bottom, runs a read capability, and applies nothing the user declines', async () => {
     expect(process.env.VOCS_CODE_E2E_UI, 'Set VOCS_CODE_E2E_UI=1 to launch Electron').toBe('1');
     const { cli } = piIntegrationPaths();
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-agatho-app-'));
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-vesta-app-'));
     const userData = path.join(tmp, 'userData');
     const agentDir = path.join(tmp, 'agent');
     const project = path.join(tmp, 'project');
@@ -38,7 +38,7 @@ describe.runIf(enabled)('electron e2e: Agatho on pi', () => {
     try {
       await Promise.all([userData, agentDir, project].map((dir) => fs.mkdir(dir, { recursive: true })));
       // The app resolves `binaries.pi`, so the shim is where the offline scripted provider gets
-      // attached — Agatho's own hermetic flags are untouched.
+      // attached — Vesta's own hermetic flags are untouched.
       const shim = path.join(tmp, process.platform === 'win32' ? 'pi.cmd' : 'pi');
       const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
       const scriptedArgs = ['-e', path.join(root, 'tests', 'fixtures', 'pi-scripted-provider.mjs'), '--offline', '--provider', 'vocs-offline', '--model', 'scripted', '--thinking', 'off'];
@@ -68,8 +68,8 @@ describe.runIf(enabled)('electron e2e: Agatho on pi', () => {
       await expect.poll(() => win.evaluate(() => typeof window.harness?.invoke), { timeout: 30_000 }).toBe('function');
 
       // Open from the avatar the way a user does, then check where the panel sits.
-      await win.getByLabel('Open Agatho').click();
-      const panel = win.getByRole('dialog', { name: 'Agatho' });
+      await win.getByLabel('Open Vesta').click();
+      const panel = win.getByRole('dialog', { name: 'Vesta' });
       await panel.waitFor();
       const parked = (await panel.boundingBox())!;
       const viewport = await win.evaluate(() => window.innerHeight);
@@ -77,7 +77,7 @@ describe.runIf(enabled)('electron e2e: Agatho on pi', () => {
 
       // A read capability runs without a proposal and its result reaches the model. The filler
       // makes the user bubble taller than the panel's empty-state minimum, so growth is visible.
-      const composer = win.getByPlaceholder('Ask Agatho…');
+      const composer = win.getByPlaceholder('Ask Vesta…');
       const filler = 'which sessions are active right now? '.repeat(6);
       await composer.fill(JSON.stringify({ note: filler, calls: [{ id: 'r1', name: 'list_sessions', arguments: {} }] }));
       await composer.press('Enter');
@@ -89,6 +89,19 @@ describe.runIf(enabled)('electron e2e: Agatho on pi', () => {
       const grown = (await panel.boundingBox())!;
       expect(grown.height).toBeGreaterThan(parked.height);
       expect(Math.abs(grown.y + grown.height - (parked.y + parked.height))).toBeLessThanOrEqual(1);
+
+      // A pasted image becomes an attachment, then travels through pi to the model as an image.
+      await win.evaluate(() => {
+        const data = new DataTransfer();
+        data.items.add(new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'pixel.png', { type: 'image/png' }));
+        const textarea = document.querySelector('textarea');
+        textarea?.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+      });
+      await win.getByAltText('pixel.png').waitFor({ timeout: 10_000 });
+      await composer.fill(scripted([]));
+      await composer.press('Enter');
+      await win.getByText('IMAGES_OK').waitFor({ timeout: 60_000 });
+      expect(await win.locator('.vesta-msg-images img').count()).toBe(1);
 
       // A write capability is proposed, and declining leaves the app exactly as it was.
       const sessionsBefore = await invoke(win, 'sessions:list', undefined);
