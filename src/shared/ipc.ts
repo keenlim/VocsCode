@@ -45,6 +45,7 @@ import type {
   SkillHarness,
   SkillRootInfo,
   TranscriptItem,
+  UpdateState,
   UserInput
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
@@ -63,6 +64,12 @@ export interface IpcContract {
   'app:openTerminal': [{ cwd: string }, { ok: boolean; error?: string }];
   'app:pickFolder': [{ defaultPath?: string }, { path: string | null }];
   'app:notify': [{ title: string; body: string }, void];
+  /** In-app auto-update (issue #198). Present only in packaged builds; other builds stay idle. */
+  'update:state': [void, UpdateState];
+  'update:check': [void, UpdateState];
+  'update:download': [void, UpdateState];
+  /** Restarts the app to install a downloaded update; runs the session drain first. */
+  'update:install': [void, void];
   /** A renderer stall (long task, delayed input, timer drift) recorded in the main log. */
   'app:diag': [{ kind: 'longtask' | 'input-delay' | 'loop-lag'; ms: number; detail?: string }, void];
   /** A renderer exception (React render error or an uncaught error/rejection), recorded in the main log. */
@@ -272,7 +279,8 @@ export const PUSH_CHANNELS = {
   terminalData: 'push:terminalData',
   terminalsChanged: 'push:terminalsChanged',
   agentState: 'push:agentState',
-  remoteState: 'push:remoteState'
+  remoteState: 'push:remoteState',
+  updateState: 'push:updateState'
 } as const;
 
 export type PushPayloads = {
@@ -286,6 +294,7 @@ export type PushPayloads = {
   /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
+  'push:updateState': UpdateState;
 };
 
 export type PushChannel = keyof PushPayloads;

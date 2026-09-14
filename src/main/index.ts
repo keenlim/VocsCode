@@ -21,6 +21,8 @@ import { SessionManager } from './session-manager';
 import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
+import { UpdateService } from './updater';
+import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { WebServer } from './web-server';
 
@@ -52,6 +54,7 @@ let sessions: SessionManager | null = null;
 let terminals: TerminalManager | null = null;
 let webServer: WebServer | null = null;
 let remoteHost: RemoteHost | null = null;
+let updater: UpdateService | null = null;
 let processErrorHandlersInstalled = false;
 
 /** Console-only until userData is known (see main()), then also a rotating file under logs/. */
@@ -138,6 +141,8 @@ async function main(): Promise<void> {
     log: (level, message) => log(level, message)
   });
 
+  // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
+  const sessionsChangedHooks: Array<() => void> = [];
   sessions = new SessionManager({
     store,
     settings,
@@ -149,6 +154,7 @@ async function main(): Promise<void> {
     pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);
+      for (const hook of sessionsChangedHooks) hook();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
     notify: (sessionId, title, body) => {
@@ -176,6 +182,26 @@ async function main(): Promise<void> {
     webServer?.broadcast(channel, payload);
     void remoteHost?.broadcastPush(channel, payload);
   };
+
+  // In-app auto-update (issue #198): packaged builds only — never in dev, and opt-out for e2e runs.
+  // The startup check is deferred a beat so the first paint and git reads do not share its network.
+  if (app.isPackaged && !process.env.VOCS_CODE_UPDATER_DISABLE) {
+    updater = new UpdateService({
+      facade: electronUpdaterFacade(logTo),
+      isPackaged: true,
+      isAnySessionLive: () => !!sessionsRef.list().some((s) => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting'),
+      push: (state) => pushAll(PUSH_CHANNELS.updateState, state),
+      log
+    });
+    sessionsChangedHooks.push(() => updater?.notifySessionsChanged());
+    const startupCheck = setTimeout(() => {
+      updater?.check();
+    }, 5_000);
+    startupCheck.unref?.();
+    log('info', 'in-app updates enabled (GitHub Releases)');
+  } else {
+    log('debug', 'in-app updates disabled: unpackaged build' + (process.env.VOCS_CODE_UPDATER_DISABLE ? ' or VOCS_CODE_UPDATER_DISABLE' : ''));
+  }
   terminals = new TerminalManager({
     dir: path.join(userData, 'terminals'),
     settings: () => settings.get().terminal,
@@ -206,6 +232,7 @@ async function main(): Promise<void> {
     analytics,
     search,
     remote: remoteHost,
+    updater: updater ?? undefined,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
     },

@@ -2,7 +2,7 @@
 import { create } from 'zustand';
 import type { AgentState } from '../../shared/agent';
 import { EMPTY_AGENT_STATE } from '../../shared/agent';
-import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem } from '../../shared/types';
+import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
@@ -93,6 +93,8 @@ interface State {
   showThinking: boolean;
   /** Vesta's transcript, mirrored from the main process. */
   agent: AgentState;
+  /** In-app auto-update state (issue #198); idle (never transitions) in dev and web builds. */
+  updateState: UpdateState;
   /** Text another part of the UI wants Vesta's composer to start from. */
   agentPrefill: { text: string; nonce: number } | null;
   toasts: Toast[];
@@ -247,6 +249,7 @@ export const useStore = create<State>((set, get) => ({
   searchJump: null,
   showThinking: true,
   agent: EMPTY_AGENT_STATE,
+  updateState: { status: 'idle' },
   agentPrefill: null,
   toasts: [],
   changesVersion: 0,
@@ -269,7 +272,9 @@ export const useStore = create<State>((set, get) => ({
           on('push:focusSession', ({ sessionId }) => void get().setActive(sessionId).catch(toastError));
           on('push:terminalsChanged', (list) => get().setTerminals(list));
           on('push:agentState', (s) => get().setAgentState(s));
+          on('push:updateState', (s) => set({ updateState: s }));
         }
+        void invoke('update:state', undefined).then((s) => set({ updateState: s })).catch(() => undefined);
         void invoke('agent:state', undefined).then((s) => get().setAgentState(s)).catch(() => undefined);
         const first = sessions.find((s) => !s.archived);
         if (first) await get().setActive(first.id);

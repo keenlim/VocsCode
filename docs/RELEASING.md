@@ -60,6 +60,17 @@ CI builds mac and linux images that cannot be built on a Windows dev machine —
 - **v0.2.0 was bootstrapped by hand** (version bump + CHANGELOG + tag + release created directly, not by the bot): the pre-conventional history isn't parseable, so release-please had nothing to summarize. From v0.3.0 on, the bot does it all — provided ship PRs are rebased (see above).
 - The first ship PR (#200) was merged with a merge commit, which taught us the rebase rule: the bot saw only "Release: develop into master" and skipped the release entirely.
 
+## In-app auto-update
+
+Packaged builds check GitHub Releases themselves through `electron-updater` (issue #198). The feed is
+the `latest.yml` / `latest-mac.yml` manifest `--publish always` writes onto each release; NSIS
+differential updates ride on the `.blockmap` files, and macOS needs the `zip` targets in
+`electron-builder.yml` (the DMG stays the user-facing download). Users can also check manually from
+**Settings → About**; the title-bar pill only appears when there is something to act on, and a
+restart-to-install prompt is held until every session is out of a live turn. Until a release has
+shipped with a signed mac build, mac auto-updates are best-effort (Gatekeeper blocks unsigned
+installers); Windows NSIS and Linux AppImage are the supported update paths.
+
 ## Later
 
-- In-app auto-update via `electron-updater` is tracked in [#198](https://github.com/vocsong/VocsCode/issues/198). It reads these same GitHub Releases.
+- Further release-pipeline polish: signing/notarization for mac (and Windows), so auto-update works everywhere.
