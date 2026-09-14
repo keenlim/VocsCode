@@ -64,6 +64,7 @@ async function makeCtx(harness: HarnessId, extra: Partial<SessionMeta['config']>
     effort: () => meta.config.effort,
     getApiKey: async () => undefined,
     mcpServers: async () => mcp,
+    ownedMcpIds: () => [],
     emit: (event) => {
       events.push(event);
       if (event.type === 'item.upsert') items.set(event.item.id, event.item);

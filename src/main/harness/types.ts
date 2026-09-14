@@ -36,6 +36,12 @@ export interface HarnessContext {
    * commands normalized for the platform. Empty for a harness that cannot take them.
    */
   mcpServers(): Promise<ResolvedServer[]>;
+  /**
+   * Ids this app defines itself, whether or not this session gets them. A harness that reads its
+   * own MCP config must keep them off there when `mcpServers()` does not carry them, so only this
+   * app's copy can start.
+   */
+  ownedMcpIds(): string[];
   emit(event: SessionEvent): void;
   requestApproval(draft: ApprovalDraft): Promise<ApprovalDecision>;
   updateRef(patch: Partial<HarnessRef>): void;

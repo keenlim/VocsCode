@@ -68,7 +68,8 @@ function fixture() {
     log: vi.fn(),
     readJson: async () => null,
     writeJson: async () => undefined,
-    mcpServers: async () => []
+    mcpServers: async () => [],
+    ownedMcpIds: () => []
   } as unknown as HarnessContext;
 
   const adapter = new CodexAppServerAdapter(ctx);

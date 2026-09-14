@@ -55,7 +55,7 @@ async function setup(capabilities: string[], extensionError = false) {
     session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: 'Keep my custom instructions.' } }),
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
     runtime: { resolve: () => ({ path: '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
-    sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [],
+    sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [], ownedMcpIds: () => [],
     emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: () => {},
   } as unknown as HarnessContext;
   return { adapter: new PiAdapter(ctx), events, commands, children };

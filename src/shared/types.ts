@@ -180,6 +180,11 @@ export interface McpBuiltinInfo {
   shared: boolean;
   /** Whether this repo has an index GitNexus can see for the session. */
   indexed: boolean;
+  /**
+   * Whether this app also switches the name off in the harness's own MCP config, so only the one
+   * shared server can run. False for a harness whose config this app does not write.
+   */
+  claimed: boolean;
 }
 
 /** Everything the right-panel MCP tab needs for one session. */

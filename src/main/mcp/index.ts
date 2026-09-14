@@ -48,6 +48,26 @@ function builtinDefs(): McpServerDef[] {
 }
 
 /**
+ * The ids this app defines itself. A harness that loads its own MCP config alongside what this app
+ * injects has to be told to keep them off when the session does not get them.
+ */
+export function builtinServerIds(): string[] {
+  return builtinDefs().map((def) => def.id);
+}
+
+/**
+ * Harnesses whose MCP config this app writes, so it can also switch an owned name off there. Codex
+ * loads `~/.codex/config.toml` underneath whatever it is handed; a harness this app only exports to
+ * keeps whatever its own store declares.
+ */
+const CLAIMING_HARNESSES: HarnessId[] = ['codex', 'codex-exec'];
+
+/** Whether an owned server name can be kept off in that harness's own config. */
+export function canClaimBuiltins(harness: HarnessId): boolean {
+  return CLAIMING_HARNESSES.includes(harness);
+}
+
+/**
  * The harness spawns the scope proxy, which talks to the one shared server and pins every call to
  * the repos this session is allowed to see. Null when the repo is not indexed or the shared server
  * cannot start, so we inject nothing rather than a broken server.
@@ -133,7 +153,8 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
     // The one shared server is on by default; this switch keeps a repo out of it.
     enabled: injectable && !(state.disabledBuiltin ?? []).includes(def.id),
     shared: state.gitnexusGlobal === true,
-    indexed
+    indexed,
+    claimed: canClaimBuiltins(scope.harness)
   }));
   return {
     projectRoot: scope.projectRoot,

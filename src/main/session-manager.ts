@@ -26,7 +26,7 @@ import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
 import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
-import { resolveForSession } from './mcp';
+import { builtinServerIds, resolveForSession } from './mcp';
 import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/types';
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
@@ -496,6 +496,7 @@ export class SessionManager {
           { getSecret: this.deps.getSecret, sharedGitnexus: this.deps.sharedGitnexus, gitnexusProxyPath: this.deps.gitnexusProxyPath, log: (level, message) => this.deps.log(level, `[${id}] ${message}`) }
         );
       },
+      ownedMcpIds: () => builtinServerIds(),
       emit: (event) => this.emit(id, event),
       requestApproval: (draft) => this.requestApproval(id, draft),
       updateRef: (patch: Partial<HarnessRef>) => {

@@ -185,7 +185,8 @@ function makeHarness(opts: { ref?: HarnessRef; permissionMode?: PermissionMode }
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson: async () => null,
     writeJson: async () => undefined,
-    mcpServers: async () => []
+    mcpServers: async () => [],
+    ownedMcpIds: () => []
   } as unknown as HarnessContext;
   const adapter = new AcpAdapter(ctx);
   const h: Harness = { adapter, agent, child, ctx, meta, events, items, approvals, logs };

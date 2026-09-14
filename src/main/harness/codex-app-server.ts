@@ -189,7 +189,11 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         this.ctx.log('warn', `mcp: ${errorMessage(e)}`);
         return [];
       });
-      if (mcp.length) config.mcp_servers = toCodex(mcp, 'inline').config;
+      // Codex loads its own ~/.codex/config.toml under whatever this hands over, so a server this
+      // app defines has to be claimed either way: the shared endpoint when the repo has an index,
+      // otherwise switched off, so that config cannot start a second copy in the session.
+      const mcpServers = toCodex(mcp, 'inline', { owned: this.ctx.ownedMcpIds() }).config;
+      if (Object.keys(mcpServers).length) config.mcp_servers = mcpServers;
       if (Object.keys(config).length) common.config = config;
       let res: { thread: { id: string }; model: string; modelProvider: string; reasoningEffort: string | null };
       if (meta.harnessRef.codexThreadId) {

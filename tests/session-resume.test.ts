@@ -245,7 +245,8 @@ function makeAdapterCtx(opts: { harness: HarnessId; ref?: HarnessRef; permission
     log: (level: string, message: string) => logs.push({ level, message }),
     readJson,
     writeJson,
-    mcpServers: async () => []
+    mcpServers: async () => [],
+    ownedMcpIds: () => []
   } as unknown as HarnessContext;
   return { ctx, meta, events, items, logs, readJson, writeJson };
 }

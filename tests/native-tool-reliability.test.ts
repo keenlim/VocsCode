@@ -51,7 +51,7 @@ function harness(mode: PermissionMode = 'full-auto') {
     emit: (e: SessionEvent) => events.push(e), requestApproval: approval,
     updateRef: (p: object) => Object.assign(meta.harnessRef, p), updateMeta: (p: object) => Object.assign(meta, p),
     readJson: async () => structuredClone(saved), writeJson: async (_name: string, value: unknown) => { saved = structuredClone(value); },
-    log: vi.fn(), mcpServers: async () => [], runtime: {},
+    log: vi.fn(), mcpServers: async () => [], ownedMcpIds: () => [], runtime: {},
   } as unknown as HarnessContext;
   let adapter = new NativeAdapter(ctx);
   return {

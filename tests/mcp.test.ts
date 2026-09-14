@@ -342,6 +342,21 @@ describe('dialects', () => {
     expect(toAcp([http()], { http: true })).toEqual([{ type: 'http', name: 'remote', url: 'https://mcp.example.com/mcp', headers: [] }]);
     expect(toAcp([http({ transport: 'sse' })], { http: true })).toEqual([]);
   });
+
+  it('switches an owned name off for a session that does not receive it', () => {
+    const { config, env } = toCodex([], 'inline', { owned: ['gitnexus'] });
+    expect(config).toEqual({ gitnexus: { enabled: false } });
+    expect(env).toEqual({});
+  });
+
+  it('does not clobber a real entry that shares an owned name', () => {
+    const { config } = toCodex([{ def: stdio({ id: 'gitnexus' }), missing: [], secretEnvKeys: [], secretHeaderKeys: [] }], 'env-ref', { owned: ['gitnexus'] });
+    expect(config.gitnexus).toEqual({ command: 'npx', args: ['-y', 'srv'] });
+  });
+
+  it('adds nothing when this app owns no server names', () => {
+    expect(toCodex([], 'inline').config).toEqual({});
+  });
 });
 
 describe('settings normalisation', () => {
