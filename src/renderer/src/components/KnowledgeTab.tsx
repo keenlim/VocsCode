@@ -309,8 +309,14 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
             <div className="knowledge-meta">
               <h4>GitNexus anchors</h4>
               <ul>
-                {detail.page.meta.anchors.map((a) => (
-                  <li key={`${a.file}:${a.symbol ?? ''}`}><code className="mono">{a.file}</code>{a.symbol ? `#${a.symbol}` : ''}</li>
+                {detail.anchors.map((a) => (
+                  <li key={`${a.file}:${a.symbol ?? ''}`} className="knowledge-anchor">
+                    <code className="mono">{a.file}</code>
+                    {a.symbol ? `#${a.symbol}` : ''}
+                    <Badge tone={a.status === 'resolved' ? 'green' : a.status === 'unresolved' ? 'red' : 'neutral'}>{a.status === 'unavailable' ? 'not checked' : a.status}</Badge>
+                    {a.lines && <span className="muted small">lines {a.lines.start}-{a.lines.end}</span>}
+                    {a.note && <span className="muted small">{a.note}</span>}
+                  </li>
                 ))}
               </ul>
             </div>

@@ -5847,6 +5847,12 @@ body.resizing {
   flex-direction: column;
   gap: 2px;
 }
+.knowledge-anchor {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .knowledge-switches {
   display: flex;
   flex-direction: column;

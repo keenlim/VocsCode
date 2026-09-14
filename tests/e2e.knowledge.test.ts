@@ -51,7 +51,7 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.mkdir(path.join(wiki, 'conventions'), { recursive: true });
     await fs.mkdir(path.join(wiki, '_proposals'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
-    await fs.writeFile(path.join(wiki, 'conventions', 'harness-lifecycle.md'), serializeKnowledgeDocument(pageMeta({}), 'The main process owns harness lifetime.'));
+    await fs.writeFile(path.join(wiki, 'conventions', 'harness-lifecycle.md'), serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), 'The main process owns harness lifetime.'));
     await fs.writeFile(
       path.join(wiki, '_proposals', 'pty-guard.md'),
       serializeKnowledgeDocument(
@@ -155,6 +155,19 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const builtin = win.getByTestId('builtin-vocs-memory');
     await builtin.waitFor({ timeout: 10_000 });
     expect(await builtin.innerText()).toContain('on');
+    await win.getByTestId('panel-bottom-knowledge').click();
+
+    // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
+    // instead of failing or pretending the pointer is good.
+    await win.getByTestId('knowledge-page-conventions/harness-lifecycle').click();
+    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
+    const detail = await win.getByTestId('knowledge-detail').innerText();
+    // innerText reflects the rendered case (the heading is uppercased by CSS) and the flex row
+    // breaks the anchor into separate lines.
+    expect(detail).toContain('GITNEXUS ANCHORS');
+    expect(detail).toContain('buildContext');
+    expect(detail).toContain('not checked');
+    expect(detail).toContain('This project is not indexed by GitNexus.');
 
     await app.close();
     app = null;
