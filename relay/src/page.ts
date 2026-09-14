@@ -1,6 +1,6 @@
 /** code.vocs.io page logic (docs/REMOTE-ACCESS.md): pairing, then a read-only view of the
  *  paired desktop's sessions, transcripts and approval prompts. DOM layer over RelayClient. */
-import { RelayClient } from './web-client';
+import { RelayClient, relayBaseFor } from './web-client';
 import type { TranscriptItem } from '../../src/shared/types';
 
 const client = new RelayClient({ storage: localStorageApi() });
@@ -47,10 +47,9 @@ function setConnection(state: string): void {
 function boot(): void {
   el('pair-form').addEventListener('submit', (ev) => {
     ev.preventDefault();
-    const relay = (el('relay') as HTMLInputElement).value.trim();
     const code = (el('code') as HTMLInputElement).value.trim();
     const name = (el('device-name') as HTMLInputElement).value.trim() || 'Browser';
-    void startPairing(relay, code, name);
+    void startPairing(code, name);
   });
   el('logout').addEventListener('click', () => {
     client.logout();
@@ -138,15 +137,21 @@ async function createSession(): Promise<void> {
   }
 }
 
-async function startPairing(relay: string, code: string, name: string): Promise<void> {
+async function startPairing(code: string, name: string): Promise<void> {
   show('screen-pairing');
   try {
-    await client.pair({ relayBase: relay, code, deviceName: name });
+    await client.pair({ relayBase: relayBaseFor(window.location.origin, relayOverride()), code, deviceName: name });
     await enter();
   } catch (e) {
     el('pair-error').textContent = e instanceof Error ? e.message : String(e);
     show('screen-pair');
   }
+}
+
+/** The web app is served by the relay that routes it, so the base is this page's own origin;
+ *  `?relay=` is the development escape hatch for pointing one build at another deployment. */
+function relayOverride(): string | null {
+  return new URLSearchParams(window.location.search).get('relay');
 }
 
 async function enter(): Promise<void> {

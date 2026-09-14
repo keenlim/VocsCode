@@ -115,12 +115,13 @@ New pieces:
    **Multi-host:** an account may pair several desktops (work PC, home PC, laptop);
    routing is keyed by `(account, host)` and every frame carries the target host id, so
    the web client can browse and drive any of its paired instances.
-3. **Web client** — `code.vocs.io`: a **standalone cloud deployment** of the web shell
-   (Cloudflare Pages/Workers on the vocs.io account) — it is never pointed at a local
-   machine's server; it reaches desktops only through the relay. A distinct web shell
-   around the reused renderer core — different `window.harness` transport,
-   browser-native chrome (desktop titlebar/menu hidden in web builds), slim
-   account/device header, code.vocs.io branding, fully responsive layout (drawer
+3. **Web client** — served at `code.vocs.io/app` on the **same origin as the landing page**: the
+   landing Worker owns the hostname and forwards `/app`, `/v1` and `/ws` to the relay Worker
+   (service binding), so the app, the API and the WebSocket share one origin with no CORS and no
+   second DNS record. It is never pointed at a local machine's server; it reaches desktops only
+   through the relay. A distinct web shell around the reused renderer core — different
+   `window.harness` transport, browser-native chrome (desktop titlebar/menu hidden in web
+   builds), slim account/device header, code.vocs.io branding, fully responsive layout (drawer
    sidebar, touch targets), account/pairing screens, and a few shims. The sidebar
    lists sessions across all paired hosts, grouped by host; interactive ops target the
    host that owns the selected session.
@@ -229,7 +230,8 @@ transcript while the desktop is unreachable. The relay's HTTP surface is now a
 whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
 review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
-Cloudflare account and the `app.code.vocs.io` custom domain on the relay Worker; QR
+Cloudflare account and the landing Worker's service binding to the relay (one origin,
+`code.vocs.io`); QR
 pairing (deferred until the production relay URL exists); P3.5 terminal over WAN.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
@@ -261,7 +263,7 @@ Web (browser)                Relay                      Desktop (host)
    relay, and requests a pairing code.
 2. **Code.** Relay returns a single-use code (`MVBT-K7Q2`, ~2^40 space, 8 chars from a
    32-symbol alphabet — no ambiguous glyphs) with a **5-minute TTL**, plus a QR payload
-   (`https://code.vocs.io/pair?code=…`). Desktop shows the QR **prominently** with the
+   (`https://code.vocs.io/app?code=…`). Desktop shows the QR **prominently** with the
    code as fallback — scanning from a phone opens the web client pre-filled. QR
    rendering is a small, accepted runtime dependency (§11).
 3. **Claim (web).** Logged-in user opens "Add a computer", enters the code or scans the
@@ -454,6 +456,14 @@ static-path check; the relay-side account/pairing header is P2 scope.
   renderer core: browser-native chrome (desktop titlebar/menu hidden in web builds), a
   slim account/device header, code.vocs.io branding. The renderer underneath is
   unchanged; the shell carries the identity. Branding deepens with the cloud track.
+
+- **One origin: landing at the root, app under `/app`.** `code.vocs.io` is the landing page;
+  a login gates the web client, which lives at `code.vocs.io/app` and talks to the relay at
+  `/v1` (REST) and `/ws` (sockets) on that same origin. Cloudflare binds a hostname to one
+  Worker, and path routes to a second Worker on the same host depend on route precedence, so
+  the landing Worker keeps the custom domain and forwards the app paths to the relay through a
+  service binding instead. One origin means one cookie scope, no CORS, and no second DNS
+  record. The earlier `app.code.vocs.io` split is dropped.
 
 - **Fully responsive from day one.** The web client is responsive at launch: sidebar
   collapses to a drawer, panels adapt, touch-friendly targets. The renderer's

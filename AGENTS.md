@@ -78,6 +78,7 @@ Which suite a change must keep passing — and extend, per **E2E discipline**:
 | Project knowledge panel, `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/web-client.test.ts` |
 | Relay routing, auth or rate limiting (`relay/src/routes.ts`, `relay/src/rate.ts`) | `tests/relay-routes.test.ts` + `tests/remote-e2e.test.ts`, `e2e.remote` |
+| Relay web app layout (`relay/public/app/**`, `relay/src/page.ts`) | `tests/relay-page-layout.test.ts` + `tests/web-client.test.ts` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
 `.github/workflows/ci.yml` runs the gate plus `test:e2e:ci` on every PR into `develop`. The live tiers below stay manual.
