@@ -12,6 +12,7 @@ import { ActivityTab } from './analytics/ActivityTab';
 import { Segmented } from './analytics/charts';
 import { buildScope, RANGES, TABS } from './analytics/model';
 import { OverviewTab } from './analytics/OverviewTab';
+import { ReliabilityTab } from './analytics/ReliabilityTab';
 import { SessionsTab } from './analytics/SessionsTab';
 import { SpendTab } from './analytics/SpendTab';
 import { TokensTab } from './analytics/TokensTab';
@@ -118,6 +119,7 @@ export function AnalyticsDashboard() {
             {tab === 'tokens' && <TokensTab scope={scope} summary={summary} />}
             {tab === 'activity' && <ActivityTab scope={scope} summary={summary} />}
             {tab === 'tools' && <ToolsTab scope={scope} summary={summary} />}
+            {tab === 'reliability' && <ReliabilityTab scope={scope} summary={summary} />}
             {tab === 'sessions' && <SessionsTab scope={scope} summary={summary} />}
           </>
         )}

@@ -31,6 +31,7 @@ export const REMOTE_CHANNELS = new Set<string>([
   'sessions:setPermissionMode',
   'approvals:respond',
   'analytics:summary',
+  'analytics:executions',
   'skills:list',
   'skills:read',
   'git:folderBranch',

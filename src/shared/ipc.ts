@@ -49,6 +49,7 @@ import type {
   UserInput
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
+import type { ExecutionRecord } from './analytics/records';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
@@ -193,6 +194,8 @@ export interface IpcContract {
   'agent:reset': [void, void];
 
   'analytics:summary': [{ days?: number } | void, AnalyticsSummary];
+  /** Representative executions for a drill-down: by id, by failure signature or by session; redacted at ingest. */
+  'analytics:executions': [{ ids?: string[]; signature?: string; sessionId?: string; days?: number; limit?: number }, ExecutionRecord[]];
 
   'approvals:respond': [{ sessionId: string; requestId: string; decision: ApprovalDecision }, void];
 

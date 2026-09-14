@@ -75,7 +75,7 @@ function makeDeps(sessions: SessionMeta[], extra: Partial<SessionManagerDeps> = 
     store: { list: () => sessions } as unknown as SessionManagerDeps['store'],
     settings: { get: () => defaultSettings() } as unknown as SessionManagerDeps['settings'],
     runtime: {} as never,
-    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn() } as never,
+    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn(), recordUserMessage: vi.fn() } as never,
     getSecret: async () => undefined,
     pushEvent: vi.fn(),
     pushSessions: vi.fn(),

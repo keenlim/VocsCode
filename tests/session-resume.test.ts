@@ -287,7 +287,7 @@ function makeManagerDeps(store: SessionStore): SessionManagerDeps {
     store,
     settings: { get: () => defaultSettings() } as never,
     runtime: {} as never,
-    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn() } as never,
+    analytics: { touchSession: vi.fn(), recordToolCall: vi.fn(), recordUsage: vi.fn(), recordTurn: vi.fn(), recordUserMessage: vi.fn() } as never,
     getSecret: async () => undefined,
     pushEvent: vi.fn(),
     pushSessions: vi.fn(),

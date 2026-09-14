@@ -24,9 +24,13 @@ import type {
 } from '../shared/types';
 import { modelKeyLabel } from '../shared/model-names';
 import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, emptyCounters, emptyDimensions, emptyFileUsage, emptyToolUsage, emptySlice, harnessModelKey, harnessModelToolUsageRows, harnessToolUsageRows, modelToolUsageRows, toolNameKey, toolUsageRows, totalTokens } from '../shared/usage-rollup';
+import type { ExecutionRecord } from '../shared/analytics/records';
+import { reliabilityReport, type ReliabilityReport } from '../shared/analytics/reliability';
+import { ExecutionLog, type ExecutionContext, type ExecutionQuery } from './analytics-executions';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
+export { EXECUTION_RETENTION } from './analytics-executions';
 
 interface AnalyticsFile {
   version: 2;
@@ -48,6 +52,8 @@ interface AnalyticsFile {
   harnessModelTools: Record<string, Record<string, ToolUsage>>;
   /** File-change counts per path, aggregated from tool results. */
   files: Record<string, FileUsage>;
+  /** Last `--version` each harness reported, stamped on execution records. */
+  harnessVersions?: Record<string, string>;
 }
 
 const EMPTY_FILE: AnalyticsFile = { version: 2, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
@@ -290,7 +296,10 @@ export function migrateCodexCachedInput(data: AnalyticsFile, sessions: SessionMe
   return fixed;
 }
 
-export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, harnessModelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): AnalyticsSummary {
+/** The usage half of a summary; `AnalyticsStore.summary` adds the reliability report from the execution log. */
+export type UsageSummary = Omit<AnalyticsSummary, 'reliability'>;
+
+export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, harnessModelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): UsageSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
     addTotals(acc, s.usage);
@@ -414,6 +423,8 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
 
 export interface AnalyticsDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /** Test hooks for the execution log's environment stamp and retention. */
+  executionLog?: { platform?: string; release?: string; arch?: string; retention?: { maxRecords: number; maxDays: number } };
 }
 
 /** Reads back a session's transcript so sessions predating the store can be backfilled. */
@@ -428,9 +439,15 @@ export class AnalyticsStore {
   private recordedTools = new Set<string>();
   /** Subagent spend awaiting model re-attribution, keyed by session then `provider/model`. */
   private readonly pendingSubagentCost = new Map<string, Map<string, SubagentCost>>();
+  /** Per-execution records behind the reliability analytics. */
+  readonly executions: ExecutionLog;
+  /** Resolves when historical transcripts have been replayed into the execution log. */
+  private backfill: Promise<void> = Promise.resolve();
+  private reliabilityCache?: { key: string; report: ReliabilityReport };
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
     this.file = path.join(userData, 'analytics.json');
+    this.executions = new ExecutionLog(userData, { log: deps.log, ...deps.executionLog });
   }
 
   /**
@@ -450,9 +467,11 @@ export class AnalyticsStore {
       harnessTools: stored?.harnessTools && typeof stored.harnessTools === 'object' ? stored.harnessTools : {},
       recordedTools: Array.isArray(stored?.recordedTools) ? stored.recordedTools.filter((key) => typeof key === 'string').slice(-RECENT_TOOL_LIMIT) : [],
       harnessModelTools: stored?.harnessModelTools && typeof stored.harnessModelTools === 'object' ? stored.harnessModelTools : {},
-      files: stored?.files && typeof stored.files === 'object' ? stored.files : {}
+      files: stored?.files && typeof stored.files === 'object' ? stored.files : {},
+      harnessVersions: stored?.harnessVersions && typeof stored.harnessVersions === 'object' ? stored.harnessVersions : {}
     };
     this.recordedTools = new Set(this.data.recordedTools);
+    await this.executions.load();
     // Fields added after a file was written (speed samples, dimension slices) load as zero rather than NaN.
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
@@ -498,6 +517,67 @@ export class AnalyticsStore {
     }
     if (backfilled) this.deps.log('info', `analytics: backfilled ${backfilled} existing session(s)`);
     await this.flush();
+    // Transcript replay into the execution log runs after load returns so startup never waits on it.
+    if (readTranscript) this.backfill = this.backfillExecutions(existing, readTranscript);
+  }
+
+  /** Resolves once historical transcripts have been replayed into the execution log (tests, shutdown). */
+  whenBackfilled(): Promise<void> {
+    return this.backfill;
+  }
+
+  /**
+   * Replays each known session's transcript into the execution log once. Records are marked
+   * `backfill`; items without output or exit code become `legacy_unclassified`, never guessed.
+   */
+  private async backfillExecutions(existing: SessionMeta[], readTranscript: TranscriptReader): Promise<void> {
+    let sessions = 0;
+    let records = 0;
+    const started = Date.now();
+    for (const meta of existing) {
+      if (this.executions.isBackfilled(meta.id)) continue;
+      let items: TranscriptItem[];
+      try {
+        items = await readTranscript(meta.id);
+      } catch {
+        this.deps.log('warn', `analytics: could not read transcript of ${meta.id} for the execution log`);
+        continue;
+      }
+      const count = this.executions.backfillTranscript(meta.id, items, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel));
+      await this.executions.markBackfilled(meta.id, count);
+      sessions++;
+      records += count;
+      // Yield between sessions so a large history never starves the event loop.
+      await new Promise((r) => setImmediate(r));
+    }
+    if (sessions) {
+      await this.executions.flush();
+      this.deps.log('info', `analytics: replayed ${records} execution(s) from ${sessions} transcript(s) into the execution log in ${Date.now() - started}ms`);
+    }
+  }
+
+  private executionContextOf(harness: string, projectRoot: string, activeModel?: ModelRef, model?: ModelRef, ingest: ExecutionContext['ingest'] = 'live', now = Date.now()): ExecutionContext {
+    return { harness, projectRoot, activeModel, model, harnessVersion: this.data.harnessVersions?.[harness], ingest, now };
+  }
+
+  /** Remembers a harness's reported version so records can be compared across upgrades. */
+  noteHarnessVersion(harness: string, version: string | undefined): void {
+    const v = version?.trim();
+    if (!v) return;
+    const versions = (this.data.harnessVersions ??= {});
+    if (versions[harness] === v) return;
+    versions[harness] = v;
+    this.scheduleWrite();
+  }
+
+  /** A user message opens the session's next turn in the execution log. */
+  recordUserMessage(meta: SessionMeta, item: Extract<TranscriptItem, { kind: 'user' }>, now = Date.now()): void {
+    this.executions.recordUser(meta.id, item, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
+  }
+
+  /** Representative executions for a dashboard drill-down. */
+  queryExecutions(query: ExecutionQuery, now = Date.now()): ExecutionRecord[] {
+    return this.executions.query(query, now);
   }
 
   /**
@@ -601,6 +681,7 @@ export class AnalyticsStore {
     if (session) session.toolCalls += uses;
     // Live per-harness outcomes, so the reliability table accounts for delegated work too.
     addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+    this.executions.recordSubagent(meta.id, completion, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
     this.scheduleWrite();
   }
 
@@ -657,6 +738,8 @@ export class AnalyticsStore {
    * output-speed sample (turn counts come through the usage deltas).
    */
   recordTurn(meta: SessionMeta, turn: Extract<TranscriptItem, { kind: 'turn' }>, now = Date.now()): void {
+    // Every terminal turn closes the execution log's turn, whatever its status; only completed turns time anything.
+    this.executions.recordTurn(meta.id, turn, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
     if (turn.status !== 'completed') return;
     const durationMs = turn.durationMs ?? 0;
     const speed = turnSpeed(turn);
@@ -676,6 +759,11 @@ export class AnalyticsStore {
   /** Records one completed tool call: per-tool counts, per-file changes and today's call volume. */
   recordToolCall(sessionId: string, item: Extract<TranscriptItem, { kind: 'tool' }>, now = Date.now(), activeModel?: ModelRef): void {
     this.collectToolCall(sessionId, item, now, activeModel, true);
+    // The execution log only files calls under a known session: an unknown harness is never guessed.
+    const session = this.data.sessions[sessionId];
+    if (!session || item.status === 'running') return;
+    const sessionModel = session.model ? { provider: session.provider ?? '', model: session.model } : undefined;
+    this.executions.recordTool(sessionId, item, this.executionContextOf(session.harness, session.projectRoot, sessionModel, activeModel, 'live', now));
   }
 
   private rememberTool(key: string): boolean {
@@ -746,12 +834,27 @@ export class AnalyticsStore {
       this.writeTimer = null;
     }
     this.writeQueue = this.writeQueue.then(() => writeJson(this.file, this.data)).catch((e) => this.deps.log('warn', `analytics write failed: ${String(e)}`));
+    await this.executions.flush();
     return this.writeQueue;
   }
 
   /** Summary over the last `dayLimit` days (0 = all time), with the preceding window for comparison. */
   summary(dayLimit = 30, now = Date.now()): AnalyticsSummary {
     const sessions = Object.values(this.data.sessions);
-    return summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.harnessModelTools, this.data.files, dayLimit, now, this.data.harnessTools);
+    return { ...summarize(sessions, this.data.days, this.data.tools, this.data.modelTools, this.data.harnessModelTools, this.data.files, dayLimit, now, this.data.harnessTools), reliability: this.reliability(dayLimit, now) };
+  }
+
+  /** The reliability report for a range, rebuilt only when the log or the day changed. */
+  reliability(dayLimit = 30, now = Date.now()): ReliabilityReport {
+    const key = `${this.executions.version}:${dayLimit}:${dayKey(now)}`;
+    if (this.reliabilityCache?.key === key) return this.reliabilityCache.report;
+    const report = reliabilityReport(this.executions.all() as ExecutionRecord[], [...this.executions.allTurns()], {
+      now,
+      rangeDays: dayLimit,
+      retention: this.executions.retention,
+      retainedFirstTs: this.executions.retainedFirstTs()
+    });
+    this.reliabilityCache = { key, report };
+    return report;
   }
 }

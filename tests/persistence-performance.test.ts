@@ -253,7 +253,7 @@ it('overlays streamed items in persisted order with linear ID work and survives 
     store,
     settings: { get: () => defaultSettings() } as SettingsStore,
     runtime: undefined as unknown as RuntimeResolver,
-    analytics: {} as AnalyticsStore,
+    analytics: { recordUserMessage: vi.fn() } as unknown as AnalyticsStore,
     getSecret: async () => undefined,
     pushEvent: vi.fn(), pushSessions: vi.fn(), notify: vi.fn(), log: vi.fn(),
   };

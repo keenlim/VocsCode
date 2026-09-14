@@ -359,6 +359,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
         }
         const value = await runtime.availability(id);
         availabilityCache.set(id, { at: Date.now(), value });
+        deps.analytics.noteHarnessVersion(id, value.version);
         deps.log('debug', `harness ${id}: ${value.available ? 'available' : 'unavailable'}${value.version ? ` ${value.version}` : ''}${value.binaryPath ? ` at ${value.binaryPath}` : ''}${value.detail ? ` — ${value.detail}` : ''}`);
         out[id] = value;
       })
@@ -573,6 +574,17 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
 
   // `days: 0` is all time; only an absent request falls back to the 30-day default.
   handle('analytics:summary', (req) => deps.analytics.summary(req && typeof req === 'object' && typeof req.days === 'number' ? Math.max(0, req.days) : 30));
+  handle('analytics:executions', (req) => {
+    const q = req && typeof req === 'object' ? req : {};
+    const ids = Array.isArray(q.ids) ? q.ids.filter((x): x is string => typeof x === 'string').slice(0, 200) : undefined;
+    return deps.analytics.queryExecutions({
+      ids,
+      signature: typeof q.signature === 'string' ? q.signature : undefined,
+      sessionId: typeof q.sessionId === 'string' ? q.sessionId : undefined,
+      days: typeof q.days === 'number' ? Math.max(0, q.days) : undefined,
+      limit: typeof q.limit === 'number' ? Math.min(200, Math.max(1, Math.floor(q.limit))) : 50
+    });
+  });
 
   const cwdOf = (sessionId: string) => {
     const m = sessions.get(sessionId);

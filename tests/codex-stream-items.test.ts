@@ -47,7 +47,7 @@ function fixture() {
     store,
     settings: { get: () => defaultSettings() } as unknown as SettingsStore,
     runtime: undefined as unknown as RuntimeResolver,
-    analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn() } as unknown as AnalyticsStore,
+    analytics: { recordUsage: vi.fn(), recordTurn: vi.fn(), touchSession: vi.fn(), recordToolCall: vi.fn(), recordUserMessage: vi.fn() } as unknown as AnalyticsStore,
     getSecret: async () => undefined,
     pushEvent: vi.fn(),
     pushSessions: vi.fn(),

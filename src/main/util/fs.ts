@@ -98,6 +98,38 @@ export async function writeJson(file: string, data: unknown, options: { mode?: n
   }
 }
 
+/** Atomic write of a text file (JSONL logs), serialized per path like `writeJson`. */
+export async function writeText(file: string, text: string): Promise<void> {
+  const run = (writeChain.get(file) ?? Promise.resolve()).then(
+    () => writeTextOnce(file, text),
+    () => writeTextOnce(file, text)
+  );
+  writeChain.set(file, run);
+  try {
+    await run;
+  } finally {
+    if (writeChain.get(file) === run) writeChain.delete(file);
+  }
+}
+
+async function writeTextOnce(file: string, text: string): Promise<void> {
+  await ensureDir(path.dirname(file));
+  const tmp = `${file}.${process.pid}.${Date.now()}.${(tmpCounter = (tmpCounter + 1) % 1_000_000)}.tmp`;
+  try {
+    const handle = await fs.open(tmp, 'w');
+    try {
+      await handle.writeFile(text, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await renameWithRetry(tmp, file);
+  } catch (e) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw e;
+  }
+}
+
 export async function appendLine(file: string, line: string): Promise<void> {
   await ensureDir(path.dirname(file));
   await fs.appendFile(file, line + '\n', 'utf8');
