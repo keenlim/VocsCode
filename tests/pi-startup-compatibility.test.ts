@@ -38,7 +38,8 @@ async function setup(capabilities: string[], extensionError = false) {
       queueMicrotask(() => {
         if (command.type === 'get_state') {
           for (const capability of capabilities) {
-            emit({ type: 'extension_ui_request', method: 'notify', message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: capability === 'stale-tools' ? previousNonce : nonce, capability: capability === 'stale-tools' ? 'tools' : capability }) });
+            const stale = capability.startsWith('stale-');
+            emit({ type: 'extension_ui_request', method: 'notify', message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: stale ? previousNonce : nonce, capability: stale ? capability.slice('stale-'.length) : capability }) });
           }
           if (extensionError) emit({ type: 'extension_error', extensionPath: '/resources/pi/vocs-code-tools.ts', error: 'SDK import failed' });
           previousNonce = nonce;
@@ -62,39 +63,42 @@ async function setup(capabilities: string[], extensionError = false) {
 }
 
 describe('Pi adapter startup capability boundary', () => {
-  it.each([[], ['tools'], ['approvals']])('sends no prompt and never reports idle without both capabilities: %j', async (...caps) => {
+  it.each([[], ['tools'], ['approvals'], ['approvals', 'tools']])('sends no prompt and never reports idle without every capability: %j', async (...caps) => {
     const { adapter, events, commands } = await setup(caps);
     await expect(adapter.send({ text: 'must not reach Pi' })).rejects.toThrow('Incompatible Pi runtime');
     expect(commands.map((command) => command.type)).toEqual(['get_state']);
     expect(events.filter((event) => event.type === 'status' && event.status === 'idle')).toHaveLength(0);
     expect(spawn.shutdownChild).toHaveBeenCalledTimes(1);
   });
-  it('loads both resources and preserves user append instructions before sending one prompt', async () => {
-    const { adapter, events, commands } = await setup(['approvals', 'tools']);
+  it('loads all resources and preserves user append instructions before sending one prompt', async () => {
+    const { adapter, events, commands } = await setup(['approvals', 'tools', 'subagents']);
     await adapter.send({ text: 'accepted' });
     expect(commands.filter((command) => command.type === 'prompt')).toEqual([{ id: expect.any(String), type: 'prompt', message: 'accepted', images: [] }]);
     expect(events.filter((event) => event.type === 'status' && event.status === 'idle')).toHaveLength(1);
     const args = spawn.spawnTool.mock.calls[0][1] as string[];
     expect(args.some((arg) => arg.endsWith('vocs-code-approvals.ts'))).toBe(true);
     expect(args.some((arg) => arg.endsWith('vocs-code-tools.ts'))).toBe(true);
+    expect(args.some((arg) => arg.endsWith('vocs-code-subagents.ts'))).toBe(true);
+    expect(spawn.spawnTool.mock.calls[0][2].env.VOCS_CODE_SUBAGENT_DIR).toContain(path.join('pi', 'subagents'));
     const appends = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
     expect(appends).toHaveLength(2);
     expect(appends[0]).toBe('Keep my custom instructions.');
     expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
     await adapter.dispose();
   });
-  it('fails closed for required extension errors even after both readiness notifications', async () => {
-    const { adapter, commands } = await setup(['approvals', 'tools'], true);
+  it('fails closed for required extension errors even after every readiness notification', async () => {
+    const { adapter, commands } = await setup(['approvals', 'tools', 'subagents'], true);
     await expect(adapter.send({ text: 'must not reach Pi' })).rejects.toThrow('SDK import failed');
     expect(commands.map((command) => command.type)).toEqual(['get_state']);
   });
   it('clears capabilities on relaunch and rejects a stale process nonce', async () => {
-    const caps = ['approvals', 'tools'];
+    const caps = ['approvals', 'tools', 'subagents'];
     const { adapter, commands } = await setup(caps);
     await adapter.start();
     await adapter.dispose();
     caps[1] = 'stale-tools';
-    await expect(adapter.send({ text: 'must not reach new Pi' })).rejects.toThrow('Missing readiness: tools');
+    caps[2] = 'stale-subagents';
+    await expect(adapter.send({ text: 'must not reach new Pi' })).rejects.toThrow('Missing readiness: tools, subagents');
     expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(0);
     expect(spawn.spawnTool.mock.calls[0][2].env.VOCS_CODE_PI_NONCE).not.toBe(spawn.spawnTool.mock.calls[1][2].env.VOCS_CODE_PI_NONCE);
   });

@@ -35,7 +35,16 @@ export default function (pi) {
           const parts = Array.isArray(last?.content) ? last.content : [];
           const content = typeof last?.content === 'string' ? last.content : parts.filter((part) => part.type === 'text').map((part) => part.text).join('');
           const images = parts.filter((part) => part.type === 'image').length;
-          const calls = last?.role === 'user' ? JSON.parse(content).calls ?? [] : [];
+          // Scripted user messages are JSON `{calls: [...]}`. Anything else (a nested child's plain
+          // task prompt, a follow-up turn) answers with text, so subagent runs are scriptable too.
+          let calls = [];
+          if (last?.role === 'user') {
+            try {
+              calls = JSON.parse(content).calls ?? [];
+            } catch {
+              calls = [];
+            }
+          }
           // IMAGES_OK proves the attached image survived the whole Pi pipeline; the tool flows and
           // tool-result turns keep replying COMPAT_OK.
           message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: images ? 'IMAGES_OK' : 'COMPAT_OK' }];

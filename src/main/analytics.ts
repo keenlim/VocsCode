@@ -671,17 +671,42 @@ export class AnalyticsStore {
    */
   recordSubagent(meta: SessionMeta, completion: SubagentCompletion, now = Date.now()): void {
     const uses = Math.max(0, Math.floor(completion.toolUses));
-    if (!uses) return;
+    const usage = completion.usage;
+    if (!uses && !usage) return;
     const day = this.dayFor(dayKey(now));
-    addDay(day, { toolCalls: uses });
-    const by = (day.by ??= emptyDimensions());
-    addToolUsage((by.tool[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
-    addToolUsage((this.data.tools[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
-    const session = this.data.sessions[meta.id];
-    if (session) session.toolCalls += uses;
-    // Live per-harness outcomes, so the reliability table accounts for delegated work too.
-    addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
-    this.executions.recordSubagent(meta.id, completion, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
+    if (uses) {
+      addDay(day, { toolCalls: uses });
+      const by = (day.by ??= emptyDimensions());
+      addToolUsage((by.tool[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+      addToolUsage((this.data.tools[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+      const session = this.data.sessions[meta.id];
+      if (session) session.toolCalls += uses;
+      // Live per-harness outcomes, so the reliability table accounts for delegated work too.
+      addToolUsage(((this.data.harnessTools[meta.config.harness] ??= {})[SUBAGENT_TOOL] ??= emptyToolUsage()), { calls: uses, errors: completion.status === 'error' ? uses : 0, declined: 0, durationMs: 0 });
+      this.executions.recordSubagent(meta.id, completion, this.executionContextOf(meta.config.harness, meta.config.projectRoot, meta.activeModel, undefined, 'live', now));
+    }
+    // A background run's spend never reaches the harness totals, so it enters the day here instead of
+    // through a usage delta. The model slice goes to the model that ran the work, not the active one.
+    if (usage) {
+      const delta: Partial<UsageCounters> = {
+        inputTokens: usage.inputTokens ?? 0,
+        outputTokens: usage.outputTokens ?? 0,
+        cacheReadTokens: usage.cacheReadTokens ?? 0,
+        cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+        reasoningTokens: usage.reasoningTokens ?? 0,
+        costUsd: usage.costUsd ?? 0,
+        turns: usage.turns ?? 0,
+        durationMs: completion.durationMs ?? 0
+      };
+      addDay(day, delta);
+      attribute(day, { id: meta.id, harness: meta.config.harness, projectRoot: meta.config.projectRoot }, delta);
+      const provider = completion.model?.provider;
+      const model = completion.model?.model;
+      if (model) {
+        const by = (day.by ??= emptyDimensions());
+        addSlice(by.model, `${provider ?? ''}/${model}`, model, delta, meta.id);
+      }
+    }
     this.scheduleWrite();
   }
 

@@ -63,7 +63,7 @@ function prime(adapter: PiAdapter): void {
   };
   priv.child = {};
   // send() refuses to prompt unless both readiness capabilities were advertised.
-  priv.extensionCapabilities = new Set(['approvals', 'tools']);
+  priv.extensionCapabilities = new Set(['approvals', 'tools', 'subagents']);
   priv.request = async (type: string) => (type === 'get_session_stats' ? { tokens: { input: 100, output: 40 }, cost: 0.02 } : {});
 }
 

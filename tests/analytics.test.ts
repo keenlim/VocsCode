@@ -848,6 +848,42 @@ describe('subagent accounting', () => {
     expect(s.days.find((d) => d.date === dayKey(t0))!.usage.toolCalls).toBe(37);
     expect(s.harnessTools.find((t) => t.name === 'subagent')?.calls).toBe(37);
   });
+
+  it('adds a background run\'s spend to the day and to the model that ran it, not the active model', () => {
+    const dir = tmpDir();
+    const store = new AnalyticsStore(dir, { log });
+    const t0 = Date.UTC(2025, 5, 10, 12);
+    const m = meta('s1', 'pi', usage({}), { activeModel: { provider: 'openrouter', model: 'main-model' } });
+    store.recordUsage(m, usage({ turns: 1 }), t0);
+    // A background run: the harness totals never saw this spend, so the completion carries it.
+    store.recordSubagent(
+      m,
+      {
+        agentId: 'agent_1',
+        agentType: 'Explore',
+        description: 'Find the registry',
+        status: 'completed',
+        model: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+        toolUses: 3,
+        costUsd: 0.25,
+        durationMs: 4000,
+        usage: { inputTokens: 1000, outputTokens: 100, cacheReadTokens: 50, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.25, turns: 2 }
+      },
+      t0
+    );
+    const summary = store.summary(30, t0 + 1000);
+    const day = summary.days.find((d) => d.date === dayKey(t0))!;
+    expect(day.usage.costUsd).toBeCloseTo(0.25);
+    expect(day.usage.inputTokens).toBe(1000);
+    expect(day.usage.turns).toBe(3);
+    expect(day.usage.durationMs).toBe(4000);
+    expect(day.usage.by!.model['anthropic/claude-haiku-4-5'].costUsd).toBeCloseTo(0.25);
+    expect(day.usage.by!.model['openrouter/main-model']?.costUsd ?? 0).toBeCloseTo(0);
+    expect(day.usage.by!.harness.pi.costUsd).toBeCloseTo(0.25);
+    expect(day.usage.toolCalls).toBe(3);
+    // The session snapshot keeps the harness-reported totals; the subagent split lives in the slices.
+    expect(summary.sessions.find((s) => s.id === 's1')!.usage.turns).toBe(0);
+  });
 });
 
 describe('codex cached-input migration', () => {

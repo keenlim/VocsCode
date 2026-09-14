@@ -19,7 +19,7 @@ export function piIntegrationPaths(): { cli: string; resources: string } {
   const cli = path.join(packageDir, manifest.bin.pi);
   if (!existsSync(cli)) throw new Error(`Pi CLI is unavailable: ${cli}`);
   const resources = path.resolve(process.env.VOCS_CODE_PI_RESOURCES_DIR ?? 'resources/pi');
-  for (const file of ['vocs-code-tools.ts', 'tool-arguments.ts', 'vocs-code-approvals.ts']) {
+  for (const file of ['vocs-code-tools.ts', 'tool-arguments.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts']) {
     if (!existsSync(path.join(resources, file))) throw new Error(`Pi resource is unavailable: ${path.join(resources, file)}`);
   }
   return { cli, resources };
@@ -40,13 +40,16 @@ export class PiOfflineRunner {
       '-e', path.join(resources, 'vocs-code-approvals.ts'),
       ...(options.competing ? ['-e', fixture] : []),
       '-e', path.join(resources, 'vocs-code-tools.ts'),
+      '-e', path.join(resources, 'vocs-code-subagents.ts'),
       ...(!options.competing ? ['-e', fixture] : []),
       '--provider', 'vocs-offline', '--model', 'scripted', '--thinking', 'off', ...(options.extraArgs ?? ['--no-session'])];
     this.child = spawn(process.execPath, args, {
       cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
       env: { ...process.env, PI_CODING_AGENT_DIR: options.agentDir, PI_OFFLINE: '1', PI_TELEMETRY: '0',
         VOCS_CODE_PI_NONCE: 'offline-process', VOCS_CODE_PERMISSION_MODE: options.mode ?? 'full-auto',
-        VOCS_CODE_MODE_FILE: options.modeFile ?? '', VOCS_CODE_PI_COMPETING_TOOL: options.competing ? '1' : '0' },
+        VOCS_CODE_MODE_FILE: options.modeFile ?? '', VOCS_CODE_SUBAGENT_DIR: path.join(options.agentDir, 'subagents'),
+        VOCS_CODE_SUBAGENT_COMPLETION_MS: '10',
+        VOCS_CODE_PI_COMPETING_TOOL: options.competing ? '1' : '0' },
     });
     this.child.stderr?.on('data', (data: Buffer) => { this.stderr += data.toString(); });
     this.child.stdout?.on('data', (data: Buffer) => splitter.push(data));

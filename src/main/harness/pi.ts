@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
@@ -18,6 +18,10 @@ const PI_BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
 const PI_READY_MARKER = 'VCODE_PI_READY::';
 const PI_EXTENSION_ERROR_MARKER = 'VCODE_PI_ERROR::';
 const PI_TOOL_INPUT_MARKER = 'VCODE_PI_TOOL_INPUT::';
+/** Vocs Code's own subagent extension reports run activity as these notifications. */
+const PI_SUBAGENT_MARKER = 'VCODE_SUBAGENT::';
+/** Tool names our subagent extension registers; their cards read as agent work, not shell work. */
+const SUBAGENT_TOOLS = new Set(['subagent', 'subagent_result', 'subagent_steer']);
 
 /** pi-subagents' completion payload, as it reaches us on the tool result or the custom notification. */
 interface PiSubagentDetails {
@@ -175,6 +179,8 @@ export class PiAdapter implements HarnessAdapter {
   private readonly recordedSubagents = new Set<string>();
   /** Subagent spend since the last usage report, keyed `provider/model`, for model re-attribution. */
   private readonly pendingSubagentCost = new Map<string, SubagentCost>();
+  /** Live Vocs Code subagent runs by run id, until their terminal record arrives. */
+  private readonly subagentRuns = new Map<string, { agent: string; description: string; mode: 'foreground' | 'background'; provider?: string; model?: string; startedAt: number; costUsd: number; turns: number; toolUses: number }>();
   private exited = false;
   private modeFile: string | null = null;
   private extensionNonce = '';
@@ -199,6 +205,7 @@ export class PiAdapter implements HarnessAdapter {
     this.subagentModelNames.clear();
     this.recordedSubagents.clear();
     this.pendingSubagentCost.clear();
+    this.subagentRuns.clear();
     const meta = this.ctx.session();
     const s = this.ctx.settings();
     const intendedEffort = this.ctx.effort();
@@ -207,6 +214,7 @@ export class PiAdapter implements HarnessAdapter {
     const ext = this.ctx.runtime.resource('pi', 'vocs-code-approvals.ts');
     const toolsExt = this.ctx.runtime.resource('pi', 'vocs-code-tools.ts');
     const mcpExt = this.ctx.runtime.resource('pi', 'vocs-code-mcp.ts');
+    const subagentsExt = this.ctx.runtime.resource('pi', 'vocs-code-subagents.ts');
     const sessionDir = path.join(this.ctx.sessionDir, 'pi');
     await fs.mkdir(sessionDir, { recursive: true });
 
@@ -221,7 +229,7 @@ export class PiAdapter implements HarnessAdapter {
 
     // The MCP bridge extension reads this file and registers each server's tools with pi.
     const mcpServers = await this.ctx.mcpServers();
-    const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '--session-dir', sessionDir];
+    const args = ['--mode', 'rpc', '-e', ext, '-e', toolsExt, '-e', subagentsExt, '--session-dir', sessionDir];
     let mcpConfigFile: string | null = null;
     if (mcpServers.length) {
       args.push('-e', mcpExt);
@@ -244,7 +252,7 @@ export class PiAdapter implements HarnessAdapter {
     await fs.writeFile(this.modeFile, this.ctx.permissionMode(), 'utf8');
     this.effortFile = path.join(sessionDir, 'reasoning-effort.json');
     await this.writeEffortConfig(intendedEffort, meta.config.model);
-    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE: '1' };
+    const env: NodeJS.ProcessEnv = { ...process.env, VOCS_CODE_PERMISSION_MODE: this.ctx.permissionMode(), VOCS_CODE_MODE_FILE: this.modeFile, VOCS_CODE_PI_NONCE: this.extensionNonce, VOCS_CODE_EFFORT_FILE: this.effortFile, VOCS_CODE_SUBAGENT_DIR: path.join(sessionDir, 'subagents'), VOCS_CODE: '1' };
     if (mcpConfigFile) env.VOCS_CODE_MCP_CONFIG = mcpConfigFile;
     for (const [pid, envKey] of Object.entries(PI_ENV_KEYS)) {
       if (!env[envKey]) {
@@ -290,7 +298,7 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private assertExtensionsReady(): void {
-    const missing = ['approvals', 'tools'].filter((capability) => !this.extensionCapabilities.has(capability));
+    const missing = ['approvals', 'tools', 'subagents'].filter((capability) => !this.extensionCapabilities.has(capability));
     if (this.extensionFailure || missing.length) {
       throw new Error(`Incompatible Pi runtime: Vocs Code requires working approvals and tool compatibility extensions (Pi 0.85.1 APIs). ${this.extensionFailure ?? `Missing readiness: ${missing.join(', ')}.`} Update Pi or disable conflicting extensions; no prompt was sent.`);
     }
@@ -469,7 +477,7 @@ export class PiAdapter implements HarnessAdapter {
       }
       case 'extension_error': {
         const e = ev as { extensionPath?: string; error?: string };
-        if (!e.extensionPath || /vocs-code-(?:tools|approvals)\.[cm]?[jt]s$/.test(e.extensionPath)) {
+        if (!e.extensionPath || /vocs-code-(?:tools|approvals|subagents)\.[cm]?[jt]s$/.test(e.extensionPath)) {
           this.extensionFailure = e.error ?? 'Required Pi extension failed.';
           this.extensionCapabilities.clear();
         }
@@ -491,9 +499,9 @@ export class PiAdapter implements HarnessAdapter {
 
   private startTool(id: string, name: string, args: Record<string, unknown>): void {
     if (this.toolItems.has(id)) return;
+    const hint = name === 'bash' || name === 'powershell' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'ls' ? 'search' : SUBAGENT_TOOLS.has(name) ? 'agent' : 'other';
     const summary =
-      typeof args?.command === 'string' ? (args.command as string) : toolPath(args) !== undefined ? toolPath(args) : typeof args?.pattern === 'string' ? (args.pattern as string) : truncate(JSON.stringify(args ?? {}), 200, '…');
-    const hint = name === 'bash' || name === 'powershell' ? 'execute' : name === 'edit' || name === 'write' ? 'edit' : name === 'read' ? 'read' : name === 'grep' || name === 'find' || name === 'ls' ? 'search' : 'other';
+      typeof args?.command === 'string' ? (args.command as string) : typeof args?.description === 'string' ? (args.description as string) : toolPath(args) !== undefined ? toolPath(args) : typeof args?.pattern === 'string' ? (args.pattern as string) : truncate(JSON.stringify(args ?? {}), 200, '…');
     const item: Extract<TranscriptItem, { kind: 'tool' }> = { id, kind: 'tool', ts: Date.now(), name, hint, input: args, summary, status: 'running' };
     this.toolItems.set(id, item);
     this.ctx.emit({ type: 'item.upsert', item });
@@ -503,6 +511,114 @@ export class PiAdapter implements HarnessAdapter {
       this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
       this.currentAssistant = null;
     }
+  }
+
+  /**
+   * Live activity from Vocs Code's own subagent extension. Runs are already durable in
+   * `<sessionDir>/subagents/<runId>.jsonl`; this translates them into app events: a live run view
+   * for the panel and, on the terminal record, the completion analytics has always consumed.
+   */
+  private handleSubagentEvent(raw: string): void {
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      this.ctx.log('warn', 'pi: malformed subagent notification');
+      return;
+    }
+    const runId = typeof payload.runId === 'string' ? payload.runId : '';
+    if (!runId) return;
+    const kind = payload.kind;
+    const number = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+    const text = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined);
+    if (kind === 'start') {
+      const run = {
+        agent: text(payload.agent) ?? 'general-purpose',
+        description: text(payload.description) ?? '',
+        mode: payload.mode === 'background' ? ('background' as const) : ('foreground' as const),
+        provider: text(payload.provider),
+        model: text(payload.model),
+        startedAt: number(payload.startedAt) || Date.now(),
+        costUsd: 0,
+        turns: 0,
+        toolUses: 0
+      };
+      this.subagentRuns.set(runId, run);
+      this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', ...(run.provider ? { provider: run.provider } : {}), ...(run.model ? { model: run.model } : {}), startedAt: run.startedAt } });
+      return;
+    }
+    const run = this.subagentRuns.get(runId);
+    if (kind === 'call' && run) {
+      const call = (payload.call ?? {}) as Record<string, unknown>;
+      run.costUsd += number(call.costUsd);
+      run.turns += 1;
+      const live: SubagentRunUpdate = { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt };
+      this.ctx.emit({ type: 'subagent.run', run: live });
+      return;
+    }
+    if (kind === 'item' && run) {
+      const item = (payload.item ?? {}) as Record<string, unknown>;
+      if (item.kind === 'tool' && item.status && item.status !== 'running') {
+        run.toolUses += 1;
+        this.ctx.emit({ type: 'subagent.run', run: { runId, agent: run.agent, description: run.description, mode: run.mode, status: 'running', costUsd: run.costUsd, turns: run.turns, toolUses: run.toolUses, startedAt: run.startedAt } });
+      }
+      return;
+    }
+    if (kind !== 'end') return;
+    const totals = (payload.totals ?? {}) as Record<string, unknown>;
+    const status = text(payload.status) ?? 'error';
+    const endedAt = number(payload.endedAt) || Date.now();
+    const model = run?.provider && run.model ? { provider: run.provider, model: run.model } : undefined;
+    const tokens = number(totals.inputTokens) + number(totals.outputTokens) + number(totals.cacheReadTokens) + number(totals.cacheWriteTokens);
+    this.ctx.emit({
+      type: 'subagent',
+      completion: {
+        agentId: runId,
+        ...(run?.description ? { description: run.description } : {}),
+        status,
+        ...(model ? { model } : {}),
+        toolUses: number(totals.toolUses) || run?.toolUses || 0,
+        costUsd: number(totals.costUsd),
+        tokens,
+        durationMs: number(totals.durationMs),
+        ...(text(payload.error) ? { error: text(payload.error) } : {}),
+        ...(run?.agent ? { agentType: run.agent } : {}),
+        // A background run's spend never reaches the harness totals, so analytics adds it here.
+        // Foreground spend is already folded in through the tool result; reporting it again would double it.
+        ...(run?.mode === 'background'
+          ? {
+              usage: {
+                inputTokens: number(totals.inputTokens),
+                outputTokens: number(totals.outputTokens),
+                cacheReadTokens: number(totals.cacheReadTokens),
+                cacheWriteTokens: number(totals.cacheWriteTokens),
+                reasoningTokens: number(totals.reasoningTokens),
+                costUsd: number(totals.costUsd),
+                turns: number(totals.turns)
+              }
+            }
+          : {})
+      }
+    });
+    this.ctx.emit({
+      type: 'subagent.run',
+      run: {
+        runId,
+        agent: run?.agent ?? 'general-purpose',
+        description: run?.description ?? '',
+        mode: run?.mode ?? 'foreground',
+        status: status === 'completed' || status === 'error' || status === 'stopped' || status === 'interrupted' ? status : 'error',
+        ...(run?.provider ? { provider: run.provider } : {}),
+        ...(run?.model ? { model: run.model } : {}),
+        startedAt: run?.startedAt ?? endedAt,
+        endedAt,
+        costUsd: number(totals.costUsd),
+        turns: number(totals.turns),
+        toolUses: number(totals.toolUses),
+        ...(text(payload.error) ? { error: text(payload.error) } : {})
+      }
+    });
+    this.subagentRuns.delete(runId);
   }
 
   /** Captures the model and terminal stats pi-subagents puts on an Agent / get_subagent_result tool result. */
@@ -685,12 +801,16 @@ export class PiAdapter implements HarnessAdapter {
   }
 
   private handleExtensionNotification(message: string): boolean {
+    if (message.startsWith(PI_SUBAGENT_MARKER)) {
+      this.handleSubagentEvent(message.slice(PI_SUBAGENT_MARKER.length));
+      return true;
+    }
     const marker = [PI_READY_MARKER, PI_EXTENSION_ERROR_MARKER, PI_TOOL_INPUT_MARKER].find((prefix) => message.startsWith(prefix));
     if (!marker) return false;
     try {
       const payload = JSON.parse(message.slice(marker.length)) as Record<string, unknown>;
       if (!payload || payload.version !== 1 || !this.extensionNonce || payload.nonce !== this.extensionNonce) return true;
-      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools')) {
+      if (marker === PI_READY_MARKER && (payload.capability === 'approvals' || payload.capability === 'tools' || payload.capability === 'subagents')) {
         if (payload.ready === false) this.extensionCapabilities.delete(payload.capability);
         else this.extensionCapabilities.add(payload.capability);
       } else if (marker === PI_EXTENSION_ERROR_MARKER) {

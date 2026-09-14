@@ -50,6 +50,7 @@ npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
 # In-app auto-update (issue #198) against a staged mock update feed (stages resources/app-update.yml in dist/win-unpacked).
 npm run dist:dir && VOCS_CODE_E2E_UI=1 HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.update.test.ts
+VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts
 ```
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
@@ -68,6 +69,7 @@ Which suite a change must keep passing — and extend, per **E2E discipline**:
 | Approval cards, `harness/permissions.ts` | `e2e.approval` (live) |
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
+| pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
 `.github/workflows/ci.yml` runs the gate plus `test:e2e:ci` on every PR into `develop`. The live tiers below stay manual.
@@ -101,7 +103,7 @@ Key invariants:
 - Adapters implement `HarnessAdapter` (`src/main/harness/types.ts`) and receive a `HarnessContext`. Adapters must not import Electron.
 - The terminal lives in the main process; the renderer re-attaches to snapshots and must never own PTY lifetime.
 - API keys live only in the OS keychain via `src/main/secrets.ts` (`safeStorage`). Never write keys to settings, logs, transcripts, or the repo.
-- Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`.
+- Dangerous commands (`rm -rf`, force-push, `sudo`, pipe-to-shell, …) and any write outside the workspace always prompt below Full access, even after "Allow for session". Logic lives in `src/main/harness/permissions.ts`; the pi side of the same rules lives in `resources/pi/subagent-gate.ts`, which both the parent approvals extension and every subagent child decide through.
 - Sessions must resume after restart for every harness; keep that path working when touching persistence.
 
 ## Adding a harness
