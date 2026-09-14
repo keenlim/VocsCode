@@ -51,6 +51,8 @@ import type {
 import type { AgentClientContext, AgentState } from './agent';
 import type { ExecutionRecord } from './analytics/records';
 import type { SubagentRun, SubagentRunSummary } from './subagents';
+import type { AgentFileFields, ParsedAgentFile } from './agent-files';
+import type { ProjectAgentInfo } from './agent-info';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
@@ -168,6 +170,15 @@ export interface IpcContract {
   'subagents:stop': [{ id: string; runId: string }, { ok: boolean; error?: string }];
   /** Sends a mid-run instruction to one running subagent. */
   'subagents:steer': [{ id: string; runId: string; message: string }, { ok: boolean; error?: string }];
+  /** The project's subagent definitions, the shipped templates, and their git state. */
+  'agents:list': [{ id: string }, ProjectAgentInfo];
+  /** One definition's file contents, for the editor. */
+  'agents:get': [{ id: string; name: string }, ParsedAgentFile | null];
+  /** Writes a definition, creating the project's ignore rule when it is the first one. */
+  'agents:save': [{ id: string; fields: AgentFileFields; prompt: string }, { ok: boolean; path?: string; error?: string }];
+  'agents:delete': [{ id: string; name: string }, { ok: boolean; error?: string }];
+  /** Shares one definition with the repo, or keeps it local again. */
+  'agents:track': [{ id: string; name: string; tracked: boolean }, { ok: boolean; error?: string }];
   /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
   'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];

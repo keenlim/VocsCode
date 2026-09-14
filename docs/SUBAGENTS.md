@@ -126,7 +126,13 @@ is: write them, ignore them, and let the owner decide. `.pi/agents/*` belongs in
 "track this one" for anything the whole team should share. Committed agents arrive with the branch;
 untracked ones live in the main checkout, which is exactly why the project root is authoritative.
 
-> **Not built yet.** The manager UI (list effective types with their origin, create from template,
+**Managing them**: the Subagents tab's **Agents** view lists the project's definitions (with each
+one's git state) and the shipped templates, creates a definition from a template or from scratch,
+edits every frontmatter field, deletes one, and toggles **Track** per definition. Writes go to
+`<projectRoot>/.pi/agents/<name>.md`; the first write adds `.pi/agents/*` to the repo's `.gitignore`,
+and Track adds the matching `!.pi/agents/<name>.md` so exactly that one file can be committed. A
+running session keeps the set it started with — a change applies to the next session (or a `/reload`).
+
 edit, delete, and the track/ignore toggle) is the remaining piece; today the interface is the files
 plus the tool description the model is given. Until then a project agent is created by writing
 `<projectRoot>/.pi/agents/<name>.md`.

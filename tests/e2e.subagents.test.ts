@@ -12,6 +12,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
@@ -82,6 +83,13 @@ async function seedSession(userData: string, project: string): Promise<void> {
   await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
   const dir = path.join(userData, 'sessions', SEED_SESSION_ID);
   await fs.mkdir(path.join(dir, 'pi', 'subagents'), { recursive: true });
+  // A project definition, so the Agents view has something that belongs to the repo.
+  await fs.mkdir(path.join(project, '.pi', 'agents'), { recursive: true });
+  await fs.writeFile(
+    path.join(project, '.pi', 'agents', 'reviewer.md'),
+    ['---', 'name: reviewer', 'description: Reviews a diff against the repo rules', 'tools: read, grep', 'prompt_mode: replace', '---', 'You review diffs.'].join('\n'),
+    'utf8'
+  );
   const items = [
     { id: 'u1', kind: 'user', ts: Date.now(), text: 'Find where the harness registry lives.' },
     { id: 't1', kind: 'tool', ts: Date.now(), name: 'subagent', hint: 'agent', summary: 'Find the registry', status: 'done', runId: 'agent_seed1', output: 'The registry is at src/main/harness/registry.ts' }
@@ -154,6 +162,60 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await win.waitForSelector('.panel-section.panel-bottom', { timeout: 30_000 });
       await win.getByTestId('panel-bottom-subagents').click();
       await win.locator('.subagent-row:has-text("Explore")').first().waitFor({ timeout: 20_000 });
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }, 180_000);
+
+  it('lists the project definition, copies a template into the project and ignores it', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-subagents-agents-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    await seedSession(userData, project);
+    // The tracking affordance only exists inside a repository, so make the project one.
+    await new Promise<void>((resolve) => execFile('git', ['init', '-q'], { cwd: project }, () => resolve()));
+    try {
+      const win = await launch(userData);
+      await win.waitForSelector('.panel', { timeout: 30_000 });
+      await win.getByTestId('panel-bottom-subagents').click();
+      await win.getByTestId('subagent-view-agents').click();
+
+      // The repo's own definition is listed, marked local, with its description.
+      const tile = win.locator('[data-testid="agent-reviewer"]');
+      await tile.waitFor({ timeout: 20_000 });
+      const tileText = await tile.innerText();
+      expect(tileText).toContain('reviewer');
+      expect(tileText).toContain('Reviews a diff against the repo rules');
+      expect(tileText).toContain('local');
+
+      // Copying a template opens the editor with the template's prompt and an empty name.
+      await win.locator('[data-testid="agent-templates"] button').first().click();
+      const editor = win.locator('.agent-editor');
+      await editor.waitFor({ timeout: 10_000 });
+      expect((await editor.locator('textarea').inputValue()).length).toBeGreaterThan(0);
+      await editor.locator('input').first().fill('searcher');
+      await editor.locator('input').nth(1).fill('Searches the repo for a symbol');
+      await editor.getByRole('button', { name: 'Save' }).click();
+
+      // The file lands in the project and the repo is told to ignore the folder.
+      const wrote = async (file: string) => fs.readFile(file, 'utf8').then(() => true).catch(() => false);
+      await expect.poll(() => wrote(path.join(project, '.pi', 'agents', 'searcher.md')), { timeout: 20_000 }).toBe(true);
+      const written = await fs.readFile(path.join(project, '.pi', 'agents', 'searcher.md'), 'utf8');
+      expect(written).toContain('name: searcher');
+      expect(written).toContain('Searches the repo for a symbol');
+      expect(await fs.readFile(path.join(project, '.gitignore'), 'utf8')).toContain('.pi/agents/*');
+      // …and it shows up in the list as a local definition.
+      await win.locator('[data-testid="agent-searcher"]').waitFor({ timeout: 20_000 });
+
+      // Sharing is explicit: tracking one definition un-ignores just that file.
+      await win.locator('[data-testid="agent-searcher"] .agent-tile-track').click();
+      const tracked = async () => (await fs.readFile(path.join(project, '.gitignore'), 'utf8')).includes('!.pi/agents/searcher.md');
+      await expect.poll(tracked, { timeout: 20_000 }).toBe(true);
     } finally {
       await app?.close().catch(() => undefined);
       app = null;
