@@ -10,7 +10,7 @@ export default function (pi) {
     ctx.ui.notify('PI_FIXTURE_TOOLS::' + JSON.stringify({ active: pi.getActiveTools(), tools: pi.getAllTools() }), 'info');
   });
   pi.on('before_agent_start', (event, ctx) => {
-    ctx.ui.notify('PI_FIXTURE_PROMPT::' + JSON.stringify({ systemPrompt: event.systemPrompt }), 'info');
+    ctx.ui.notify('PI_FIXTURE_PROMPT::' + JSON.stringify({ systemPrompt: event.systemPrompt, images: (event.images ?? []).length }), 'info');
   });
   pi.on('tool_result', (event, ctx) => {
     ctx.ui.notify('PI_FIXTURE_EXECUTED::' + JSON.stringify({ toolCallId: event.toolCallId }), 'info');
@@ -32,9 +32,13 @@ export default function (pi) {
         try {
           if (options?.signal?.aborted) throw new Error('Aborted');
           const last = context.messages.at(-1);
-          const content = typeof last?.content === 'string' ? last.content : (last?.content ?? []).filter((part) => part.type === 'text').map((part) => part.text).join('');
+          const parts = Array.isArray(last?.content) ? last.content : [];
+          const content = typeof last?.content === 'string' ? last.content : parts.filter((part) => part.type === 'text').map((part) => part.text).join('');
+          const images = parts.filter((part) => part.type === 'image').length;
           const calls = last?.role === 'user' ? JSON.parse(content).calls ?? [] : [];
-          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: 'COMPAT_OK' }];
+          // IMAGES_OK proves the attached image survived the whole Pi pipeline; the tool flows and
+          // tool-result turns keep replying COMPAT_OK.
+          message.content = calls.length ? calls.map((call) => ({ type: 'toolCall', ...call })) : [{ type: 'text', text: images ? 'IMAGES_OK' : 'COMPAT_OK' }];
           message.stopReason = calls.length ? 'toolUse' : 'stop';
           stream.push({ type: 'start', partial: message });
           for (const [contentIndex, part] of message.content.entries()) {

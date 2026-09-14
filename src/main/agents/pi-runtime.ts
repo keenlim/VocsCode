@@ -1,7 +1,7 @@
-/** Drives one pi coding-agent process over its JSON-RPC stdio protocol for Agatho.
+/** Drives one pi coding-agent process over its JSON-RPC stdio protocol for Vesta.
  *
- *  Agatho's tools are app capabilities rather than file tools, so pi is started with a dedicated
- *  extension (resources/pi/vocs-code-agatho.ts) that forwards every tool call back here over the
+ *  Vesta's tools are app capabilities rather than file tools, so pi is started with a dedicated
+ *  extension (resources/pi/vocs-code-vesta.ts) that forwards every tool call back here over the
  *  extension-UI channel — the same round trip the approvals extension uses. This class owns the
  *  child process, the turn lifecycle and the transcript callbacks; the allowlist and the
  *  approve-before-anything-changes gate stay with the caller (see ./index.ts). */
@@ -9,17 +9,17 @@ import type { ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ModelRef } from '../../shared/types';
+import type { ImageAttachment, ModelRef } from '../../shared/types';
 import { deferred, errorMessage, LineSplitter, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool } from '../harness/spawn';
 
 /** Marker the bridge extension puts in the `select` title; the resource holds its own copy. */
-const AGATHO_CALL_MARKER = 'VCODE_AGATHO_CALL::';
-const AGATHO_READY_MARKER = 'VCODE_AGATHO_READY::';
-const AGATHO_ERROR_MARKER = 'VCODE_AGATHO_ERROR::';
+const VESTA_CALL_MARKER = 'VCODE_VESTA_CALL::';
+const VESTA_READY_MARKER = 'VCODE_VESTA_READY::';
+const VESTA_ERROR_MARKER = 'VCODE_VESTA_ERROR::';
 
 /** One capability call the model asked for. `id` is pi's tool-call id. */
-export interface AgathoToolCall {
+export interface VestaToolCall {
   id: string;
   name: string;
   args: Record<string, unknown>;
@@ -37,19 +37,19 @@ export interface PiAgentEvents {
   /** Streaming text for the current step. */
   text(delta: string): void;
   /** The assistant step finished; `calls` are its tool calls in order. */
-  stepEnd(text: string, calls: AgathoToolCall[]): void;
+  stepEnd(text: string, calls: VestaToolCall[]): void;
   /** The whole turn settled: no retry, compaction or queued continuation is left. */
   settled(error: string | undefined): void;
   /** The pi process ended on its own (crash, kill) rather than through quit(). */
   exited(detail: string): void;
   /** The extension asked the app to run one capability; the result goes back to the model. */
-  run(call: AgathoToolCall): Promise<CapabilityOutcome>;
+  run(call: VestaToolCall): Promise<CapabilityOutcome>;
 }
 
 export interface PiAgentOptions {
   /** Resolved pi binary. */
   bin: string;
-  /** The capability bridge extension (resources/pi/vocs-code-agatho.ts). */
+  /** The capability bridge extension (resources/pi/vocs-code-vesta.ts). */
   extension: string;
   /** Plain tool definitions written for the extension to register. */
   tools: { name: string; description: string; parameters: Record<string, unknown> }[];
@@ -65,12 +65,12 @@ export interface PiAgentOptions {
 }
 
 /** What the orchestrator needs from a runtime, so tests can script one without a child process. */
-export interface AgathoRuntime {
+export interface VestaRuntime {
   readonly model: string | undefined;
   readonly busy: boolean;
   /** True once the process died; the orchestrator replaces the runtime rather than reviving it. */
   readonly dead: boolean;
-  prompt(message: string, systemPrompt: string): Promise<void>;
+  prompt(message: string, systemPrompt: string, images?: ImageAttachment[]): Promise<void>;
   abort(): void;
   dispose(): Promise<void>;
 }
@@ -92,7 +92,7 @@ interface UiRequest {
   options?: string[];
 }
 
-export class PiAgentRuntime implements AgathoRuntime {
+export class PiAgentRuntime implements VestaRuntime {
   private child: ChildProcess | null = null;
   private starting: Promise<void> | null = null;
   private pending = new Map<string, Deferred<unknown>>();
@@ -134,7 +134,7 @@ export class PiAgentRuntime implements AgathoRuntime {
   }
 
   /** Sends one user message; resolves when pi accepts it, not when the turn finishes. */
-  async prompt(message: string, systemPrompt: string): Promise<void> {
+  async prompt(message: string, systemPrompt: string, images?: ImageAttachment[]): Promise<void> {
     await this.start();
     if (this.extensionFailure) throw new Error(this.extensionFailure);
     // The persona and the app context are rewritten every turn; the extension reads this file in
@@ -144,7 +144,7 @@ export class PiAgentRuntime implements AgathoRuntime {
     this._busy = true;
     this.lastError = undefined;
     this.sawMessage = false;
-    await this.request('prompt', { message });
+    await this.request('prompt', { message, images: (images ?? []).map((i) => ({ type: 'image', data: i.data, mimeType: i.mimeType })) });
   }
 
   /** Cancels the running turn. The pending tool call is answered so pi can settle. */
@@ -180,12 +180,12 @@ export class PiAgentRuntime implements AgathoRuntime {
   /* ---------------------------------------------------------------- */
 
   private ensureDir(): string {
-    if (!this.dir) this.dir = path.join(os.tmpdir(), `vocs-code-agatho-${process.pid}-${this.opts.nonce.slice(0, 8)}`);
+    if (!this.dir) this.dir = path.join(os.tmpdir(), `vocs-code-vesta-${process.pid}-${this.opts.nonce.slice(0, 8)}`);
     return this.dir;
   }
 
   private async launch(): Promise<void> {
-    if (this.disposed) throw new Error('This Agatho runtime was disposed.');
+    if (this.disposed) throw new Error('This Vesta runtime was disposed.');
     this.exited = false;
     this.extensionReady = false;
     this.extensionFailure = null;
@@ -198,7 +198,7 @@ export class PiAgentRuntime implements AgathoRuntime {
 
     const args = [
       '--mode', 'rpc',
-      // Agatho is hermetic: no session file, no built-in tools, and none of the user's own
+      // Vesta is hermetic: no session file, no built-in tools, and none of the user's own
       // extensions, skills, prompt templates or context files — only its capability bridge.
       '--no-session',
       '--no-builtin-tools',
@@ -216,22 +216,22 @@ export class PiAgentRuntime implements AgathoRuntime {
       ...this.opts.env,
       VOCS_CODE: '1',
       VOCS_CODE_PI_NONCE: this.opts.nonce,
-      VOCS_CODE_AGATHO_TOOLS: toolsFile,
-      VOCS_CODE_AGATHO_PROMPT: promptFile
+      VOCS_CODE_VESTA_TOOLS: toolsFile,
+      VOCS_CODE_VESTA_PROMPT: promptFile
     };
-    this.opts.log('info', `spawning pi for Agatho: ${this.opts.bin} in ${this.opts.cwd}`);
+    this.opts.log('info', `spawning pi for Vesta: ${this.opts.bin} in ${this.opts.cwd}`);
     const child = (this.opts.spawn ?? spawnTool)(this.opts.bin, args, { cwd: this.opts.cwd, env });
     this.child = child;
     const splitter = new LineSplitter((line) => this.handleLine(line));
     child.stdout?.on('data', (d: Buffer) => splitter.push(d));
     const err = new LineSplitter((line) => {
-      const marker = line.indexOf(AGATHO_ERROR_MARKER);
+      const marker = line.indexOf(VESTA_ERROR_MARKER);
       if (marker >= 0) {
-        this.extensionFailure = `The Agatho capability bridge failed to load. ${line.slice(marker + AGATHO_ERROR_MARKER.length)}`;
+        this.extensionFailure = `The Vesta capability bridge failed to load. ${line.slice(marker + VESTA_ERROR_MARKER.length)}`;
         this.ready?.reject(new Error(this.extensionFailure));
         return;
       }
-      this.opts.log('debug', `[agatho pi] ${line}`);
+      this.opts.log('debug', `[vesta pi] ${line}`);
     });
     child.stderr?.on('data', (d: Buffer) => err.push(d));
     child.on('close', (code) => {
@@ -255,7 +255,7 @@ export class PiAgentRuntime implements AgathoRuntime {
     try {
       const state = await withTimeout(this.request<{ model?: { provider?: string; id?: string } }>('get_state'), 60_000, 'pi get_state');
       // pi handles get_state after session_start, so readiness is already on stdout by now.
-      if (!this.extensionReady) await withTimeout(this.ready.promise, 30_000, 'pi Agatho extension');
+      if (!this.extensionReady) await withTimeout(this.ready.promise, 30_000, 'pi Vesta extension');
       if (this.extensionFailure) throw new Error(this.extensionFailure);
       if (state.model?.id) this._model = state.model.provider ? `${state.model.provider}/${state.model.id}` : state.model.id;
     } catch (error) {
@@ -295,7 +295,7 @@ export class PiAgentRuntime implements AgathoRuntime {
     try {
       ev = JSON.parse(line) as Record<string, unknown>;
     } catch {
-      this.opts.log('debug', `[agatho pi] ${line}`);
+      this.opts.log('debug', `[vesta pi] ${line}`);
       return;
     }
     const type = ev.type as string;
@@ -332,7 +332,7 @@ export class PiAgentRuntime implements AgathoRuntime {
           .filter((b) => b.type === 'text')
           .map((b) => b.text ?? '')
           .join('');
-        const calls: AgathoToolCall[] = blocks
+        const calls: VestaToolCall[] = blocks
           .filter((b) => b.type === 'toolCall')
           .map((b) => ({ id: String(b.id ?? ''), name: String(b.name ?? ''), args: (b.arguments ?? {}) as Record<string, unknown> }));
         this.lastError =
@@ -348,16 +348,16 @@ export class PiAgentRuntime implements AgathoRuntime {
         return;
       case 'extension_error': {
         const detail = `${ev.extensionPath ?? 'extension'}: ${ev.error ?? 'failed'}`;
-        this.extensionFailure = `The Agatho capability bridge failed to load. ${detail}`;
+        this.extensionFailure = `The Vesta capability bridge failed to load. ${detail}`;
         this.ready?.reject(new Error(this.extensionFailure));
-        this.opts.log('error', `[agatho pi] ${detail}`);
+        this.opts.log('error', `[vesta pi] ${detail}`);
         return;
       }
       case 'auto_retry_start':
-        this.opts.log('info', `Agatho retrying (${ev.attempt}/${ev.maxAttempts}): ${ev.errorMessage}`);
+        this.opts.log('info', `Vesta retrying (${ev.attempt}/${ev.maxAttempts}): ${ev.errorMessage}`);
         return;
       case 'compaction_end':
-        if (ev.errorMessage) this.opts.log('warn', `Agatho context compaction failed: ${ev.errorMessage}`);
+        if (ev.errorMessage) this.opts.log('warn', `Vesta context compaction failed: ${ev.errorMessage}`);
         return;
       default:
         return;
@@ -366,19 +366,19 @@ export class PiAgentRuntime implements AgathoRuntime {
 
   private async handleUiRequest(req: UiRequest): Promise<void> {
     if (req.method === 'notify') {
-      if (req.message?.startsWith(AGATHO_READY_MARKER)) {
+      if (req.message?.startsWith(VESTA_READY_MARKER)) {
         this.extensionReady = true;
         this.ready?.resolve();
-      } else if (req.message?.startsWith(AGATHO_ERROR_MARKER)) {
-        this.extensionFailure = `The Agatho capability bridge failed to load. ${req.message.slice(AGATHO_ERROR_MARKER.length)}`;
+      } else if (req.message?.startsWith(VESTA_ERROR_MARKER)) {
+        this.extensionFailure = `The Vesta capability bridge failed to load. ${req.message.slice(VESTA_ERROR_MARKER.length)}`;
         this.ready?.reject(new Error(this.extensionFailure));
       }
       return;
     }
-    if (req.method === 'select' && req.title?.startsWith(AGATHO_CALL_MARKER)) {
-      let call: AgathoToolCall | null = null;
+    if (req.method === 'select' && req.title?.startsWith(VESTA_CALL_MARKER)) {
+      let call: VestaToolCall | null = null;
       try {
-        const parsed = JSON.parse(req.title.slice(AGATHO_CALL_MARKER.length)) as AgathoToolCall;
+        const parsed = JSON.parse(req.title.slice(VESTA_CALL_MARKER.length)) as VestaToolCall;
         if (parsed && typeof parsed.name === 'string') call = { id: String(parsed.id ?? ''), name: parsed.name, args: (parsed.args ?? {}) as Record<string, unknown> };
       } catch {
         /* answered below as an unreadable call */
@@ -398,7 +398,7 @@ export class PiAgentRuntime implements AgathoRuntime {
       }
       return;
     }
-    // Agatho's tools are the only ones pi can call, so any other dialog is stray; answer it so pi
+    // Vesta's tools are the only ones pi can call, so any other dialog is stray; answer it so pi
     // never blocks, without granting anything.
     if (req.method === 'select' || req.method === 'input' || req.method === 'editor' || req.method === 'custom') this.respond(req.id, { cancelled: true });
     else if (req.method === 'confirm') this.respond(req.id, { confirmed: false });

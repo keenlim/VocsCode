@@ -1,22 +1,22 @@
-/** Agatho, the in-app assistant. The point of these tests is the gate: pi drives the handler
+/** Vesta, the in-app assistant. The point of these tests is the gate: pi drives the handler
  *  registry, which also serves keychain writes and raw PTY input, so nothing outside the
  *  capability allowlist may be invoked and nothing that changes state may run unapproved.
  *
  *  The runtime is scripted rather than spawned: each test plays the app's side of the bridge
  *  (pi's extension asks through `run`, the test answers through the proposal), which is exactly
- *  the sequence tests/agatho-pi.integration.test.ts proves against the real pi. */
+ *  the sequence tests/vesta-pi.integration.test.ts proves against the real pi. */
 import { describe, expect, it } from 'vitest';
 import { AGENT_CAPABILITIES, agentChannels } from '../src/shared/agent-manifest';
 import { defaultSettings, normalizeSettings } from '../src/main/settings';
-import type { AppSettings, ProviderConfig, SessionMeta } from '../src/shared/types';
-import type { AgathoRuntime, AgathoToolCall, PiAgentOptions } from '../src/main/agents/pi-runtime';
+import type { AppSettings, ImageAttachment, ProviderConfig, SessionMeta } from '../src/shared/types';
+import type { VestaRuntime, VestaToolCall, PiAgentOptions } from '../src/main/agents/pi-runtime';
 import { isRemoteBlocked } from '../src/main/web-server';
 
-const { Agatho } = await import('../src/main/agents');
+const { Vesta } = await import('../src/main/agents');
 
 const NO_USAGE = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
 
-function call(name: string, args: Record<string, unknown>, id = `c${name}`): AgathoToolCall {
+function call(name: string, args: Record<string, unknown>, id = `c${name}`): VestaToolCall {
   return { id, name, args };
 }
 
@@ -40,18 +40,18 @@ function settingsWith(patch: Partial<AppSettings> = {}): AppSettings {
 
 /** Plays the app's half of the bridge for one test: the test calls step()/run()/settle() the way
  *  pi's extension would. */
-class ScriptedRuntime implements AgathoRuntime {
+class ScriptedRuntime implements VestaRuntime {
   model = 'vocs-offline/scripted';
   busy = false;
   dead = false;
   disposed = false;
   aborts = 0;
-  promptCalls: { message: string; systemPrompt: string }[] = [];
+  promptCalls: { message: string; systemPrompt: string; images?: ImageAttachment[] }[] = [];
 
   constructor(private readonly opts: PiAgentOptions) {}
 
-  async prompt(message: string, systemPrompt: string): Promise<void> {
-    this.promptCalls.push({ message, systemPrompt });
+  async prompt(message: string, systemPrompt: string, images?: ImageAttachment[]): Promise<void> {
+    this.promptCalls.push({ message, systemPrompt, images });
   }
   abort(): void {
     this.aborts++;
@@ -60,13 +60,13 @@ class ScriptedRuntime implements AgathoRuntime {
     this.disposed = true;
   }
   /** One assistant message: text plus the tool calls it asked for. */
-  step(text: string, calls: AgathoToolCall[]): void {
+  step(text: string, calls: VestaToolCall[]): void {
     this.opts.events.stepStart();
     if (text) this.opts.events.text(text);
     this.opts.events.stepEnd(text, calls);
   }
   /** The extension's tool execution reaching the app. */
-  run(call: AgathoToolCall): Promise<{ ok: boolean; detail: string }> {
+  run(call: VestaToolCall): Promise<{ ok: boolean; detail: string }> {
     return this.opts.events.run(call);
   }
   settled(error?: string): void {
@@ -80,7 +80,7 @@ class ScriptedRuntime implements AgathoRuntime {
 function makeAgent(opts: { invoke?: (channel: string, req: unknown) => Promise<unknown>; settings?: AppSettings; pi?: boolean } = {}) {
   const invoked: { channel: string; req: unknown }[] = [];
   const runtimes: ScriptedRuntime[] = [];
-  const agent = new Agatho({
+  const agent = new Vesta({
     getSettings: () => opts.settings ?? settingsWith(),
     listSessions: () => [SESSION],
     getSession: (id) => (id === SESSION.id ? SESSION : undefined),
@@ -92,7 +92,7 @@ function makeAgent(opts: { invoke?: (channel: string, req: unknown) => Promise<u
     push: () => undefined,
     log: () => undefined,
     piBinary: () => (opts.pi === false ? null : 'C:/fake/pi.cmd'),
-    piExtension: () => 'resources/pi/vocs-code-agatho.ts',
+    piExtension: () => 'resources/pi/vocs-code-vesta.ts',
     piCwd: () => 'G:/Vocs-Code',
     createRuntime: (o) => {
       const runtime = new ScriptedRuntime(o);
@@ -107,12 +107,13 @@ function makeAgent(opts: { invoke?: (channel: string, req: unknown) => Promise<u
     runtime: () => {
       if (!runtimes.length) throw new Error('no runtime was created');
       return runtimes[runtimes.length - 1];
-    }
+    },
+    runtimeCount: () => runtimes.length
   };
 }
 
 /** Resolves once a proposal is on screen, so a test can answer it while the call is mid-flight. */
-async function waitForProposal(agent: InstanceType<typeof Agatho>): Promise<string> {
+async function waitForProposal(agent: InstanceType<typeof Vesta>): Promise<string> {
   for (let i = 0; i < 200; i++) {
     const item = agent.state().items.find((x) => x.kind === 'proposal' && x.proposal.status === 'pending');
     if (item && item.kind === 'proposal') return item.proposal.id;
@@ -125,7 +126,7 @@ describe('capability manifest', () => {
   it('never exposes a channel that could exfiltrate secrets or run arbitrary code', () => {
     const forbidden = [/^terminal:/, /^secrets:/, /^window:/, /^providers:/, /^app:open/, /^settings:update$/, /^agent:/, /^sessions:send$/, /^sessions:delete$/];
     for (const channel of agentChannels()) {
-      for (const pattern of forbidden) expect(pattern.test(channel), `${channel} must not be reachable by Agatho`).toBe(false);
+      for (const pattern of forbidden) expect(pattern.test(channel), `${channel} must not be reachable by Vesta`).toBe(false);
     }
   });
 
@@ -166,7 +167,7 @@ describe('pi is the only way in', () => {
     await agent.send('which branches are stale?', { sessionId: 's1', view: 'chat' });
     const [prompt] = runtime().promptCalls;
     expect(prompt.message).toBe('which branches are stale?');
-    expect(prompt.systemPrompt).toContain('You are Agatho');
+    expect(prompt.systemPrompt).toContain('You are Vesta');
     expect(prompt.systemPrompt).toContain('id=s1 title="Vocs Code"');
   });
 
@@ -182,6 +183,31 @@ describe('pi is the only way in', () => {
     const { agent, runtime } = makeAgent();
     await agent.send('hi');
     expect(agent.state().model).toBe(runtime().model);
+  });
+});
+
+describe('pasted images', () => {
+  const PNG: ImageAttachment = { mimeType: 'image/png', data: 'iVBORw0KGgo=', name: 'pixel.png' };
+
+  it('sends an image with no text, showing it on the user row and in the prompt', async () => {
+    const { agent, runtime } = makeAgent();
+    await agent.send('', undefined, [PNG]);
+    const user = agent.state().items.find((i) => i.kind === 'user');
+    expect(user?.kind === 'user' && user.images).toEqual([PNG]);
+    expect(runtime().promptCalls[0]).toMatchObject({ message: '', images: [PNG] });
+  });
+
+  it('sends an image alongside text', async () => {
+    const { agent, runtime } = makeAgent();
+    await agent.send('what is this?', { sessionId: 's1' }, [PNG]);
+    expect(runtime().promptCalls[0]).toMatchObject({ message: 'what is this?', images: [PNG] });
+  });
+
+  it('ignores an empty message with no images, and does not start pi', async () => {
+    const { agent, runtimeCount } = makeAgent();
+    await agent.send('   ');
+    expect(agent.state().items).toEqual([]);
+    expect(runtimeCount()).toBe(0);
   });
 });
 
@@ -345,7 +371,7 @@ describe('robustness', () => {
 });
 
 describe('remote transport', () => {
-  it('keeps Agatho off the WebSocket bridge, which has no other channel allowlist', () => {
+  it('keeps Vesta off the WebSocket bridge, which has no other channel allowlist', () => {
     expect(isRemoteBlocked('agent:send')).toBe(true);
     expect(isRemoteBlocked('agent:resolve')).toBe(true);
     expect(isRemoteBlocked('sessions:list')).toBe(false);

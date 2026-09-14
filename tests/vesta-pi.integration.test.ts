@@ -1,4 +1,4 @@
-/** Agatho against the real installed Pi runtime, offline.
+/** Vesta against the real installed Pi runtime, offline.
  *
  *  The unit suite scripts the bridge; this one proves the bridge itself: the bundled capability
  *  extension registers the allowlist, pi dispatches the calls, the app's gate answers them, and
@@ -11,7 +11,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentItem } from '../src/shared/agent';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
-import { Agatho } from '../src/main/agents';
+import { Vesta } from '../src/main/agents';
 import { PiAgentRuntime } from '../src/main/agents/pi-runtime';
 import { spawnTool } from '../src/main/harness/spawn';
 import { defaultSettings } from '../src/main/settings';
@@ -44,19 +44,19 @@ async function until(predicate: () => boolean, what: string, timeout = 90_000): 
   }
 }
 
-describe.skipIf(!enabled)('Agatho on the real Pi runtime', () => {
+describe.skipIf(!enabled)('Vesta on the real Pi runtime', () => {
   let root: string;
   let cwd: string;
   let agentDir: string;
   let cli = '';
-  const agents: Agatho[] = [];
+  const agents: Vesta[] = [];
 
   beforeAll(() => {
     cli = piIntegrationPaths().cli;
   });
 
   beforeEach(async () => {
-    root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-agatho-pi-'));
+    root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-vesta-pi-'));
     cwd = path.join(root, 'workspace');
     agentDir = path.join(root, 'agent');
     await fs.mkdir(cwd);
@@ -69,12 +69,12 @@ describe.skipIf(!enabled)('Agatho on the real Pi runtime', () => {
     if (root) await fs.rm(root, { recursive: true, force: true });
   });
 
-  /** Real Agatho + real PiAgentRuntime; only the process launch differs (node runs the CLI). */
+  /** Real Vesta + real PiAgentRuntime; only the process launch differs (node runs the CLI). */
   function make(invoke: (channel: string, req: unknown) => Promise<unknown>) {
     const invoked: { channel: string; req: unknown }[] = [];
     const settings: AppSettings = { ...defaultSettings(), defaultHarness: 'pi', agentModel: { provider: 'vocs-offline', model: 'scripted' } };
     const fixture = path.resolve('tests/fixtures/pi-scripted-provider.mjs');
-    const agent = new Agatho({
+    const agent = new Vesta({
       getSettings: () => settings,
       listSessions: () => [SESSION],
       getSession: (id) => (id === SESSION.id ? SESSION : undefined),
@@ -86,7 +86,7 @@ describe.skipIf(!enabled)('Agatho on the real Pi runtime', () => {
       push: () => undefined,
       log: () => undefined,
       piBinary: () => cli,
-      piExtension: () => path.resolve('resources/pi/vocs-code-agatho.ts'),
+      piExtension: () => path.resolve('resources/pi/vocs-code-vesta.ts'),
       piCwd: () => cwd,
       createRuntime: (opts) =>
         new PiAgentRuntime({
@@ -138,5 +138,16 @@ describe.skipIf(!enabled)('Agatho on the real Pi runtime', () => {
     await until(() => assistantText(agent.state().items).includes('COMPAT_OK'), 'the declined turn to settle');
     expect(invoked).toEqual([]);
     expect(item!.proposal.status).toBe('rejected');
+  });
+
+  it('carries a pasted image all the way to the model', async () => {
+    const { agent, invoked } = make(async () => [SESSION]);
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+    await agent.send(scriptedPrompt([]), { sessionId: 's1' }, [{ mimeType: 'image/png', data: png, name: 'pixel.png' }]);
+    // The scripted provider only answers IMAGES_OK when an image part reached it.
+    await until(() => assistantText(agent.state().items).includes('IMAGES_OK'), 'the image turn to settle');
+    expect(invoked).toEqual([]);
+    const user = agent.state().items.find((i) => i.kind === 'user');
+    expect(user?.kind === 'user' && user.images).toEqual([{ mimeType: 'image/png', data: png, name: 'pixel.png' }]);
   });
 });

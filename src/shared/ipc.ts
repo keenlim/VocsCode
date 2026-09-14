@@ -16,6 +16,7 @@ import type {
   GitWorktreeInfo,
   HarnessAvailability,
   HarnessId,
+  ImageAttachment,
   McpInspectResult,
   McpProjectInfo,
   McpProjectState,
@@ -175,10 +176,10 @@ export interface IpcContract {
     SessionMeta
   ];
 
-  /** Agatho, the in-app assistant. Its reach is the allowlist in shared/agent-manifest.ts, not this contract. */
+  /** Vesta, the in-app assistant. Its reach is the allowlist in shared/agent-manifest.ts, not this contract. */
   'agent:state': [void, AgentState];
-  /** Sends a message; the reply streams back over `push:agentState`. */
-  'agent:send': [{ text: string; context?: AgentClientContext }, void];
+  /** Sends a message (with pasted images, when any); the reply streams back over `push:agentState`. */
+  'agent:send': [{ text: string; context?: AgentClientContext; images?: ImageAttachment[] }, void];
   'agent:cancel': [void, void];
   /** Applies or declines a pending proposal (a batch of gated capability calls). */
   'agent:resolve': [{ proposalId: string; approve: boolean }, void];
@@ -282,7 +283,7 @@ export type PushPayloads = {
   /** Raw PTY output for one terminal; `seq` orders it against an attach snapshot. */
   'push:terminalData': { terminalId: string; seq: number; data: string };
   'push:terminalsChanged': TerminalInfo[];
-  /** Agatho's whole transcript; the list is short, so state is replaced rather than patched. */
+  /** Vesta's whole transcript; the list is short, so state is replaced rather than patched. */
   'push:agentState': AgentState;
   'push:remoteState': RemoteState;
 };

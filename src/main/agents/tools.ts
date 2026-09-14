@@ -1,4 +1,4 @@
-/** Turns Agatho's capability allowlist into tool definitions, and runs one call against the
+/** Turns Vesta's capability allowlist into tool definitions, and runs one call against the
  *  handler registry. Anything not on the allowlist fails here rather than reaching a handler. */
 import { AGENT_CAPABILITIES, CAPABILITIES_BY_NAME, type AgentCapability, type CapabilityContext } from '../../shared/agent-manifest';
 import type { RiskTier } from '../../shared/agent';

@@ -134,7 +134,7 @@ describe('handler registry', () => {
     }
   });
 
-  it('serves every channel Agatho is allowed to reach', () => {
+  it('serves every channel Vesta is allowed to reach', () => {
     // A capability naming a channel that does not exist would fail silently at runtime,
     // as a tool the model keeps calling and that always errors.
     const { registry } = stubDeps();
@@ -375,5 +375,41 @@ describe('pi config handlers', () => {
     const { registry } = stubDeps({ piConfig: store });
     await expect(registry.invoke('pi:subagents', { maxSubagentDepth: 99 })).rejects.toThrow('Invalid value');
     await expect(fs.access(path.join(agentDir, 'subagents.json'))).rejects.toThrow();
+  });
+});
+
+describe('vesta handlers', () => {
+  /** pi resolution is stubbed absent so a send records the user row and then the setup error. */
+  const noPi = () =>
+    ({
+      availability: async () => ({ available: true }),
+      install: async () => ({ ok: false, log: '' }),
+      resolve: () => null,
+      resource: () => ''
+    }) as unknown as RuntimeResolver;
+
+  const agentPushes = (pushes: [string, unknown][]) => pushes.filter(([channel]) => channel === PUSH_CHANNELS.agentState).map(([, payload]) => payload) as { items: { kind: string; text: string; images?: unknown }[] }[];
+
+  it('drops malformed image attachments at the boundary instead of sending an empty message', async () => {
+    const { registry, deps, pushes } = stubDeps({ runtime: noPi() });
+    await deps.settings.load();
+    await registry.invoke('agent:send', {
+      text: '',
+      images: [
+        { mimeType: 'text/plain', data: 'bm90IGFuIGltYWdl' },
+        { mimeType: 'image/png', data: '' }
+      ] as never
+    });
+    expect(agentPushes(pushes)).toEqual([]);
+  });
+
+  it('keeps a valid pasted image on the user row so the model and the panel both get it', async () => {
+    const { registry, deps, pushes } = stubDeps({ runtime: noPi() });
+    await deps.settings.load();
+    await registry.invoke('agent:send', { text: '', images: [{ mimeType: 'image/png', data: 'iVBORw==' }] as never });
+    const states = agentPushes(pushes);
+    const user = states.at(-1)?.items.find((item) => item.kind === 'user');
+    expect(user).toMatchObject({ text: '', images: [{ mimeType: 'image/png', data: 'iVBORw==' }] });
+    expect(states.at(-1)?.items.some((item) => item.kind === 'error')).toBe(true);
   });
 });

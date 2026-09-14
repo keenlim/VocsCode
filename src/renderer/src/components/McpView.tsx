@@ -14,7 +14,7 @@ const OWN_TAB = 'vocs-code';
 export function McpView() {
   const setView = useStore((s) => s.setView);
   const toast = useStore((s) => s.toast);
-  const openAgatho = useStore((s) => s.openAgatho);
+  const openVesta = useStore((s) => s.openVesta);
   const settings = useStore((s) => s.settings);
   const [stores, setStores] = useState<McpStoreInfo[] | null>(null);
   const [tab, setTab] = useState<string>(OWN_TAB);
@@ -84,8 +84,8 @@ export function McpView() {
           <Button size="sm" icon="refresh" onClick={() => void load()} title="Re-read the harness stores">
             Refresh
           </Button>
-          <Button size="sm" icon="sparkles" onClick={() => openAgatho('Set up this MCP server for me: ')} title="Describe or paste a server and let Agatho configure it">
-            Set up with Agatho
+          <Button size="sm" icon="sparkles" onClick={() => openVesta('Set up this MCP server for me: ')} title="Describe or paste a server and let Vesta configure it">
+            Set up with Vesta
           </Button>
           <Button variant="primary" size="sm" icon="plus" onClick={() => { setTab(OWN_TAB); setEditing(emptyServer()); }}>
             Add server

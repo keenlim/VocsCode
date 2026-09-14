@@ -1,5 +1,6 @@
-/** Types for Agatho, the in-app assistant. Shared so the renderer renders proposals
+/** Types for Vesta, the in-app assistant. Shared so the renderer renders proposals
  *  from the same metadata the model was shown (see ./agent-manifest). */
+import type { ImageAttachment } from './types';
 
 /** How much damage a capability can do, and therefore who decides to run it. */
 export type RiskTier = 'read' | 'write' | 'destructive';
@@ -23,9 +24,9 @@ export interface AgentProposal {
   results?: string[];
 }
 
-/** One row in Agatho's transcript. */
+/** One row in Vesta's transcript. */
 export type AgentItem =
-  | { id: string; kind: 'user'; text: string }
+  | { id: string; kind: 'user'; text: string; images?: ImageAttachment[] }
   | { id: string; kind: 'assistant'; text: string }
   | { id: string; kind: 'tool'; capability: string; summary: string; ok: boolean; detail?: string }
   | { id: string; kind: 'proposal'; proposal: AgentProposal }
@@ -40,7 +41,7 @@ export interface AgentState {
   unavailable?: string;
 }
 
-export const AGENT_NAME = 'Agatho';
+export const AGENT_NAME = 'Vesta';
 
 export const EMPTY_AGENT_STATE: AgentState = { items: [], busy: false };
 

@@ -140,7 +140,7 @@ describe('web server', () => {
     b.close();
   });
 
-  it('never forwards an agent channel, so a browser client cannot drive Agatho', async () => {
+  it('never forwards an agent channel, so a browser client cannot drive Vesta', async () => {
     let reached = false;
     const server = (globalThis as { __webServer?: WebServer }).__webServer!;
     const original = (server as unknown as { opts: { registry: HandlerRegistry } }).opts.registry.invoke;

@@ -32,7 +32,7 @@ export interface WebServerOptions {
 type InvokeFrame = { type: 'invoke'; id: number; channel: string; request: unknown };
 
 /** Channels a remote client may not reach, whatever the transport allows locally.
- *  `agent:*` drives Agatho, which invokes the registry on the model's behalf: forwarding it
+ *  `agent:*` drives Vesta, which invokes the registry on the model's behalf: forwarding it
  *  would let a browser client launch app actions through an LLM. Exported for the tests. */
 export function isRemoteBlocked(channel: string): boolean {
   return channel.startsWith('agent:');
