@@ -134,9 +134,11 @@ async function main(): Promise<void> {
     () => settings.get()
   );
 
+  // Prefer an installed `gitnexus`; otherwise run it through npx. Both are resolved, because a bare
+  // `npx` on Windows is a `.cmd` shim only the resolved path lets `spawnTool` find.
   const gitnexusBinary = which('gitnexus');
   const sharedGitnexus = new SharedGitnexusServer({
-    command: gitnexusBinary ?? 'npx',
+    command: gitnexusBinary ?? which('npx') ?? 'npx',
     baseArgs: gitnexusBinary ? ['serve'] : ['-y', 'gitnexus@latest', 'serve'],
     log: (level, message) => log(level, message)
   });

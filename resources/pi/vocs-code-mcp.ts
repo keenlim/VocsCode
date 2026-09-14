@@ -22,6 +22,10 @@ interface PiToolDefinition {
   name: string;
   label: string;
   description: string;
+  /** One line for pi's "Available tools" list. pi omits a custom tool from that list without one. */
+  promptSnippet?: string;
+  /** Bullets for pi's "Guidelines" list; pi dedupes identical text across tools. */
+  promptGuidelines?: string[];
   parameters: object;
   execute(id: string, params: Record<string, unknown>): Promise<PiToolResult>;
 }
@@ -95,6 +99,35 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Longest snippet handed to pi: the listing is a pointer, not a replacement for the tool's own schema. */
+const SNIPPET_MAX = 120;
+
+/**
+ * The built-in code-graph server, mirroring `MCP_BUILTIN_IDS` in `src/shared/types.ts`. pi loads this
+ * file as a standalone resource, so it cannot import from `src/`.
+ */
+const CODE_GRAPH_SERVER = 'gitnexus';
+
+/**
+ * A nudge rather than a listing: without it the graph tools are visible to the model but nothing
+ * suggests reaching for them over grep. Attached to every tool of the server, since pi dedupes.
+ */
+const CODE_GRAPH_GUIDELINES = [
+  'Use the GitNexus code graph (mcp__gitnexus__*) to find symbols, call paths and processes before falling back to grep, find or read'
+];
+
+/**
+ * One collapsed line for pi's "Available tools" list — pi drops a registered tool from that list
+ * entirely when it has no snippet, which is how an injected MCP server ends up invisible in the prompt.
+ */
+export function promptSnippetFor(description: string | undefined, toolName: string): string {
+  const oneLine = (description ?? '').replace(/\s+/g, ' ').trim() || 'MCP tool ' + toolName;
+  if (oneLine.length <= SNIPPET_MAX) return oneLine;
+  const clipped = oneLine.slice(0, SNIPPET_MAX);
+  const lastSpace = clipped.lastIndexOf(' ');
+  return (lastSpace > SNIPPET_MAX / 2 ? clipped.slice(0, lastSpace) : clipped).trimEnd() + '…';
+}
+
 export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
   const configPath = process.env.VOCS_CODE_MCP_CONFIG;
   if (!configPath) return;
@@ -126,11 +159,16 @@ export default async function vocsCodeMcp(pi: PiLike): Promise<void> {
       continue;
     }
 
+    const guidelines = sanitizeToolName(cfg.id) === CODE_GRAPH_SERVER ? CODE_GRAPH_GUIDELINES : undefined;
+
     for (const tool of tools) {
+      const description = tool.description ?? 'MCP tool ' + tool.name + ' from ' + cfg.id;
       pi.registerTool({
         name: toolNameFor(cfg.id, tool.name),
         label: cfg.id + ': ' + tool.name,
-        description: tool.description ?? 'MCP tool ' + tool.name + ' from ' + cfg.id,
+        description,
+        promptSnippet: promptSnippetFor(tool.description, tool.name),
+        ...(guidelines ? { promptGuidelines: [...guidelines] } : {}),
         parameters: tool.inputSchema && typeof tool.inputSchema === 'object' ? tool.inputSchema : { type: 'object', properties: {} },
         async execute(_id, params) {
           const result = await connection.callTool(tool.name, params ?? {});

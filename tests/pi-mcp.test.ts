@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PiMcpConnection } from '../resources/pi/mcp-client';
-import vocsCodeMcp, { parseMcpConfig, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
+import vocsCodeMcp, { parseMcpConfig, promptSnippetFor, sanitizeToolName, toolNameFor } from '../resources/pi/vocs-code-mcp';
 
 const FIXTURE = path.resolve('tests/fixtures/mcp-echo-server.mjs');
 const STAMP = 'VOCSMCP9137';
@@ -55,6 +55,24 @@ describe('toolNameFor', () => {
     expect(name).toBe('mcp__server__' + 'a'.repeat(120) + '_tool');
     expect(name.length).toBeGreaterThan(120);
     expect(name).toMatch(/^[a-z0-9_]+$/);
+  });
+});
+
+describe('promptSnippetFor', () => {
+  it('collapses a multi-line description to one line', () => {
+    expect(promptSnippetFor('Says it back.\n\n  Stamped  ', 'echo')).toBe('Says it back. Stamped');
+  });
+
+  it('clips a long description at a word boundary', () => {
+    const snippet = promptSnippetFor('word '.repeat(60), 'echo');
+    expect(snippet.length).toBeLessThanOrEqual(121);
+    expect(snippet.endsWith('…')).toBe(true);
+    expect(snippet).not.toContain('  ');
+  });
+
+  it('falls back to the tool name when the server sends no description', () => {
+    expect(promptSnippetFor(undefined, 'echo')).toBe('MCP tool echo');
+    expect(promptSnippetFor('   ', 'echo')).toBe('MCP tool echo');
   });
 });
 
@@ -158,6 +176,10 @@ describe('vocsCodeMcp extension', () => {
       const echo = tools.find((tool) => tool.name === 'mcp__fixture__echo');
       expect(echo).toBeDefined();
       expect(echo?.label).toBe('fixture: echo');
+      // Without a snippet pi leaves a custom tool out of its "Available tools" list entirely.
+      expect(echo?.promptSnippet).toBe('Says it back, stamped');
+      // Only the built-in code graph carries a guideline; a user server is listed, not nudged.
+      expect(tools.every((tool) => tool.promptGuidelines === undefined)).toBe(true);
       expect(echo?.parameters).toMatchObject({ type: 'object', properties: { text: { type: 'string' } } });
 
       const result = await echo!.execute('call-1', { text: 'hello' });
@@ -165,6 +187,29 @@ describe('vocsCodeMcp extension', () => {
       expect(result.details).toEqual({ server: 'fixture', tool: 'echo' });
 
       handlers.get('session_shutdown')!(undefined, undefined);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('gives the code-graph server a guideline naming its tools', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vocs-pi-mcp-'));
+    const configPath = path.join(dir, 'mcp.json');
+    await writeFile(
+      configPath,
+      JSON.stringify({ servers: [{ id: 'gitnexus', transport: 'stdio', command: process.execPath, args: [FIXTURE] }] }),
+      'utf8'
+    );
+    process.env.VOCS_CODE_MCP_CONFIG = configPath;
+    const { pi, tools } = makePi();
+    try {
+      await vocsCodeMcp(pi);
+      expect(tools.map((tool) => tool.name).sort()).toEqual(['mcp__gitnexus__echo', 'mcp__gitnexus__probe']);
+      for (const tool of tools) {
+        expect(tool.promptSnippet).toBeTruthy();
+        expect(tool.promptGuidelines).toHaveLength(1);
+        expect(tool.promptGuidelines?.[0]).toContain('mcp__gitnexus__*');
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

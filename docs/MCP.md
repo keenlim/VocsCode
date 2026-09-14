@@ -236,8 +236,11 @@ approvals one. The adapter writes the session's resolved servers to `<sessionDir
 points `VOCS_CODE_MCP_CONFIG` at it and loads the extension with `-e`. The extension speaks the
 MCP protocol itself (stdio + streamable HTTP, no SDK import, so nothing has to resolve out of the
 asar), lists each server's tools and calls `pi.registerTool()` for every one as
-`mcp__<server>__<tool>`. The approvals extension gates every `mcp__*` tool, since a server tool's
-blast radius is unknown; only full-auto lets it through unprompted.
+`mcp__<server>__<tool>`. Every registered tool carries a `promptSnippet` — pi leaves a custom tool
+out of its "Available tools" list entirely without one, which is how an injected server stays
+invisible to the model — and the built-in code graph also carries a `promptGuidelines` line so the
+graph is reached for before grep. The approvals extension gates every `mcp__*` tool, since a server
+tool's blast radius is unknown; only full-auto lets it through unprompted.
 
 **Cursor** (`inherit`) — nothing is injected. The tab shows what Cursor will read
 (`.cursor/mcp.json`) and offers "Export repo servers to .cursor/mcp.json"; the MCP page
@@ -337,7 +340,10 @@ MCP SDK's OAuth provider and a loopback redirect; deferred to P2 (§10).
 ## 9. Windows notes
 
 - Shim resolution (§6) is the one thing that will bite every user on this machine; test
-  `npx -y @modelcontextprotocol/server-filesystem` end to end per harness.
+  `npx -y @modelcontextprotocol/server-filesystem` end to end per harness. The app's own
+  subprocesses need the same treatment: `which('gitnexus')` resolves to the npm `.cmd`, and a
+  bare `spawn` of one throws EINVAL, so the shared server (§13) goes through `spawnTool` and
+  `killTree` from `harness/spawn.ts` like everything else.
 - ACP takes an absolute stdio `command`; dsh fails `session/new` with "mcpServers[0].command
   must be an absolute path" for anything else. The shim wrapper `normalizeStdio` produces is
   a bare `cmd`, so the ACP adapter resolves it through PATH and drops a server it cannot
