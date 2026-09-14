@@ -29,6 +29,9 @@ export function isolatedEnv(userData: string, extra: Record<string, string> = {}
     env[k] = v;
   }
   env.VOCS_CODE_USER_DATA = userData;
+  // A packaged run would otherwise phone the live update feed on startup; suites that test the
+  // updater itself pass an empty override to re-enable it (see tests/e2e.update.test.ts).
+  env.VOCS_CODE_UPDATER_DISABLE = '1';
   return { ...env, ...extra };
 }
 
