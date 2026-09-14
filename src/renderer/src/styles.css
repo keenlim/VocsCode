@@ -4618,6 +4618,12 @@ body.resizing {
   font-size: 12px;
   text-align: right;
 }
+/* Per-entity meters inside one card (cache hit rate by model) */
+.meterlist {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px 28px;
+}
 
 /* Meter */
 .meter {

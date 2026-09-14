@@ -4,7 +4,7 @@ import type { AnalyticsSummary } from '../../../../shared/types';
 import { totalTokens } from '../../../../shared/usage-rollup';
 import { fmtTokens } from '../../format';
 import { ChartCard, ColumnChart, Legend, Meter, Segmented, seriesTable, StackedBar } from './charts';
-import { cacheHitRate, delta, fmtPct, METRICS, SPLITS, splitSeries, TOKEN_KINDS, tokenKindSeries, type Scope, type Split } from './model';
+import { cacheHitRate, delta, entityColor, fmtPct, METRICS, SPLITS, splitSeries, TOKEN_KINDS, tokenKindSeries, type Scope, type Split } from './model';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
 
 export function TokensTab({ scope, summary }: { scope: Scope; summary: AnalyticsSummary }) {
@@ -19,6 +19,11 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
   const share = (n: number) => (total > 0 ? `${fmtPct(n / total)} of tokens` : undefined);
   const spark = (key: (typeof TOKEN_KINDS)[number]['key']) => scope.days.map((d) => d.usage[key]);
   const kindLegend = TOKEN_KINDS.map((k) => ({ key: k.key, label: k.label, color: k.color }));
+  /** Models in spend order that counted prompt tokens; the rest have no rate to show. */
+  const modelRates = scope.byModel
+    .map((bucket) => ({ bucket, rate: cacheHitRate(bucket.usage), prompt: bucket.usage.inputTokens + bucket.usage.cacheReadTokens + bucket.usage.cacheWriteTokens }))
+    .filter((r) => r.rate !== null)
+    .slice(0, 8);
   return (
     <>
       <KpiGrid caption={scope.previousLabel ? `Change is against the ${scope.previousLabel}.` : undefined}>
@@ -38,6 +43,25 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
           <Meter value={total > 0 ? t.outputTokens / total : null} label="Output ÷ total" sub={total > 0 ? `${fmtTokens(t.outputTokens)} of ${fmtTokens(total)} tokens` : 'No tokens counted yet.'} />
         </ChartCard>
       </div>
+
+      <ChartCard title="Cache hit rate by model" subtitle={`Share of each model's prompt tokens served from cache · ${scope.label}`}>
+        {modelRates.length === 0 ? (
+          <div className="chart-empty">No model usage recorded yet.</div>
+        ) : (
+          <div className="meterlist">
+            {modelRates.map(({ bucket, rate, prompt }) => (
+              <Meter
+                key={bucket.key}
+                value={rate}
+                label={bucket.label}
+                color={entityColor(scope, 'model', bucket.key)}
+                sub={`${fmtTokens(bucket.usage.cacheReadTokens)} of ${fmtTokens(prompt)} prompt tokens`}
+                title={bucket.key}
+              />
+            ))}
+          </div>
+        )}
+      </ChartCard>
 
       <ChartCard title="Tokens per day by kind" subtitle="Click a legend entry to hide a kind — cache reads usually dwarf the rest" table={seriesTable(dates, kinds, fmtTokens)} wide>
         <ColumnChart dates={dates} series={kinds} format={fmtTokens} axis={METRICS.tokens.axis} ariaLabel="Tokens per day by kind" />

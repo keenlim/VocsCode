@@ -183,6 +183,11 @@ function slotColor(order: string[], key: string, dim: SliceDimension): string {
   return `var(--chart-${Math.max(0, order.indexOf(key)) + 1})`;
 }
 
+/** The chart colour an entity of a dimension wears, so cards outside the charts agree with them. */
+export function entityColor(scope: Scope, dim: SliceDimension, key: string): string {
+  return slotColor(slotOrder(scope, dim), key, dim);
+}
+
 /**
  * Per-day series of a metric, either as one total or split across the entities of a dimension.
  * Models and projects keep the top five by spend as series and fold the rest into "Other". Days

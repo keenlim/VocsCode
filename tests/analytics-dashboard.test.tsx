@@ -11,11 +11,11 @@ const DAY = 86_400_000;
 const now = Date.now();
 const dateOf = (daysAgo: number) => new Date(now - daysAgo * DAY).toISOString().slice(0, 10);
 
-function sliced(daysAgo: number, rows: { id: string; harness: 'claude' | 'pi'; model: string; project: string; costUsd: number; turns: number; toolCalls?: number }[]): AnalyticsDayPoint {
+function sliced(daysAgo: number, rows: { id: string; harness: 'claude' | 'pi'; model: string; project: string; costUsd: number; turns: number; toolCalls?: number; inputTokens?: number; cacheReadTokens?: number }[]): AnalyticsDayPoint {
   const usage = emptyCounters();
   const by = emptyDimensions();
   for (const r of rows) {
-    const delta = { costUsd: r.costUsd, turns: r.turns, toolCalls: r.toolCalls ?? 0, inputTokens: 1000, cacheReadTokens: 500, outputTokens: 100, speedTokens: 100, speedMs: 1000 };
+    const delta = { costUsd: r.costUsd, turns: r.turns, toolCalls: r.toolCalls ?? 0, inputTokens: r.inputTokens ?? 1000, cacheReadTokens: r.cacheReadTokens ?? 500, outputTokens: 100, speedTokens: 100, speedMs: 1000 };
     addCounters(usage, delta);
     addSlice(by.harness, r.harness, r.harness, delta, r.id);
     addSlice(by.model, `p/${r.model}`, r.model, delta, r.id);
@@ -279,6 +279,34 @@ describe('analytics dashboard', () => {
     const table = container.querySelector('.atable');
     expect(table).toBeTruthy();
     expect(table?.querySelector('th')?.textContent).toBe('Day');
+  });
+
+  it('shows the cache hit rate of each model on the tokens tab', async () => {
+    reset();
+    const days: AnalyticsDayPoint[] = [
+      sliced(1, [
+        { id: 's1', harness: 'claude', model: 'warm', project: '/p', costUsd: 2, turns: 1, inputTokens: 1000, cacheReadTokens: 3000 },
+        { id: 's2', harness: 'pi', model: 'cold', project: '/p', costUsd: 1, turns: 1, inputTokens: 800, cacheReadTokens: 0 },
+        // No prompt tokens counted: no rate to show, and it does not take a slot either.
+        { id: 's3', harness: 'pi', model: 'dry', project: '/p', costUsd: 0, turns: 0, inputTokens: 0, cacheReadTokens: 0 }
+      ])
+    ];
+    const response: AnalyticsSummary = { ...summary, days };
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
+    try {
+      const { container } = render(<AnalyticsDashboard />);
+      await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+      fireEvent.click(container.querySelector("[data-tab='tokens']") as HTMLButtonElement);
+      const card = Array.from(container.querySelectorAll('.acard')).find((c) => c.querySelector('.acard-title')?.textContent === 'Cache hit rate by model') as HTMLElement;
+      expect(card).toBeTruthy();
+      const meters = Array.from(card.querySelectorAll('.meter'));
+      expect(meters).toHaveLength(2);
+      expect(meters.map((m) => m.querySelector('.meter-head span')?.textContent)).toEqual(['p/warm', 'p/cold']);
+      expect(meters.map((m) => m.querySelector('.meter-value')?.textContent)).toEqual(['75%', '0%']);
+      expect(meters.map((m) => m.querySelector('.meter-sub')?.textContent)).toEqual(['3.0k of 4.0k prompt tokens', '0 of 800 prompt tokens']);
+    } finally {
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
   });
 
   it('names models by the key they were filed under, not the bare label recorded with them', async () => {

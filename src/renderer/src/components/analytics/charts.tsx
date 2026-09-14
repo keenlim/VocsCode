@@ -409,8 +409,8 @@ export function StackedBar({ segments, format, legend = true, height = 10, title
   );
 }
 
-/** A ratio against 100%: the track is a lighter step of the fill's own colour. */
-export function Meter({ value, label, sub, tone = 'accent', title }: { value: number | null; label: string; sub?: string; tone?: 'accent' | 'amber' | 'red'; title?: string }) {
+/** A ratio against 100%: the track is a lighter step of the fill's own colour, also when a `color` overrides the tone. */
+export function Meter({ value, label, sub, tone = 'accent', color, title }: { value: number | null; label: string; sub?: string; tone?: 'accent' | 'amber' | 'red'; color?: string; title?: string }) {
   const pct = value === null ? 0 : Math.max(0, Math.min(1, value)) * 100;
   return (
     <div className="meter" title={title}>
@@ -418,8 +418,16 @@ export function Meter({ value, label, sub, tone = 'accent', title }: { value: nu
         <span>{label}</span>
         <span className="meter-value">{fmtPct(value)}</span>
       </div>
-      <div className={`meter-track tone-${tone}`} role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
-        <span className="meter-fill" style={{ width: `${pct}%` }} />
+      <div
+        className={`meter-track tone-${tone}`}
+        style={color ? { background: `color-mix(in srgb, ${color} 14%, transparent)` } : undefined}
+        role="meter"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pct)}
+        aria-label={label}
+      >
+        <span className="meter-fill" style={{ width: `${pct}%`, ...(color ? { background: color } : undefined) }} />
       </div>
       {sub && <div className="meter-sub">{sub}</div>}
     </div>
