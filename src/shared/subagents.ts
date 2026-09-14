@@ -70,6 +70,39 @@ export interface SubagentRun {
   error?: string;
 }
 
+/** A run's listing row: enough to render the run list without its transcript. */
+export interface SubagentRunSummary {
+  runId: string;
+  agent: string;
+  description: string;
+  mode: SubagentRunMode;
+  status: SubagentRunStatus;
+  provider?: string;
+  model?: string;
+  startedAt: number;
+  endedAt?: number;
+  costUsd: number;
+  turns: number;
+  toolUses: number;
+}
+
+export function summarizeRun(run: SubagentRun): SubagentRunSummary {
+  return {
+    runId: run.meta.runId,
+    agent: run.meta.agent,
+    description: run.meta.description,
+    mode: run.meta.mode,
+    status: run.status,
+    ...(run.meta.provider ? { provider: run.meta.provider } : {}),
+    ...(run.meta.model ? { model: run.meta.model } : {}),
+    startedAt: run.meta.startedAt,
+    ...(run.endedAt ? { endedAt: run.endedAt } : {}),
+    costUsd: run.totals.costUsd,
+    turns: run.totals.turns,
+    toolUses: run.totals.toolUses
+  };
+}
+
 export function emptyRunTotals(): SubagentRunTotals {
   return { turns: 0, toolUses: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, durationMs: 0 };
 }

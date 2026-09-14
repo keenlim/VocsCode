@@ -6,7 +6,9 @@ import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, Mode
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
 
-export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'mcp' | 'usage' | 'terminal';
+export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
+/** The panel's lower half: live session services rather than workspace views. */
+export type PanelBottomTab = 'mcp' | 'subagents';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
 export type AnalyticsTab = 'overview' | 'spend' | 'tokens' | 'activity' | 'tools' | 'reliability' | 'sessions';
 /** Days in the analytics range; 0 is all time. */
@@ -76,8 +78,11 @@ interface State {
   sidebarOpen: boolean;
   panelOpen: boolean;
   panelTab: PanelTab;
+  panelBottomTab: PanelBottomTab;
   /** One-shot request to show a file in the Files tab, set by transcript file links. */
   fileReveal: FileReveal | null;
+  /** One-shot request to open one subagent run, set by a subagent tool card. */
+  subagentReveal: { sessionId: string; runId: string } | null;
   newSessionOpen: boolean;
   /** Project folder the new session dialog is targeting; null until a folder is picked. */
   newSessionRoot: string | null;
@@ -114,10 +119,14 @@ interface State {
   navForward(): Promise<void>;
   toggleSidebar(): void;
   togglePanel(open?: boolean): void;
-  setPanelTab(t: PanelTab): void;
+  setPanelTab(t: PanelTab | 'mcp'): void;
+  setPanelBottomTab(t: PanelBottomTab): void;
   /** Opens the Files tab on a path (workspace-relative or absolute inside the session cwd). */
   revealFile(sessionId: string, path: string, line?: number): void;
   consumeFileReveal(): void;
+  /** Opens the Subagents tab on one run, used by a transcript tool card. */
+  revealSubagentRun(sessionId: string, runId: string): void;
+  consumeSubagentReveal(): void;
   openNewSession(open: boolean): void;
   /** Opens the new session dialog for a folder; without one, asks the user to pick a project folder first. */
   startNewSession(root?: string | null): Promise<void>;
@@ -244,7 +253,9 @@ export const useStore = create<State>((set, get) => ({
   sidebarOpen: true,
   panelOpen: true,
   panelTab: 'changes',
+  panelBottomTab: 'mcp',
   fileReveal: null,
+  subagentReveal: null,
   newSessionOpen: false,
   newSessionRoot: null,
   quickSessionOpen: false,
@@ -543,14 +554,25 @@ export const useStore = create<State>((set, get) => ({
   togglePanel(open) {
     set((s) => ({ panelOpen: open ?? !s.panelOpen }));
   },
-  setPanelTab(panelTab) {
-    set({ panelTab, panelOpen: true });
+  setPanelTab(tab) {
+    // MCP moved to the lower half; asking for that tab opens the half instead of an empty top pane.
+    if (tab === 'mcp') set({ panelBottomTab: 'mcp', panelOpen: true });
+    else set({ panelTab: tab, panelOpen: true });
+  },
+  setPanelBottomTab(panelBottomTab) {
+    set({ panelBottomTab, panelOpen: true });
   },
   revealFile(sessionId, path, line) {
     set({ fileReveal: line ? { sessionId, path, line } : { sessionId, path }, panelTab: 'files', panelOpen: true });
   },
   consumeFileReveal() {
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));
+  },
+  revealSubagentRun(sessionId, runId) {
+    set({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelOpen: true });
+  },
+  consumeSubagentReveal() {
+    set((s) => (s.subagentReveal ? { subagentReveal: null } : {}));
   },
   openNewSession(newSessionOpen) {
     set({ newSessionOpen });

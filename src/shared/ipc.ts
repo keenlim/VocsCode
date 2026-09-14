@@ -50,6 +50,7 @@ import type {
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
 import type { ExecutionRecord } from './analytics/records';
+import type { SubagentRun, SubagentRunSummary } from './subagents';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
 
 /**
@@ -157,6 +158,14 @@ export interface IpcContract {
   'sessions:create': [CreateSessionRequest, SessionMeta];
   'sessions:get': [{ id: string }, SessionMeta | null];
   'sessions:transcript': [{ id: string }, TranscriptItem[]];
+  /** Subagent runs recorded for a pi session, newest first. */
+  'subagents:list': [{ id: string }, SubagentRunSummary[]];
+  /** One run with its transcript items and per-call rows, or null when it is gone. */
+  'subagents:get': [{ id: string; runId: string }, SubagentRun | null];
+  /** Stops one running subagent without stopping the parent turn. */
+  'subagents:stop': [{ id: string; runId: string }, { ok: boolean; error?: string }];
+  /** Sends a mid-run instruction to one running subagent. */
+  'subagents:steer': [{ id: string; runId: string; message: string }, { ok: boolean; error?: string }];
   /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
   'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];

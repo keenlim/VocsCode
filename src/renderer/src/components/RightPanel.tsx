@@ -5,12 +5,13 @@ import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
 import { fmtCost, fmtDuration, fmtRate, fmtTokens, speedOfTurns } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
-import { useStore, type FileReveal, type PanelTab } from '../store';
+import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
 import { DiffView } from './DiffView';
 import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
-import { Resizer } from './Resizer';
+import { Resizer, SplitResizer } from './Resizer';
+import { SubagentsTab } from './SubagentsTab';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
 
@@ -22,35 +23,69 @@ const TABS: { id: PanelTab; label: string; icon: string }[] = [
   { id: 'files', label: 'Files', icon: 'folder' },
   { id: 'branches', label: 'Git', icon: 'branch' },
   { id: 'goal', label: 'Goal', icon: 'target' },
-  { id: 'mcp', label: 'MCP', icon: 'server' },
   { id: 'usage', label: 'Usage', icon: 'chart' },
   { id: 'terminal', label: 'Terminal', icon: 'terminal' }
+];
+
+/** The lower half holds live session services, which is why it gets its own strip. */
+const BOTTOM_TABS: { id: PanelBottomTab; label: string; icon: string }[] = [
+  { id: 'mcp', label: 'MCP', icon: 'server' },
+  { id: 'subagents', label: 'Subagents', icon: 'fork' }
 ];
 
 export function RightPanel({ session }: { session: SessionMeta }) {
   const tab = useStore((s) => s.panelTab);
   const setTab = useStore((s) => s.setPanelTab);
+  const bottomTab = useStore((s) => s.panelBottomTab);
+  const setBottomTab = useStore((s) => s.setPanelBottomTab);
+  const reveal = useStore((s) => s.subagentReveal);
   const togglePanel = useStore((s) => s.togglePanel);
+  // The lower half loads a tab the first time it is opened: MCP probes servers, and the Subagents tab
+  // lists run files, neither of which should happen for a half the user may never look at.
+  const [opened, setOpened] = useState<PanelBottomTab[]>([]);
+  const openBottom = (next: PanelBottomTab) => {
+    setBottomTab(next);
+    setOpened((prev) => (prev.includes(next) ? prev : [...prev, next]));
+  };
+  useEffect(() => {
+    if (reveal) setOpened((prev) => (prev.includes('subagents') ? prev : [...prev, 'subagents']));
+  }, [reveal]);
   return (
     <aside className="panel">
-      <div className="panel-tabs">
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
-            <Icon name={t.icon} size={13} /> {t.label}
-            {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
-          </button>
-        ))}
-        <span className="spacer" />
-        <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+      <div className="panel-section panel-top">
+        <div className="panel-tabs">
+          {TABS.map((t) => (
+            <button key={t.id} type="button" className={`panel-tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+              <Icon name={t.icon} size={13} /> {t.label}
+              {t.id === 'goal' && session.goal?.status === 'active' && <span className="dot-live" />}
+            </button>
+          ))}
+          <span className="spacer" />
+          <Button variant="ghost" size="sm" icon="x" onClick={() => togglePanel(false)} aria-label="Close panel" />
+        </div>
+        <div className="panel-body">
+          {tab === 'changes' && <ChangesTab session={session} />}
+          {tab === 'files' && <FilesTab session={session} />}
+          {tab === 'branches' && <BranchesTab session={session} />}
+          {tab === 'goal' && <GoalTab session={session} />}
+          {tab === 'usage' && <UsageTab session={session} />}
+          {tab === 'terminal' && <TerminalPanel session={session} />}
+        </div>
       </div>
-      <div className="panel-body">
-        {tab === 'changes' && <ChangesTab session={session} />}
-        {tab === 'files' && <FilesTab session={session} />}
-        {tab === 'branches' && <BranchesTab session={session} />}
-        {tab === 'goal' && <GoalTab session={session} />}
-        {tab === 'mcp' && <McpTab session={session} />}
-        {tab === 'usage' && <UsageTab session={session} />}
-        {tab === 'terminal' && <TerminalPanel session={session} />}
+      <SplitResizer />
+      <div className="panel-section panel-bottom">
+        <div className="panel-tabs">
+          {BOTTOM_TABS.map((t) => (
+            <button key={t.id} type="button" className={`panel-tab ${bottomTab === t.id ? 'active' : ''}`} onClick={() => openBottom(t.id)} data-testid={`panel-bottom-${t.id}`}>
+              <Icon name={t.icon} size={13} /> {t.label}
+            </button>
+          ))}
+          <span className="spacer" />
+        </div>
+        <div className="panel-body">
+          {bottomTab === 'mcp' && opened.includes('mcp') && <McpTab session={session} />}
+          {bottomTab === 'subagents' && opened.includes('subagents') && <SubagentsTab session={session} />}
+        </div>
       </div>
       <Resizer target="panel" />
     </aside>

@@ -476,6 +476,10 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('sessions:create', (req) => sessions.create(req));
   handle('sessions:get', ({ id }) => sessions.get(id) ?? null);
   handle('sessions:transcript', ({ id }) => sessions.transcript(id));
+  handle('subagents:list', ({ id }) => sessions.subagentRuns(id));
+  handle('subagents:get', ({ id, runId }) => sessions.subagentRun(id, runId));
+  handle('subagents:stop', ({ id, runId }) => sessions.subagentCommand(id, runId, 'stop'));
+  handle('subagents:steer', ({ id, runId, message }) => sessions.subagentCommand(id, runId, 'steer', message));
   handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {
     // Shells hold their cwd open; take them down before the worktree is removed.

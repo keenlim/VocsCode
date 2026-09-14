@@ -51,6 +51,7 @@ npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run te
 # In-app auto-update (issue #198) against a staged mock update feed (stages resources/app-update.yml in dist/win-unpacked).
 npm run dist:dir && VOCS_CODE_E2E_UI=1 HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.update.test.ts
 VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts
+VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
@@ -70,6 +71,7 @@ Which suite a change must keep passing — and extend, per **E2E discipline**:
 | Vesta panel, `agents/` pi bridge, `resources/pi/vocs-code-vesta.ts` | `tests/vesta.test.ts` + `e2e.vesta` (opt-in, real pi) |
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
+| Subagents panel, right-panel split | `VOCS_CODE_E2E_UI=1 vitest run tests/e2e.subagents.test.ts` + `e2e.layout`, `e2e.files` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |
 
 `.github/workflows/ci.yml` runs the gate plus `test:e2e:ci` on every PR into `develop`. The live tiers below stay manual.

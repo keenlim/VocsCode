@@ -5,12 +5,11 @@ user-installed third-party pi extension (`@tintinweb/pi-subagents`) with a bundl
 owns, so subagent runs are permission-gated like everything else, visible in the UI, and counted in
 analytics with real numbers instead of reverse-engineered ones.
 
-> **Status.** The extension, harness wiring, permission gate, run records and analytics landed first
-> (`resources/pi/vocs-code-subagents.ts` and its modules, plus the app-side events). The **run panel
-> — right-panel vertical split with the Subagents tab, run detail and per-call table — is the
-> remaining piece**, together with the IPC channels that feed it and its Electron E2E suite. Until
-> then a run appears as a transcript tool card (hint `agent`) plus analytics rows, and its full
-> transcript lives in `<sessionDir>/subagents/<runId>.jsonl`.
+> **Status.** Shipped: the extension (`resources/pi/vocs-code-subagents.ts` and its modules), the
+> harness wiring, the permission gate, run records, analytics, and the run panel — the right panel's
+> vertical split with the MCP | Subagents strip, run list, run detail with the per-call table, the
+> transcript card's link into it, and Stop/Steer. `tests/e2e.subagents.test.ts` covers the panel
+> offline (seeded state) and end to end against the real pi runtime.
 
 Design decisions below are settled; the items in [Open items](#open-items) are the ones still to
 resolve during implementation.
@@ -176,27 +175,30 @@ collapsed into the synthetic `subagent` counter).
 
 ## UI
 
-The right panel becomes a vertical split:
+The right panel is a vertical split:
 
-- **Top** — the workspace tabs that exist today: Changes, Files, Git, Goal, Usage, Terminal.
-- **Bottom** — a second tab strip with **MCP** and **Subagents**.
-- A vertical `Resizer` and a persisted split fraction (sibling of the existing `panelWidth`).
-  `Ctrl+J` still toggles the whole panel.
+- **Top** — the workspace tabs: Changes, Files, Git, Goal, Usage, Terminal.
+- **Bottom** — a second tab strip with **MCP** and **Subagents**, mounted lazily: a half's tab loads
+  the first time it is opened (MCP probes servers; Subagents lists run files), and a transcript card
+  link mounts the Subagents tab without a click.
+- A vertical `Resizer` (`SplitResizer`) with a persisted `panelSplit` fraction (AppSettings, default
+  0.62). `Ctrl+J` still toggles the whole panel.
 
 **Subagents tab**
 
-- Run list for the active session: status, agent type, one-line description, model, elapsed time,
-  tool-call count, cost. Live while running.
-- Run detail: child transcript (text, thinking, tool calls, changes), the per-call analytics table,
-  and per-run **Stop** / **Steer** actions for background runs.
-- Empty state when a session has no runs; runs restored from disk after restart render as history.
+- Run list for the active session: status, agent type, one-line description, model, turns, tool
+  calls, cost. Live while running, refreshed from the `subagent.run` session events.
+- Run detail: child transcript (text, thinking, tool calls, outputs), the per-call analytics table,
+  and **Stop** / **Steer** for a running run (`/vocs-subagent-stop` and `/vocs-subagent-steer`).
+- Non-pi sessions explain that subagents are a pi feature rather than showing an empty pane.
 
 **Transcript**
 
 - The `subagent` tool call renders as a tool card with `hint: 'agent'`, the description as its
-  summary, live status, and a footer with model, tool count, cost and duration.
-- The card links into the panel: clicking opens the bottom tab on that run.
-- `ToolKindHint` already has `'agent'`; pi's adapter must set it (Codex sets it today; pi does not).
+  summary, live status, and — once the run id is known — an `open run` chip that opens the panel on
+  that run.
+
+**IPC**: `subagents:list`, `subagents:get`, `subagents:stop`, `subagents:steer`.
 
 ## Storage and wire contract
 
@@ -291,9 +293,9 @@ Per `AGENTS.md`, everything below must actually execute — no silent skips.
 
 | Layer | Coverage |
 | --- | --- |
-| Unit | Agent-file discovery and precedence, frontmatter parsing, tool allowlists; gate decision table across all five modes, dangerous commands, outside-workspace paths, symlink/junction escapes; run-file append/read; per-call stats roll-up; the extension driven by a scripted child session (caps, gating, lifecycle, live events); the harness bridge (`pi.ts` subagent notifications → events); analytics attribution of background spend. |
+| Unit | Agent-file discovery and precedence, frontmatter parsing, tool allowlists; gate decision table across all five modes, dangerous commands, outside-workspace paths, symlink/junction escapes; run-file append/read and the reader's traversal rejections; per-call stats roll-up; the extension driven by a scripted child session (caps, gating, lifecycle, live events); the harness bridge (`pi.ts` subagent notifications → events); analytics attribution of background spend; the Subagents tab over a stubbed bridge. |
 | Integration (real pi CLI, offline scripted provider) | `tests/pi-subagents.integration.test.ts`: tools registered alongside the third-party ones, a foreground child runs and its run file parses, an unknown type is rejected, and a child command is **approved once and denied once — the denied one never runs**. |
-| Electron E2E (offline) | `tests/e2e.pi-tools.test.ts` now loads the subagent extension with the app and asserts each bundled pi resource is copied byte-for-byte. The panel suite (`tests/e2e.subagents.test.ts`) arrives with the panel. |
+| Electron E2E (offline) | `tests/e2e.subagents.test.ts`: seeded transcript + run file drive the split, the strip, the run list, the detail with its per-call table and the card's `open run` link (plus a reload), and — under `VOCS_CODE_PI_INTEGRATION=1` — a real pi session whose recorded run reaches the panel. `tests/e2e.pi-tools.test.ts` asserts each bundled pi resource is copied byte-for-byte. |
 | Packaged | `npm run dist:dir` + the subagent and pi suites against `HARNESS_E2E_EXE`, because the extension is a bundled resource. |
 | Live (manual) | `HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=pi` and the packaged Electron run. |
 
@@ -316,15 +318,12 @@ design — the scripted provider answers from a queue or from a marker in the ch
 
 ## Open items
 
-- **The run panel** (right-panel vertical split, Subagents tab, run detail, per-call table, card→panel
-  link) and the IPC channels that feed it: `subagents:list`, `subagents:get`, `subagents:stop`,
-  `subagents:steer`. The stop/steer commands already exist as `/vocs-subagent-stop` and
-  `/vocs-subagent-steer`, so the panel work is UI plus those two read channels.
 - **Always-on vs setting.** Shipped always-on for pi sessions (matching today's behavior for users
   who already have a subagent extension). A setting remains cheap to add.
 - Whether background runs' approvals should be allowed to appear while the parent is mid-turn
   (current answer: queued, one card at a time).
-- Retention numbers for run files.
+- Retention numbers for run files: they grow with the session and nothing prunes them yet.
+- The Subagents tab lists the active session only; the dashboard carries the aggregate view.
 - `src/main/pi-agents.ts` still installs the third-party Explore override and `reportUsage`; it is
   harmless for our runs and only serves users who keep the third-party extension. Retire it when
   that compatibility path is dropped.

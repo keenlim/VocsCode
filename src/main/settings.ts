@@ -209,6 +209,7 @@ export function defaultSettings(): AppSettings {
     modelOverrides: {},
     sidebarWidth: 280,
     panelWidth: 420,
+    panelSplit: 0.62,
     recentProjects: [],
     folders: [],
     folderStyles: {},

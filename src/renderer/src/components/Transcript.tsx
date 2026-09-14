@@ -308,7 +308,7 @@ function renderItem(item: TranscriptItem, sessionId: string, canEdit: boolean, s
     case 'assistant':
       return <AssistantMessage item={item} showThinking={showThinking} />;
     case 'tool':
-      return <ToolCard item={item} />;
+      return <ToolCard item={item} sessionId={sessionId} />;
     case 'approval':
       return <ApprovalCard item={item} sessionId={sessionId} />;
     case 'info':
@@ -534,7 +534,7 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
         <div className="tool-group-body">
           {entries.map((e) =>
             e.kind === 'tool' ? (
-              <ToolCard key={e.id} item={e} dataItemId={e.id} />
+              <ToolCard key={e.id} item={e} sessionId={sessionId} dataItemId={e.id} />
             ) : (
               <Item key={e.id} item={e} sessionId={sessionId} canEdit={canEdit} showThinking={showThinking} onImageExpand={onImageExpand} dataItemId={e.id} />
             )
@@ -545,8 +545,9 @@ export function ToolGroup({ entries, sessionId, canEdit = false, showThinking, o
   );
 }
 
-function ToolCard({ item, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; dataItemId?: string }) {
+function ToolCard({ item, sessionId, dataItemId }: { item: Extract<TranscriptItem, { kind: 'tool' }>; sessionId: string; dataItemId?: string }) {
   const [open, setOpen] = useState(false);
+  const revealSubagentRun = useStore((s) => s.revealSubagentRun);
   const hasBody = !!item.output || !!(item.changes && item.changes.length) || item.input !== undefined;
   const statusTone = item.status === 'running' ? 'blue' : item.status === 'error' ? 'red' : item.status === 'declined' ? 'amber' : 'green';
   return (
@@ -559,6 +560,26 @@ function ToolCard({ item, dataItemId }: { item: Extract<TranscriptItem, { kind: 
         {item.changes?.length ? <span className="tool-changes">{item.changes.length} file{item.changes.length === 1 ? '' : 's'}</span> : null}
         {item.status === 'running' ? <Spinner size={12} /> : <Badge tone={statusTone}>{item.status === 'done' ? (item.exitCode !== undefined && item.exitCode !== null ? `exit ${item.exitCode}` : 'done') : item.status}</Badge>}
         {item.durationMs ? <span className="muted small">{fmtDuration(item.durationMs)}</span> : null}
+        {item.runId ? (
+          <span
+            className="chip"
+            role="button"
+            tabIndex={0}
+            title="Open this run in the Subagents panel"
+            onClick={(e) => {
+              e.stopPropagation();
+              revealSubagentRun(sessionId, item.runId!);
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return;
+              e.preventDefault();
+              e.stopPropagation();
+              revealSubagentRun(sessionId, item.runId!);
+            }}
+          >
+            open run
+          </span>
+        ) : null}
         {hasBody && <Icon name={open ? 'chevron' : 'chevronRight'} size={12} />}
       </button>
       {(open || (item.status === 'running' && item.hint === 'execute' && item.output)) && (
