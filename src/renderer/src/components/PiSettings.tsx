@@ -49,7 +49,7 @@ function relativeTo(agentDir: string, p: string): string {
 export function PiSection() {
   const [setup, setSetup] = useState<PiSetup | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [promptName, setPromptName] = useState<PiPromptName>('AGENTS.md');
+  const [promptName, setPromptName] = useState<PiPromptName>('SYSTEM.md');
   const [drafts, setDrafts] = useState<Partial<Record<PiPromptName, string>>>({});
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [proxyDraft, setProxyDraft] = useState<string | null>(null);
@@ -313,7 +313,7 @@ export function PiSection() {
 
           <h3>System prompt files</h3>
           <p className="muted small">
-            Global instruction files in the agent dir. <code>AGENTS.md</code> adds project-agnostic instructions, <code>APPEND_SYSTEM.md</code> appends to pi&rsquo;s system prompt, and <code>SYSTEM.md</code> replaces it entirely. Saving an empty file removes it.
+            Global instruction files in the agent dir. <code>SYSTEM.md</code> replaces pi&rsquo;s system prompt entirely, <code>APPEND_SYSTEM.md</code> appends to it, and <code>AGENTS.md</code> adds project-agnostic instructions. Saving an empty file removes it.
           </p>
           <div className="pi-tabs">
             {setup.promptFiles.map((f) => (

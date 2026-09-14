@@ -79,7 +79,9 @@ describe.runIf(enabled)('pi settings UI', () => {
     await expect.poll(async () => (await readSettings()).defaultThinkingLevel).toBe('low');
     expect((await readSettings()).theme).toBe('dark');
 
-    // The prompt editor creates the file on save.
+    // The prompt editor creates the file on save; AGENTS.md is the third tab in the System,
+    // Append, Agent sequence.
+    await win.locator('.pi-tab:has-text("AGENTS.md")').click();
     await win.locator('.pi-prompt-editor').fill('# house rules\nBe brief.\n');
     await win.locator('.pi-prompt-actions button:has-text("Save")').click();
     await expect.poll(async () => fs.readFile(path.join(agentDir, 'AGENTS.md'), 'utf8').catch(() => '')).toBe('# house rules\nBe brief.\n');

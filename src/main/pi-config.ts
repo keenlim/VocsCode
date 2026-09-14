@@ -38,7 +38,7 @@ import { isSubPath, writeJson } from './util/fs';
 import type { Logger } from './log';
 
 export const PI_RESOURCE_TYPES: PiResourceType[] = ['extensions', 'skills', 'prompts', 'themes'];
-export const PI_PROMPT_NAMES: PiPromptName[] = ['AGENTS.md', 'APPEND_SYSTEM.md', 'SYSTEM.md'];
+export const PI_PROMPT_NAMES: PiPromptName[] = ['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md'];
 
 /** pi refuses to load a prompt file larger than this anyway; the cap also bounds the IPC payload. */
 const PROMPT_FILE_LIMIT = 512 * 1024;

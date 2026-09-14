@@ -301,7 +301,7 @@ export interface PiPreferences {
 export type PiPreferencesPatch = { [K in keyof PiPreferences]?: PiPreferences[K] | null };
 
 /** Global pi prompt files, editable from Settings. */
-export type PiPromptName = 'AGENTS.md' | 'APPEND_SYSTEM.md' | 'SYSTEM.md';
+export type PiPromptName = 'SYSTEM.md' | 'APPEND_SYSTEM.md' | 'AGENTS.md';
 
 export interface PiPromptFile {
   name: PiPromptName;
