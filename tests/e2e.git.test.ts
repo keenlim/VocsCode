@@ -3,8 +3,9 @@
  * Clicking a PR row opens the same kind of detail dialog issues already have, with GitHub's
  * markdown body and metadata; the issue dialog keeps working, comment counts included. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
- * The row's New session action starts a review session on the repo, seeded with the review
- * template as its first message; that turn is not asserted, since no provider key is configured.
+ * The row's New session action confirms first in a dialog carrying the review template, editable
+ * before the session starts on the repo; that turn is not asserted, since no provider key is
+ * configured.
  * The session is seeded on disk so no harness and no provider key is involved. Requires
  * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
@@ -169,22 +170,33 @@ describe.runIf(enabled)('git panel PR details', () => {
 });
 
 describe.runIf(enabled)('git panel PR review session', () => {
-  it('starts a review session on the repo from the row, not a menu', async () => {
+  it('confirms the review prompt in a dialog, then starts the session on the repo', async () => {
     const { app, win } = await launchGitPanel(420);
 
     // The ⋯ menu is gone: the row keeps the GitHub link and gains the New session action.
     expect(await win.locator('.pr-row .branch-actions .btn').count()).toBe(2);
     await win.getByRole('button', { name: 'New session to review PR #7' }).click();
 
+    // The action confirms first: the dialog is seeded with the review template, and nothing is
+    // created until it is confirmed.
+    const promptBox = win.getByTestId('pr-review-prompt');
+    await promptBox.waitFor({ timeout: 30_000 });
+    expect(await promptBox.inputValue()).toContain('Review pull request #7 "Ship the widget"');
+    expect(await win.locator('[data-testid="session-row"]', { hasText: 'Review PR #7' }).count()).toBe(0);
+
+    // Whatever is left in the dialog is the session's first message.
+    await promptBox.fill('Custom brief for PR #7.\nRun `gh pr diff 7` and flag risks.');
+    await win.getByRole('button', { name: 'Start session' }).click();
+
     // The app switches to a session titled for the PR, open on the review template. The seeded
     // session's own transcript is already on screen, so wait for the new session's title and
     // prompt instead of the first user message that happens to be visible.
     await win.waitForSelector('[data-testid="session-title"][title="Review PR #7"]', { timeout: 30_000 });
-    const prompt = win.locator('.msg-user .msg-text', { hasText: 'Review pull request #7' });
-    await prompt.first().waitFor({ timeout: 30_000 });
-    const promptText = await prompt.first().innerText();
+    const opened = win.locator('.msg-user .msg-text', { hasText: 'Custom brief for PR #7' });
+    await opened.first().waitFor({ timeout: 30_000 });
+    const promptText = await opened.first().innerText();
     expect(await win.getByTestId('session-title').innerText()).toBe('Review PR #7');
-    expect(promptText).toContain('Review pull request #7 "Ship the widget"');
+    expect(promptText).toContain('Custom brief for PR #7.');
     expect(promptText).toContain('gh pr diff 7');
     // On the repo itself rather than an isolated worktree: the sidebar row carries no worktree tag.
     const row = win.locator('[data-testid="session-row"]', { hasText: 'Review PR #7' });

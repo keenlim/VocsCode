@@ -6,7 +6,7 @@ import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
 import { GitSetup } from './GitSetup';
-import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
+import { askConfirm, askPrompt, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
 
 /** Branches untouched for this long land in the Stale filter. */
 const STALE_DAYS = 14;
@@ -264,17 +264,25 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     return true;
   };
 
-  /** First message of a review session: the PR table's New session action sends this as the prompt. */
+  /** Seeds the review dialog: the PR table's New session action sends this once it is confirmed. */
   const prReviewPrompt = (pr: GitPullRequest) =>
     `Review pull request #${pr.number} "${pr.title}" (${pr.url})${pr.headRefName ? `, branch \`${pr.headRefName}\`` : ''}${pr.baseRefName ? ` into \`${pr.baseRefName}\`` : ''}. Run \`gh pr diff ${pr.number}\` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.`;
 
   /** Starts a review session on this repo: the PR table's New session action, no folder picker. */
   const reviewPrInNewSession = async (pr: GitPullRequest) => {
+    const prompt = await askPrompt({
+      title: `Start a session to review PR #${pr.number}?`,
+      body: `New session in ${session.config.projectRoot}, on its current checkout.`,
+      confirmLabel: 'Start session',
+      input: { label: 'First message', value: prReviewPrompt(pr), rows: 6, testId: 'pr-review-prompt' }
+    });
+    if (prompt === null) return;
+    const firstMessage = prompt.trim();
     try {
       const meta = await invoke('sessions:create', {
         config: { ...session.config, useWorktree: false },
         title: `Review PR #${pr.number}`,
-        initialPrompt: prReviewPrompt(pr)
+        initialPrompt: firstMessage || undefined
       });
       await setActive(meta.id);
       toast(`Session started to review PR #${pr.number}`, 'success');

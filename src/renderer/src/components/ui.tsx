@@ -299,9 +299,11 @@ export interface ConfirmOptions {
   cancelLabel?: string;
   /** Styles the confirming button as destructive. */
   danger?: boolean;
+  /** Adds an editable field to the dialog; askPrompt resolves its text instead of a boolean. */
+  input?: { label?: React.ReactNode; value: string; rows?: number; placeholder?: string; testId?: string };
 }
 
-type PendingConfirm = ConfirmOptions & { resolve: (ok: boolean) => void };
+type PendingConfirm = ConfirmOptions & { resolve: (value: string | null) => void };
 
 let confirmHost: ((p: PendingConfirm | null) => void) | null = null;
 let confirmOpen = false;
@@ -312,14 +314,28 @@ let confirmOpen = false;
  * looks exactly like a frozen app — no clicks, no typing, no dropdowns.
  */
 export function askConfirm(options: ConfirmOptions): Promise<boolean> {
-  if (!confirmHost || confirmOpen) return Promise.resolve(false);
+  return ask(options).then((value) => value !== null);
+}
+
+/**
+ * A confirmation dialog that carries an editable text field: resolves the field's text, or null
+ * when the dialog is dismissed. For cases where the user should be able to adjust what is about to
+ * be sent, such as the first message of the session they are starting.
+ */
+export function askPrompt(options: ConfirmOptions): Promise<string | null> {
+  return ask(options);
+}
+
+/** One dialog at a time behind both helpers; a dismissed dialog resolves null. */
+function ask(options: ConfirmOptions): Promise<string | null> {
+  if (!confirmHost || confirmOpen) return Promise.resolve(null);
   confirmOpen = true;
-  return new Promise<boolean>((resolve) => {
+  return new Promise<string | null>((resolve) => {
     confirmHost?.({
       ...options,
-      resolve: (ok) => {
+      resolve: (value) => {
         confirmOpen = false;
-        resolve(ok);
+        resolve(value);
       }
     });
   });
@@ -328,6 +344,7 @@ export function askConfirm(options: ConfirmOptions): Promise<boolean> {
 /** Mounted once by App; renders whatever askConfirm is currently waiting on. */
 export function ConfirmHost() {
   const [pending, setPending] = useState<PendingConfirm | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     confirmHost = setPending;
     return () => {
@@ -335,28 +352,45 @@ export function ConfirmHost() {
     };
   }, []);
   if (!pending) return null;
-  const answer = (ok: boolean) => {
+  const answer = (value: string | null) => {
     setPending(null);
-    pending.resolve(ok);
+    pending.resolve(value);
   };
   return (
     <Modal
       title={pending.title}
-      width={460}
-      onClose={() => answer(false)}
+      width={pending.input ? 560 : 460}
+      onClose={() => answer(null)}
       footer={
         <>
           <span className="spacer" />
-          <Button size="sm" onClick={() => answer(false)}>
+          <Button size="sm" onClick={() => answer(null)}>
             {pending.cancelLabel ?? 'Cancel'}
           </Button>
-          <Button size="sm" variant={pending.danger ? 'danger' : 'primary'} autoFocus onClick={() => answer(true)}>
+          <Button
+            size="sm"
+            variant={pending.danger ? 'danger' : 'primary'}
+            autoFocus={!pending.input}
+            onClick={() => answer(pending.input ? (inputRef.current?.value ?? '') : '')}
+          >
             {pending.confirmLabel ?? 'Confirm'}
           </Button>
         </>
       }
     >
       {pending.body ?? null}
+      {pending.input && (
+        <Field label={pending.input.label ?? 'Prompt'}>
+          <textarea
+            ref={inputRef}
+            autoFocus
+            rows={pending.input.rows ?? 6}
+            placeholder={pending.input.placeholder}
+            defaultValue={pending.input.value}
+            data-testid={pending.input.testId ?? 'ask-input'}
+          />
+        </Field>
+      )}
     </Modal>
   );
 }
