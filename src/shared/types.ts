@@ -7,6 +7,25 @@ import type { ThemeId } from './themes';
 import type { ShortcutCommand } from './shortcuts';
 import type { ReliabilityReport } from './analytics/reliability';
 
+import type { SubagentRunMode, SubagentRunStatus } from './subagents';
+
+/** Live view of a Vocs Code subagent run, as the pi extension reports it. */
+export interface SubagentRunUpdate {
+  runId: string;
+  agent: string;
+  description: string;
+  mode: SubagentRunMode;
+  status: SubagentRunStatus;
+  provider?: string;
+  model?: string;
+  startedAt: number;
+  endedAt?: number;
+  costUsd?: number;
+  turns?: number;
+  toolUses?: number;
+  error?: string;
+}
+
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
 /** App-level permission modes, mapped per harness (see harness-meta.ts). */
@@ -851,6 +870,8 @@ export type SessionEvent =
   | { type: 'approval.resolved'; requestId: string; decision: ApprovalDecision }
   | { type: 'usage'; totals: UsageTotals; /** Subagent spend in this delta, per model, so it is attributed to the model that ran it. */ subagentCostByModel?: SubagentCost[] }
   | { type: 'subagent'; completion: SubagentCompletion }
+  /** Live subagent run state for the panel; the durable record is the run file on disk. */
+  | { type: 'subagent.run'; run: SubagentRunUpdate }
   | { type: 'meta'; patch: Partial<SessionMeta> }
   | { type: 'error'; message: string; fatal?: boolean }
   | { type: 'models'; models: ModelInfo[] }
@@ -883,6 +904,14 @@ export interface SubagentCompletion {
   tokens?: number;
   durationMs?: number;
   error?: string;
+  /** Agent type that ran (Vocs Code subagents report `Explore`, `Plan`, ...). */
+  agentType?: string;
+  /**
+   * Token breakdown a background run produced that the harness totals do not include yet. Foreground
+   * runs omit it: pi folds their usage into the session totals through the tool result, and counting
+   * it here as well would double the spend.
+   */
+  usage?: Partial<UsageTotals>;
 }
 
 export interface HarnessAvailability {

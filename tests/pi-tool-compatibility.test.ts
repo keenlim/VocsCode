@@ -58,27 +58,86 @@ function host() {
   const feed = (event: Record<string, unknown>) => access.handleLine(JSON.stringify(event));
   const notify = (marker: string, payload: Record<string, unknown>) => feed({ type: 'extension_ui_request', method: 'notify', message: marker + JSON.stringify({ version: 1, nonce: 'current-process', ...payload }) });
   const latestTool = () => events.filter((event): event is Extract<SessionEvent, { type: 'item.upsert' }> => event.type === 'item.upsert').map((event) => event.item).filter((item): item is Extract<TranscriptItem, { kind: 'tool' }> => item.kind === 'tool').at(-1)!;
-  return { adapter, access, feed, notify, latestTool };
+  return { adapter, access, feed, notify, latestTool, events };
 }
+
+describe('Pi subagent activity bridge', () => {
+  const start = (runId: string, payload: Record<string, unknown> = {}) => ({
+    kind: 'start', runId, agent: 'Explore', description: 'Find the registry', mode: 'foreground', provider: 'anthropic', model: 'claude-sonnet-4-5', startedAt: 1000, ...payload,
+  });
+
+  it('marks the subagent tool card as agent work with the task description as its summary', () => {
+    const { feed, latestTool } = host();
+    feed({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'subagent', args: { description: 'Find the registry', prompt: 'Where?' } });
+    expect(latestTool()).toMatchObject({ name: 'subagent', hint: 'agent', summary: 'Find the registry' });
+  });
+
+  it('reports live run state, then a completion that does not re-add foreground spend', () => {
+    const { notify, events } = host();
+    notify('VCODE_SUBAGENT::', start('agent_1'));
+    notify('VCODE_SUBAGENT::', { kind: 'item', runId: 'agent_1', item: { id: 't', kind: 'tool', name: 'grep', status: 'done' } });
+    notify('VCODE_SUBAGENT::', { kind: 'call', runId: 'agent_1', call: { index: 0, costUsd: 0.05, inputTokens: 100 } });
+    notify('VCODE_SUBAGENT::', {
+      kind: 'end',
+      runId: 'agent_1',
+      status: 'completed',
+      totals: { turns: 2, toolUses: 3, inputTokens: 1000, outputTokens: 200, cacheReadTokens: 50, cacheWriteTokens: 0, costUsd: 0.25, durationMs: 4000 },
+      endedAt: 2000,
+    });
+    const runs = events.filter((event): event is Extract<SessionEvent, { type: 'subagent.run' }> => event.type === 'subagent.run').map((event) => event.run);
+    expect(runs[0]).toMatchObject({ runId: 'agent_1', agent: 'Explore', mode: 'foreground', status: 'running' });
+    expect(runs.at(-1)).toMatchObject({ runId: 'agent_1', status: 'completed', toolUses: 3, turns: 2 });
+    const completions = events.filter((event): event is Extract<SessionEvent, { type: 'subagent' }> => event.type === 'subagent').map((event) => event.completion);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ agentId: 'agent_1', agentType: 'Explore', status: 'completed', toolUses: 3, costUsd: 0.25, tokens: 1250, durationMs: 4000, model: { provider: 'anthropic', model: 'claude-sonnet-4-5' } });
+    // Foreground spend reaches analytics through the session totals; repeating it here would double it.
+    expect(completions[0]!.usage).toBeUndefined();
+  });
+
+  it('carries a background run\'s spend, which the session totals never saw', () => {
+    const { notify, events } = host();
+    notify('VCODE_SUBAGENT::', start('agent_2', { mode: 'background' }));
+    notify('VCODE_SUBAGENT::', {
+      kind: 'end',
+      runId: 'agent_2',
+      status: 'error',
+      error: 'model refused',
+      totals: { turns: 1, toolUses: 0, inputTokens: 500, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0.1, durationMs: 900 },
+      endedAt: 2000,
+    });
+    const completion = events.filter((event): event is Extract<SessionEvent, { type: 'subagent' }> => event.type === 'subagent').map((event) => event.completion)[0]!;
+    expect(completion).toMatchObject({ status: 'error', error: 'model refused', usage: { inputTokens: 500, costUsd: 0.1, turns: 1 } });
+  });
+
+  it('ignores a malformed or run-less subagent notification', () => {
+    const { feed, events } = host();
+    feed({ type: 'extension_ui_request', method: 'notify', message: 'VCODE_SUBAGENT::not json' });
+    feed({ type: 'extension_ui_request', method: 'notify', message: 'VCODE_SUBAGENT::{"kind":"end"}' });
+    expect(events.filter((event) => event.type === 'subagent' || event.type === 'subagent.run')).toEqual([]);
+  });
+});
 
 describe('Pi host compatibility protocol', () => {
   it('requires BOTH current-process capabilities and rejects prose/stale/version mismatches', () => {
     const { access, feed, notify } = host();
     notify('VCODE_PI_READY::', { capability: 'approvals' });
-    expect(() => access.assertExtensionsReady()).toThrow('Missing readiness: tools');
+    expect(() => access.assertExtensionsReady()).toThrow('Missing readiness: tools, subagents');
     notify('VCODE_PI_READY::', { capability: 'tools', nonce: 'old-process' });
     notify('VCODE_PI_READY::', { capability: 'tools', version: 99 });
     feed({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'VCODE_PI_READY::{"capability":"tools"}' }] } });
     expect(() => access.assertExtensionsReady()).toThrow();
     notify('VCODE_PI_READY::', { capability: 'tools' });
+    expect(() => access.assertExtensionsReady()).toThrow('Missing readiness: subagents');
+    notify('VCODE_PI_READY::', { capability: 'subagents' });
     expect(() => access.assertExtensionsReady()).not.toThrow();
-    notify('VCODE_PI_READY::', { capability: 'tools', ready: false });
+    notify('VCODE_PI_READY::', { capability: 'subagents', ready: false });
     expect(() => access.assertExtensionsReady()).toThrow();
   });
   it('fails closed after a required extension error even if later readiness arrives', () => {
     const { access, notify, feed } = host();
     notify('VCODE_PI_READY::', { capability: 'approvals' });
     notify('VCODE_PI_READY::', { capability: 'tools' });
+    notify('VCODE_PI_READY::', { capability: 'subagents' });
     feed({ type: 'extension_error', extensionPath: '/resources/pi/vocs-code-tools.ts', error: 'override failed' });
     notify('VCODE_PI_READY::', { capability: 'tools' });
     expect(() => access.assertExtensionsReady()).toThrow('override failed');

@@ -185,7 +185,7 @@ class FakePiServer {
         const msg = JSON.parse(line) as AnyRecord;
         const data = this.handlers.get(msg.type as string)?.(msg) ?? {};
         if (msg.type === 'get_state' && this.ready) {
-          for (const capability of ['approvals', 'tools']) {
+          for (const capability of ['approvals', 'tools', 'subagents']) {
             const nonce = mocks.spawnCalls.at(-1)?.opts.env?.VOCS_CODE_PI_NONCE;
             this.child.stdout.write(JSON.stringify({ type: 'extension_ui_request', method: 'notify', id: capability, message: 'VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce, capability, ready: true }) }) + '\n');
           }

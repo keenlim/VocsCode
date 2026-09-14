@@ -7,30 +7,40 @@
  * the RPC extension-UI channel. The `select` title carries a JSON payload prefixed
  * with VCODE_APPROVAL:: which the desktop app renders as an approval card.
  *
- * Modes (VOCS_CODE_PERMISSION_MODE, re-read from VOCS_CODE_MODE_FILE before each call):
- *   ask          -> confirm bash/edit/write
- *   accept-edits -> confirm bash only (and edits outside the project)
- *   plan         -> block bash/edit/write
- *   auto         -> confirm only dangerous shell commands and edits outside the project
- *   full-auto    -> never ask
+ * The decision itself lives in `subagent-gate.ts` so subagent child sessions enforce exactly the
+ * same rules; this file only owns the parent's prompting and its session-scoped grants.
  *
  * A dangerous command always prompts below full access, even after "Allow for session".
  */
 
-import path from 'node:path';
-import { promises as fs } from 'node:fs';
+import {
+  APPROVAL_MARKER,
+  APPROVAL_OPTIONS,
+  BLOCK_MARKER,
+  DECLINED_REASON,
+  DANGEROUS,
+  GRANT_EVENT,
+  type Mode,
+  decideToolCall,
+  readModeFile,
+  readModeFromEnv,
+  trimInput,
+  type ApprovalChoice
+} from './subagent-gate';
 
-type Mode = 'ask' | 'accept-edits' | 'plan' | 'auto' | 'full-auto';
+// The dangerous-command list is shared with the child gate; re-exported because the offline test
+// asserts it stays verbatim-identical to src/main/harness/types.ts.
+export { DANGEROUS };
 
-interface ToolCallEventLike {
+type ToolCallEventLike = {
   type: 'tool_call';
   toolName: string;
   toolCallId?: string;
   input: Record<string, unknown>;
-}
+};
 
 interface UiLike {
-  select(title: string, options: string[], opts?: Record<string, unknown>): Promise<string | undefined>;
+  select(title: string, options: readonly string[], opts?: Record<string, unknown>): Promise<string | undefined>;
   notify(message: string, type?: string): void;
 }
 
@@ -40,8 +50,14 @@ interface CtxLike {
   cwd?: string;
 }
 
+interface EventsLike {
+  on(channel: string, handler: (payload: unknown) => void): void;
+  emit(channel: string, payload: unknown): void;
+}
+
 interface PiLike {
   on(event: string, handler: (event: ToolCallEventLike, ctx: CtxLike) => Promise<unknown> | unknown): void;
+  events?: EventsLike;
 }
 
 interface ProviderRequestEventLike {
@@ -58,101 +74,18 @@ interface EffortChoice {
   effort?: string;
 }
 
-const MARKER = 'VCODE_APPROVAL::';
-// Structured RPC notification, never inferred from model-visible error prose.
-const BLOCK_MARKER = 'VCODE_TOOL_BLOCKED::';
-const MUTATING = new Set(['bash', 'powershell', 'edit', 'write']);
-const EDITS = new Set(['edit', 'write']);
-/** Tools the MCP bridge extension registers. A server's tool can do anything, so it always asks
- * unless the mode is full-auto; unlike shell commands we have no way to classify it. */
-const MCP_PREFIX = 'mcp__';
-const MODES: Mode[] = ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'];
-
-// Best-effort detection of obviously destructive shell commands; not exhaustive.
-// Verbatim copy of DANGEROUS_COMMAND_PATTERNS in src/main/harness/types.ts — keep the two in sync.
-export const DANGEROUS: RegExp[] = [
-  // rm: recursive + force flags in any arrangement, including shell-quoted flags
-  /\brm\s+(?=(?:(?:"[^"]*"|'[^']*'|-\S+)\s+)*(?:"-[a-z]*r[a-z]*"|'-[a-z]*r[a-z]*'|"--recursive"|'--recursive'|-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:(?:"[^"]*"|'[^']*'|-\S+)\s+)*(?:"-[a-z]*f[a-z]*"|'-[a-z]*f[a-z]*'|"--force"|'--force'|-[a-z]*f[a-z]*\b|--force\b))/i,
-  /\brm\s+(?:(?:-\S+|"-{1,2}[a-zA-Z-]+"|'-{1,2}[a-zA-Z-]+')\s+)*(?:"-[a-z]*r[a-z]*"|'-[a-z]*r[a-z]*'|"--recursive"|'--recursive'|-[a-z]*r[a-z]*\b)(?:\s+-\S+|\s+"-{1,2}[a-zA-Z-]+"|\s+'-{1,2}[a-zA-Z-]+')*\s+["']?[\/~]/i,
-  // dd reading from or writing to a device node
-  /\bmkfs\b|\bdd\s+(?:\S+\s+)*(?:if|of)=\/dev\//i,
-  // chmod 777 with a recursive flag, in any order
-  /\bchmod\s+(?=(?:\S+\s+)*(?:-[a-z]*r[a-z]*\b|--recursive\b))(?=(?:\S+\s+)*777)/i,
-  // git force-push: --force, --force-with-lease, -f or a +-prefixed refspec, allowing global git options before push
-  /\bgit(?:\s+-{1,2}\S+(?:\s+"[^"]*"|\s+\S+)?)*\s+push\b(?=\s)[^|;&]*?(?:--force(?:-with-lease)?\b|\s-f\b|\s\+\S)/i,
-  /\bgit\s+reset\s+--hard\b/i,
-  // any -f-containing flag cluster in any position
-  /\bgit\s+clean\s+(?:-\S+\s+)*-[a-z]*f/i,
-  /\bgit\s+checkout\s+--\s+\./i,
-  /\b(shutdown|reboot|halt)\b/i,
-  /\bformat(?:\.com)?\s+[a-z]:/i,
-  // Windows del/rd/rmdir with recursive-quiet flags in any order
-  /\bdel\s+(?:\/[a-z]+\s+)*\/[sq]/i,
-  /\b(?:rd|rmdir)\s+(?:\/[a-z]+\s+)*\/s/i,
-  // Remove-Item and its aliases with a recurse flag
-  /\b(?:remove-item|ri)\s+(?:\S+\s+)*(?:-recurse\b|-[a-z]*r\b)/i,
-  /\bnpm\s+publish\b|\bpnpm\s+publish\b|\byarn\s+publish\b/i,
-  // Downloaded or decoded payloads piped directly into a shell
-  /\b(?:curl|wget|base64)\b[^|;&\r\n]*\|\s*(?:ba)?sh\b/i,
-  // PowerShell's download-and-evaluate aliases, including its pipeline form
-  /\b(?:iex|invoke-expression)\s*(?:\(\s*)?(?:iwr|invoke-webrequest|irm|invoke-restmethod)\b/i,
-  /\b(?:iwr|invoke-webrequest|irm|invoke-restmethod|curl|wget)\b[^|;&\r\n]*\|\s*(?:iex|invoke-expression)\b/i,
-  /\b(?:sudo|doas|pkexec)\b/i,
-  /(?:^|[|;&]\s*)\bsu(?:\s+(?!--?(?:help|version|h)\b)\S+|\s*$)/i,
-  // arbitrary encoded payloads
-  /\b(?:powershell|pwsh)(?:\.exe)?\s+(?:\S+\s+)*(?:-encodedcommand\b|-enc\b|-e\b)/i,
-  /:\(\)\s*\{\s*:\|:&\s*\};:/
-];
-
-function isDangerous(command: string): boolean {
-  return DANGEROUS.some((re) => re.test(command));
-}
-
-function readModeFromEnv(): Mode {
-  const m = (process.env.VOCS_CODE_PERMISSION_MODE ?? 'ask') as Mode;
-  return MODES.includes(m) ? m : 'ask';
-}
-
-async function isOutsideCwd(cwd: string | undefined, target: unknown): Promise<boolean> {
-  if (!cwd || typeof target !== 'string' || !target) return true;
-  // Pi expands these spellings itself. Require approval rather than checking a
-  // different, unexpanded Node path (including drive paths emitted by Git Bash).
-  if (/^(?:@|~|file:\/\/)/.test(target) || /[\u00a0\u2000-\u200a\u202f\u205f\u3000]/.test(target) ||
-      (process.platform === 'win32' && /^\/(?:mnt\/|cygdrive\/)?[a-z](?:\/|$)/i.test(target))) return true;
-  const inside = (root: string, file: string) => {
-    const rel = path.relative(root, file);
-    return rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
-  };
-  const absolute = path.resolve(cwd, target);
-  if (!inside(path.resolve(cwd), absolute)) return true;
-  try {
-    const root = await fs.realpath(cwd);
-    // New files inherit the nearest existing parent's real location. A junction
-    // inside the workspace may point outside it, even when the suffix is new.
-    let parent = absolute;
-    while (true) {
-      try {
-        return !inside(root, await fs.realpath(parent));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true;
-        // A dangling link is not a nonexistent, safe child directory.
-        const entry = await fs.lstat(parent).catch(() => undefined);
-        if (entry) return true;
-        const next = path.dirname(parent);
-        if (next === parent) return true;
-        parent = next;
-      }
-    }
-  } catch {
-    return true;
-  }
-}
-
 export default function vocsCodeApprovals(pi: PiLike): void {
   installEffortOverride(pi);
   let mode: Mode = readModeFromEnv();
   const sessionAllowed = new Set<string>();
   const modeFile = process.env.VOCS_CODE_MODE_FILE;
+
+  // "Allow for session" is one decision, so parent and child gates share it over the extension
+  // event bus. Purely capability-passing: a grant is only ever added, never assumed.
+  pi.events?.on(GRANT_EVENT, (payload) => {
+    const tool = (payload as { tool?: unknown } | null)?.tool;
+    if (typeof tool === 'string' && tool) sessionAllowed.add(tool);
+  });
 
   const readiness = (ctx: CtxLike, ready: boolean) => {
     ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({
@@ -163,60 +96,37 @@ export default function vocsCodeApprovals(pi: PiLike): void {
   pi.on('session_shutdown', (_event, ctx) => readiness(ctx, false));
 
   const refreshMode = async () => {
-    if (!modeFile) return;
-    try {
-      const txt = (await fs.readFile(modeFile, 'utf8')).trim() as Mode;
-      if (MODES.includes(txt)) {
-        if (txt !== mode) sessionAllowed.clear(); // grants do not survive a mode change
-        mode = txt;
-      } else {
-        mode = 'ask';
-        sessionAllowed.clear();
-      }
-    } catch {
-      mode = 'ask';
-      sessionAllowed.clear();
-    }
+    const next = await readModeFile(modeFile);
+    if (modeFile && next === mode) return;
+    if (next !== mode) sessionAllowed.clear(); // grants do not survive a mode change
+    mode = next;
   };
 
   pi.on('tool_call', async (event, ctx) => {
     await refreshMode();
     const tool = event.toolName;
-    const isMcp = tool.startsWith(MCP_PREFIX);
-    if (!MUTATING.has(tool) && !isMcp) return undefined;
-    if (mode === 'full-auto') return undefined;
     const decline = (reason: string) => {
       if (event.toolCallId && ctx.ui?.notify) {
         ctx.ui.notify(BLOCK_MARKER + JSON.stringify({ toolCallId: event.toolCallId, toolName: tool }), 'info');
       }
       return { block: true, reason };
     };
-    if (mode === 'plan') {
-      return decline('Plan mode is active in Vocs Code: no file edits or shell commands. Describe the plan instead.');
-    }
-    const command = typeof event.input?.command === 'string' ? (event.input.command as string) : undefined;
-    const dangerous = !!command && isDangerous(command);
-    const outside = EDITS.has(tool) && await isOutsideCwd(ctx.cwd ?? process.cwd(), event.input?.path);
-    if (!dangerous && !outside) {
-      // auto never classifies an MCP tool as safe; it always asks below full access.
-      if (mode === 'auto' && !isMcp) return undefined;
-      if (mode === 'accept-edits' && EDITS.has(tool)) return undefined;
-      if (sessionAllowed.has(tool)) return undefined;
-    }
+    const decision = await decideToolCall({ tool, input: event.input, cwd: ctx.cwd, mode, sessionAllowed });
+    if (decision.action === 'allow') return undefined;
+    if (decision.action === 'block') return decline(decision.reason);
     // No approval UI means we cannot ask: fail closed instead of letting a gated action run.
     if (!ctx.ui || typeof ctx.ui.select !== 'function') {
       return { block: true, reason: 'Vocs Code approval UI is unavailable; refusing to run this action.' };
     }
-
-    const summary = command ?? (typeof event.input?.path === 'string' ? (event.input.path as string) : '');
-    const payload = JSON.stringify({ tool, toolCallId: event.toolCallId, input: trimInput(event.input), summary: outside ? `${summary} (outside the project directory)` : summary });
-    const choice = await ctx.ui.select(MARKER + payload, ['Allow once', 'Allow for session', 'Deny']);
+    const payload = JSON.stringify({ tool, toolCallId: event.toolCallId, input: trimInput(event.input), summary: decision.summary });
+    const choice = (await ctx.ui.select(APPROVAL_MARKER + payload, APPROVAL_OPTIONS)) as ApprovalChoice | undefined;
     if (choice === 'Allow once') return undefined;
     if (choice === 'Allow for session') {
       sessionAllowed.add(tool);
+      pi.events?.emit(GRANT_EVENT, { tool });
       return undefined;
     }
-    return decline('The user declined this action in Vocs Code.');
+    return decline(DECLINED_REASON);
   });
 }
 
@@ -244,13 +154,4 @@ function installEffortOverride(pi: PiLike): void {
     if (!choice?.effort || choice.provider !== model.provider || choice.model !== model.id) return undefined;
     return { ...event.payload, reasoning: { ...reasoning, effort: choice.effort } };
   });
-}
-
-function trimInput(input: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(input ?? {})) {
-    if (typeof v === 'string' && v.length > 4000) out[k] = v.slice(0, 4000) + '…';
-    else out[k] = v;
-  }
-  return out;
 }

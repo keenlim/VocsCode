@@ -110,7 +110,7 @@ describe.runIf(enabled)('electron e2e: Pi tool compatibility', () => {
       };
       let win = await launch();
       const resourceDir = packaged ? await app!.evaluate(() => process.resourcesPath) : path.join(root, 'resources');
-      for (const name of ['vocs-code-tools.ts', 'tool-arguments.ts', 'vocs-code-approvals.ts']) {
+      for (const name of ['vocs-code-tools.ts', 'tool-arguments.ts', 'vocs-code-approvals.ts', 'vocs-code-subagents.ts', 'subagent-gate.ts', 'subagent-agents.ts', 'subagent-runs.ts']) {
         expect(await fs.readFile(path.join(resourceDir, 'pi', name), 'utf8')).toBe(await fs.readFile(path.join(root, 'resources', 'pi', name), 'utf8'));
       }
       const session = await invoke(win, 'sessions:create', {
