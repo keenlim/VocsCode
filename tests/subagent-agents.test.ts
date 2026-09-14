@@ -242,7 +242,9 @@ describe('project-level definitions', () => {
       // Same text, same knobs: the file is the source of truth and the module is only a safety net.
       expect(template.prompt).toBe(fallback.prompt);
       expect(template.description).toBe(fallback.description);
-      expect(template.tools).toEqual(fallback.tools);
+      // Compare what a child can actually use: a template may name `powershell`, and the effective
+      // list drops it everywhere Windows does not have it (the compiled-in fallback already did).
+      expect(toolNamesFor(template)).toEqual(toolNamesFor(fallback));
       expect(template.promptMode).toBe(fallback.promptMode);
       expect(template.mcp).toBe(fallback.mcp);
       expect(template.model).toBeUndefined();
