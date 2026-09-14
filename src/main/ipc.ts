@@ -24,6 +24,8 @@ export interface IpcDeps {
   knowledge?: KnowledgeService;
   /** Remote access host (docs/REMOTE-ACCESS.md), wired in index.ts. */
   remote?: RemoteHost;
+  /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
+  remoteMirror?: { sync(): void; disable(): void };
   /** In-app auto-update (issue #198); present only in packaged builds. */
   updater?: UpdateService;
   /** Extra push sink for non-window clients (the localhost web server today, the relay later). */
@@ -109,6 +111,7 @@ export function registerIpc(deps: IpcDeps): HandlerRegistry {
     search: deps.search,
     knowledge: deps.knowledge,
     remote: deps.remote,
+    remoteMirror: deps.remoteMirror,
     updater: deps.updater,
     log: deps.log,
     push: (channel, payload) => {

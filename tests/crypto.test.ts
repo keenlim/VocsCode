@@ -2,7 +2,7 @@
  *  identity binding, session-key agreement, and the AEAD frame layer. Runs in Node
  *  (global WebCrypto) — the identical module also runs in the browser. */
 import { describe, expect, it } from 'vitest';
-import { clientFinish, createHello, generateIdentity, hostAccept, newSalt, openFrame, publicOf, sealFrame, stable } from '../src/shared/crypto';
+import { clientFinish, createHello, generateIdentity, hostAccept, importAesKey, newSalt, openBlob, openFrame, publicOf, randomKeyB64, sealBlob, sealFrame, stable } from '../src/shared/crypto';
 
 describe('e2e crypto', () => {
   it('completes the handshake and derives matching keys', async () => {
@@ -54,5 +54,22 @@ describe('e2e crypto', () => {
 
   it('produces stable JSON so both sides sign identical bytes', () => {
     expect(stable({ b: 1, a: [2, { d: 3, c: 4 }] })).toBe('{"a":[2,{"c":4,"d":3}],"b":1}');
+  });
+
+  it('seals and opens mirror blobs under a shared symmetric key', async () => {
+    const key = await importAesKey(randomKeyB64());
+    const blob = await sealBlob(key, { title: 'Offline', items: [{ kind: 'user', text: 'hi' }] });
+    expect(typeof blob.iv).toBe('string');
+    expect(blob.ct).not.toContain('Offline');
+    expect(await openBlob(key, blob)).toEqual({ title: 'Offline', items: [{ kind: 'user', text: 'hi' }] });
+  });
+
+  it('refuses a mirror blob under a different key or with a tampered IV', async () => {
+    const key = await importAesKey(randomKeyB64());
+    const other = await importAesKey(randomKeyB64());
+    const blob = await sealBlob(key, { secret: 1 });
+    await expect(openBlob(other, blob)).rejects.toThrow();
+    const tampered = { ...blob, iv: randomKeyB64(12) };
+    await expect(openBlob(key, tampered)).rejects.toThrow();
   });
 });

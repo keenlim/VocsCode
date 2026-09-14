@@ -1,7 +1,8 @@
 /** The web client core (code.vocs.io, docs/REMOTE-ACCESS.md §6): the pairing flow and the
  *  e2e Transport a browser uses to drive a paired desktop through the relay. Framework-
  *  free and DOM-free — the page (relay/public) mounts it; tests run it in Node. */
-import { clientFinish, createHello, generateIdentity, openFrame, publicOf, sealFrame, sign, type Identity, type PublicIdentity } from '../../src/shared/crypto';
+import { clientFinish, createHello, generateIdentity, importAesKey, openBlob, openFrame, publicOf, sealFrame, sign, type Identity, type PublicIdentity } from '../../src/shared/crypto';
+import type { MirrorIndex, MirrorSnapshot } from '../../src/shared/mirror';
 import type { RemoteDeviceInfo } from '../../src/shared/types';
 
 /** A paired browser's stored identity: relay URL, tokens, host trust anchor, own keys. */
@@ -12,6 +13,8 @@ export interface WebCredentials {
   hostDeviceId: string;
   hostPub: PublicIdentity;
   identity: Identity;
+  /** P4: the desktop's mirror key, delivered sealed over the e2e session. */
+  mirrorKey?: string;
 }
 
 /** Minimal storage contract (localStorage in the browser, a Map in tests). */
@@ -30,13 +33,15 @@ export interface SimpleSocket {
 const CREDS_KEY = 'vocs-web-credentials';
 
 interface InnerFrame {
-  type: 'result' | 'push';
+  type: 'result' | 'push' | 'mirror.key';
   id?: number;
   ok?: boolean;
   value?: unknown;
   error?: string;
   channel?: string;
   payload?: unknown;
+  /** P4: the desktop's mirror key, sent once per connection inside the e2e session. */
+  key?: string;
 }
 
 type PollResult =
@@ -53,6 +58,9 @@ export class RelayClient {
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private readonly pushListeners = new Set<(channel: string, payload: unknown) => void>();
   private hsWaiter: { resolve: (reply: never) => void; reject: (e: Error) => void } | null = null;
+  private mirrorCache: { secret: string; value: CryptoKey } | null = null;
+  /** Sealed frames that arrive while the handshake reply is still being finished. */
+  private earlyFrames: Array<{ salt: string; seq: number; ct: string }> = [];
 
   constructor(
     private readonly deps: {
@@ -119,6 +127,12 @@ export class RelayClient {
   /** Opens the relay socket and performs the e2e handshake with the paired host. */
   async connect(onClose?: () => void): Promise<void> {
     if (!this.creds) throw new Error('not paired');
+    // A retry after a failed handshake opens a fresh socket; close the stale one so repeated
+    // attempts cannot leak connections, and drop frames buffered for the abandoned session.
+    this.socket?.close();
+    this.socket = null;
+    this.session = null;
+    this.earlyFrames = [];
     const base = this.creds.relayBase.replace(/^http/, 'ws').replace(/\/$/, '');
     const url = `${base}/v1/ws/client?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`;
     const handleDrop = () => {
@@ -139,6 +153,11 @@ export class RelayClient {
     });
     const session = await clientFinish(hello, ephPriv, reply, this.creds.hostPub, this.creds.identity);
     this.session = { key: session.key, salt: session.salt };
+    // The desktop hands over the mirror key right after the handshake reply, so a sealed frame can
+    // arrive before the session key finished deriving; replay anything buffered.
+    const early = this.earlyFrames;
+    this.earlyFrames = [];
+    for (const frame of early) void this.onSealed(this.session, frame);
   }
 
   private onMessage(raw: string): void {
@@ -153,7 +172,12 @@ export class RelayClient {
       this.hsWaiter = null;
       return;
     }
-    if (msg.t === 'd' && this.session) {
+    if (msg.t === 'd') {
+      if (!this.session) {
+        // Bounded so a hostile relay cannot make the browser buffer without limit.
+        if (this.earlyFrames.length < 32) this.earlyFrames.push(msg.payload as { salt: string; seq: number; ct: string });
+        return;
+      }
       void this.onSealed(this.session, msg.payload as { salt: string; seq: number; ct: string });
     }
   }
@@ -171,6 +195,12 @@ export class RelayClient {
       this.pending.delete(inner.id);
       if (inner.ok) entry.resolve(inner.value);
       else entry.reject(new Error(String(inner.error ?? 'invoke failed')));
+      return;
+    }
+    if (inner.type === 'mirror.key' && typeof inner.key === 'string' && this.creds) {
+      // The desktop hands the key over on every connect, so a browser that lost it recovers.
+      this.creds.mirrorKey = inner.key;
+      this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
       return;
     }
     if (inner.type === 'push' && inner.channel) {
@@ -221,6 +251,47 @@ export class RelayClient {
     const url = `${base}/v1/devices?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}&target=${encodeURIComponent(deviceId)}`;
     const res = await doFetch(url, { method: 'DELETE' });
     if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
+  }
+
+  /** True once the desktop has handed over the mirror key (it does so on every connect). */
+  hasMirror(): boolean {
+    return !!this.creds?.mirrorKey;
+  }
+
+  /** The sealed offline session index, opened locally; null when no mirror has been uploaded. */
+  async mirrorIndex(): Promise<MirrorIndex | null> {
+    const key = await this.mirrorKey();
+    if (!key) return null;
+    const blob = await this.mirrorFetch('/v1/mirror');
+    return blob ? openBlob<MirrorIndex>(key, blob) : null;
+  }
+
+  /** One session's sealed transcript snapshot, opened locally. */
+  async mirrorSession(sessionId: string): Promise<MirrorSnapshot | null> {
+    const key = await this.mirrorKey();
+    if (!key) return null;
+    const blob = await this.mirrorFetch(`/v1/mirror/${encodeURIComponent(sessionId)}`);
+    return blob ? openBlob<MirrorSnapshot>(key, blob) : null;
+  }
+
+  private async mirrorKey(): Promise<CryptoKey | null> {
+    if (!this.creds?.mirrorKey) return null;
+    if (this.mirrorCache?.secret === this.creds.mirrorKey) return this.mirrorCache.value;
+    const value = await importAesKey(this.creds.mirrorKey);
+    this.mirrorCache = { secret: this.creds.mirrorKey, value };
+    return value;
+  }
+
+  /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
+  private async mirrorFetch(path: string): Promise<{ iv: string; ct: string } | null> {
+    if (!this.creds) return null;
+    const doFetch = this.deps.fetchImpl ?? fetch;
+    const base = this.creds.relayBase.replace(/\/$/, '');
+    const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId, token: this.creds.webToken });
+    const res = await doFetch(`${base}${path}?${query.toString()}`);
+    if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
+    const body = (await res.json()) as { iv?: string; ct?: string } | null;
+    return body && typeof body.iv === 'string' && typeof body.ct === 'string' ? { iv: body.iv, ct: body.ct } : null;
   }
 }
 

@@ -1134,6 +1134,17 @@ function RemoteSection({ settings, update }: { settings: AppSettings; update: (p
         </Field>
       )}
 
+      {config.enabled && (
+        <Field label="Offline mirror" hint="Upload sealed transcript snapshots so a paired browser can read history while this computer is offline. The relay stores ciphertext only and can never open it.">
+          <Toggle
+            checked={config.mirror === true}
+            disabled={busy}
+            onChange={(v) => void act(() => invoke('remote:setMirror', { mirror: v }))}
+            label="Let paired browsers read history while this computer is off"
+          />
+        </Field>
+      )}
+
       {config.enabled && state?.status === 'online' && (
         <>
           <h3>Pair a browser</h3>

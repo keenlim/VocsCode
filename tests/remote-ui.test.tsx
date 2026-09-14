@@ -93,9 +93,16 @@ describe('remote access settings (P4)', () => {
   it('toggles view-only mode through remote:setViewOnly', async () => {
     renderRemote();
     await screen.findByText('View-only mode');
-    const toggle = screen.getByRole('checkbox') as HTMLInputElement;
+    const toggle = screen.getByText('Only allow reading from paired browsers').closest('.toggle')?.querySelector('input') as HTMLInputElement;
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setViewOnly', { viewOnly: true }));
+  });
+
+  it('toggles the offline mirror through remote:setMirror', async () => {
+    renderRemote();
+    await screen.findByText('Offline mirror');
+    fireEvent.click(screen.getByText('Let paired browsers read history while this computer is off'));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith('remote:setMirror', { mirror: true }));
   });
 });

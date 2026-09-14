@@ -1,7 +1,7 @@
 /** Unit tests for the relay core (relay/src/core.ts): pairing lifecycle, tokens, revocation.
  *  Runs in plain Node against an in-memory store — the DO is a thin binding over this. */
 import { describe, expect, it } from 'vitest';
-import { claimPairing, deviceInfos, hashToken, listDevices, PAIRING_TTL_MS, pollPairing, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStore } from '../relay/src/core';
+import { claimPairing, deviceInfos, hashToken, listDevices, listMirrorSessions, MirrorError, PAIRING_TTL_MS, pollPairing, putMirrorIndex, putMirrorSession, getMirrorIndex, getMirrorSession, clearMirror, registerHostDevice, registerWebDevice, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, PairError, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 function memStore(): RelayStore {
@@ -111,5 +111,59 @@ describe('relay pairing', () => {
     expect(shape).not.toContain(hostToken);
     // And each record is exactly the public shape, so a new private field cannot sneak out.
     for (const info of infos) expect(Object.keys(info).sort()).toEqual(['deviceId', 'kind', 'lastSeen', 'name', 'platform']);
+  });
+});
+
+describe('relay offline mirror (opaque sealed blobs)', () => {
+  const blob = (ct: string) => ({ iv: 'AAAAAAAAAAAAAAAA', ct });
+
+  it('round-trips the sealed index and per-session snapshots', async () => {
+    const store = memStore();
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('INDEX') }, T0);
+    await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: blob('SNAP1') }, T0 + 1);
+    expect((await getMirrorIndex(store, 'a', 'h_1', T0 + 2))?.blob.ct).toBe('INDEX');
+    expect((await getMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1' }, T0 + 2))?.ct).toBe('SNAP1');
+    expect(await listMirrorSessions(store, 'a', 'h_1', T0 + 2)).toEqual([{ sessionId: 's_1', updatedAt: T0 + 1, bytes: expect.any(Number) }]);
+  });
+
+  it('keeps the mirror per host, never shared across hosts', async () => {
+    const store = memStore();
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('ONE') }, T0);
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_2', blob: blob('TWO') }, T0);
+    expect((await getMirrorIndex(store, 'a', 'h_1', T0))?.blob.ct).toBe('ONE');
+    expect((await getMirrorIndex(store, 'a', 'h_2', T0))?.blob.ct).toBe('TWO');
+    expect(await getMirrorIndex(store, 'a', 'h_3', T0)).toBeUndefined();
+  });
+
+  it('rejects a malformed session id and an oversized blob', async () => {
+    const store = memStore();
+    await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: '../../etc', blob: blob('X') }, T0)).rejects.toBeInstanceOf(MirrorError);
+    const huge = { iv: 'AAAAAAAAAAAAAAAA', ct: 'a'.repeat(12 * 1024 * 1024) };
+    await expect(putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: huge }, T0)).rejects.toMatchObject({ code: 'too-large' });
+    expect(await listMirrorSessions(store, 'a', 'h_1', T0)).toEqual([]);
+  });
+
+  it('caps the number of mirrored sessions, dropping the oldest', async () => {
+    const store = memStore();
+    for (let i = 0; i < 205; i++) await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: `s_${i}`, blob: blob(`S${i}`) }, T0 + i);
+    const metas = await listMirrorSessions(store, 'a', 'h_1', T0 + 1000);
+    expect(metas).toHaveLength(200);
+    expect(metas[0].sessionId).toBe('s_204');
+    expect(metas.at(-1)?.sessionId).toBe('s_5');
+  });
+
+  it('expires mirror entries after the TTL and clears on demand', async () => {
+    const store = memStore();
+    await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1', blob: blob('S') }, T0);
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('I') }, T0);
+    const later = T0 + 31 * 24 * 60 * 60 * 1000;
+    expect(await getMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_1' }, later)).toBeUndefined();
+    expect(await getMirrorIndex(store, 'a', 'h_1', later)).toBeUndefined();
+
+    await putMirrorSession(store, { accountId: 'a', hostId: 'h_1', sessionId: 's_2', blob: blob('S2') }, T0);
+    await putMirrorIndex(store, { accountId: 'a', hostId: 'h_1', blob: blob('I2') }, T0);
+    await clearMirror(store, 'a', 'h_1');
+    expect(await listMirrorSessions(store, 'a', 'h_1', T0)).toEqual([]);
+    expect(await getMirrorIndex(store, 'a', 'h_1', T0)).toBeUndefined();
   });
 });

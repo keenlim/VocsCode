@@ -99,6 +99,13 @@
     new DataView(nonce.buffer).setBigUint64(4, BigInt(seq));
     return nonce;
   }
+  async function importAesKey(b64) {
+    return subtle.importKey("raw", fromB64Url(b64), "AES-GCM", false, ["encrypt", "decrypt"]);
+  }
+  async function openBlob(key, blob) {
+    const pt = await subtle.decrypt({ name: "AES-GCM", iv: fromB64Url(blob.iv), tagLength: 128 }, key, fromB64Url(blob.ct));
+    return JSON.parse(new TextDecoder().decode(pt));
+  }
 
   // relay/src/web-client.ts
   var CREDS_KEY = "vocs-web-credentials";
@@ -114,6 +121,9 @@
     pending = /* @__PURE__ */ new Map();
     pushListeners = /* @__PURE__ */ new Set();
     hsWaiter = null;
+    mirrorCache = null;
+    /** Sealed frames that arrive while the handshake reply is still being finished. */
+    earlyFrames = [];
     hasCredentials() {
       return !!this.deps.storage.get(CREDS_KEY);
     }
@@ -165,6 +175,10 @@
     /** Opens the relay socket and performs the e2e handshake with the paired host. */
     async connect(onClose) {
       if (!this.creds) throw new Error("not paired");
+      this.socket?.close();
+      this.socket = null;
+      this.session = null;
+      this.earlyFrames = [];
       const base = this.creds.relayBase.replace(/^http/, "ws").replace(/\/$/, "");
       const url = `${base}/v1/ws/client?device=${encodeURIComponent(this.creds.webDeviceId)}&token=${encodeURIComponent(this.creds.webToken)}`;
       const handleDrop = () => {
@@ -182,6 +196,9 @@
       });
       const session = await clientFinish(hello, ephPriv, reply, this.creds.hostPub, this.creds.identity);
       this.session = { key: session.key, salt: session.salt };
+      const early = this.earlyFrames;
+      this.earlyFrames = [];
+      for (const frame of early) void this.onSealed(this.session, frame);
     }
     onMessage(raw) {
       let msg;
@@ -195,7 +212,11 @@
         this.hsWaiter = null;
         return;
       }
-      if (msg.t === "d" && this.session) {
+      if (msg.t === "d") {
+        if (!this.session) {
+          if (this.earlyFrames.length < 32) this.earlyFrames.push(msg.payload);
+          return;
+        }
         void this.onSealed(this.session, msg.payload);
       }
     }
@@ -212,6 +233,11 @@
         this.pending.delete(inner.id);
         if (inner.ok) entry.resolve(inner.value);
         else entry.reject(new Error(String(inner.error ?? "invoke failed")));
+        return;
+      }
+      if (inner.type === "mirror.key" && typeof inner.key === "string" && this.creds) {
+        this.creds.mirrorKey = inner.key;
+        this.deps.storage.set(CREDS_KEY, JSON.stringify(this.creds));
         return;
       }
       if (inner.type === "push" && inner.channel) {
@@ -258,6 +284,42 @@
       const res = await doFetch(url, { method: "DELETE" });
       if (!res.ok) throw new Error(`revoke failed: ${res.status}`);
     }
+    /** True once the desktop has handed over the mirror key (it does so on every connect). */
+    hasMirror() {
+      return !!this.creds?.mirrorKey;
+    }
+    /** The sealed offline session index, opened locally; null when no mirror has been uploaded. */
+    async mirrorIndex() {
+      const key = await this.mirrorKey();
+      if (!key) return null;
+      const blob = await this.mirrorFetch("/v1/mirror");
+      return blob ? openBlob(key, blob) : null;
+    }
+    /** One session's sealed transcript snapshot, opened locally. */
+    async mirrorSession(sessionId) {
+      const key = await this.mirrorKey();
+      if (!key) return null;
+      const blob = await this.mirrorFetch(`/v1/mirror/${encodeURIComponent(sessionId)}`);
+      return blob ? openBlob(key, blob) : null;
+    }
+    async mirrorKey() {
+      if (!this.creds?.mirrorKey) return null;
+      if (this.mirrorCache?.secret === this.creds.mirrorKey) return this.mirrorCache.value;
+      const value = await importAesKey(this.creds.mirrorKey);
+      this.mirrorCache = { secret: this.creds.mirrorKey, value };
+      return value;
+    }
+    /** Reads an opaque mirror blob from the relay; the caller decrypts it. */
+    async mirrorFetch(path) {
+      if (!this.creds) return null;
+      const doFetch = this.deps.fetchImpl ?? fetch;
+      const base = this.creds.relayBase.replace(/\/$/, "");
+      const query = new URLSearchParams({ host: this.creds.hostDeviceId, device: this.creds.webDeviceId, token: this.creds.webToken });
+      const res = await doFetch(`${base}${path}?${query.toString()}`);
+      if (!res.ok) throw new Error(`mirror fetch failed: ${res.status}`);
+      const body = await res.json();
+      return body && typeof body.iv === "string" && typeof body.ct === "string" ? { iv: body.iv, ct: body.ct } : null;
+    }
   };
   function browserSocket(url, onMessage, onClose) {
     const ws = new WebSocket(url);
@@ -275,6 +337,9 @@
   var active = null;
   var activeStatus = "idle";
   var viewOnly = false;
+  var mode = "live";
+  var reconnectTimer = null;
+  var connecting = false;
   function localStorageApi() {
     return {
       get: (k) => window.localStorage.getItem(k),
@@ -333,7 +398,7 @@
   async function sendComposer() {
     const box = el("composer");
     const text = box.value.trim();
-    if (!text || !active || viewOnly) return;
+    if (!text || !active || viewOnly || mode === "mirror") return;
     box.value = "";
     try {
       await client.invoke("sessions:send", { id: active, input: { text } });
@@ -342,7 +407,7 @@
     }
   }
   async function actOnActive(channel, request) {
-    if (!active) return;
+    if (!active || mode === "mirror") return;
     try {
       await client.invoke(channel, request ? { id: active, ...request } : { id: active });
     } catch (e) {
@@ -350,6 +415,7 @@
     }
   }
   async function toggleNewSession(open) {
+    if (open && mode === "mirror") return;
     el("new-session-panel").toggleAttribute("hidden", !open);
     if (!open) return;
     try {
@@ -363,6 +429,7 @@
     }
   }
   async function createSession() {
+    if (mode === "mirror") return;
     const folder = el("ns-folder").value.trim();
     const harness = el("ns-harness").value;
     const title = el("ns-title").value.trim() || void 0;
@@ -396,51 +463,94 @@
   }
   async function enter() {
     show("screen-app");
+    client.onPush((channel, payload) => void onPush(channel, payload));
+    await connectLoop();
+  }
+  async function connectLoop() {
+    if (connecting || !client.hasCredentials()) return;
+    connecting = true;
     try {
       await client.connect(() => {
         setConnection("reconnecting\u2026");
-        const retry = setInterval(() => {
-          if (!client.hasCredentials()) return;
-          void client.connect().then(() => {
-            setConnection("connected");
-            clearInterval(retry);
-          }).catch(() => void 0);
-        }, 3e3);
+        scheduleReconnect();
       });
-    } catch (e) {
-      setConnection(`connection failed: ${e instanceof Error ? e.message : String(e)}`);
+    } catch {
+      connecting = false;
+      await showMirror();
+      scheduleReconnect();
       return;
     }
+    connecting = false;
+    mode = "live";
+    if (reconnectTimer) {
+      clearInterval(reconnectTimer);
+      reconnectTimer = null;
+    }
     setConnection("connected");
-    client.onPush((channel, payload) => void onPush(channel, payload));
+    await loadPolicy();
+    await refreshSessions();
+  }
+  function scheduleReconnect() {
+    if (reconnectTimer || !client.hasCredentials()) return;
+    reconnectTimer = setInterval(() => void connectLoop(), 3e3);
+  }
+  async function loadPolicy() {
     try {
       const settings = await client.invoke("settings:get", null);
       applyPolicy(settings.remote?.viewOnly === true);
     } catch {
     }
-    await refreshSessions();
   }
-  async function refreshSessions() {
+  async function showMirror() {
+    if (!client.hasMirror()) {
+      setConnection("desktop offline");
+      return;
+    }
     try {
-      sessions = await client.invoke("sessions:list", null);
-      const list = el("session-list");
-      list.innerHTML = sessions.map((s) => `<button class="session-row" data-id="${esc(s.id)}"><span>${esc(s.title)}</span><small>${esc(s.status)}</small></button>`).join("");
-      for (const row of Array.from(list.querySelectorAll("button"))) {
-        row.addEventListener("click", () => void openSession(row.dataset.id));
+      const index = await client.mirrorIndex();
+      if (!index) {
+        setConnection("desktop offline \u2014 no mirror uploaded yet");
+        return;
       }
+      mode = "mirror";
+      sessions = index.sessions.map((s) => ({ id: s.id, title: s.title, status: s.status }));
+      renderSessionList();
+      setConnection(`offline \u2014 mirrored from ${index.hostName}`);
+      updateWriteControls();
       const first = sessions[0]?.id;
       if (first) await openSession(first);
     } catch (e) {
-      setConnection(`failed to list sessions: ${e instanceof Error ? e.message : String(e)}`);
+      setConnection(`desktop offline \u2014 ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  async function refreshSessions() {
+    mode = "live";
+    try {
+      sessions = await client.invoke("sessions:list", null);
+      renderSessionList();
+      updateWriteControls();
+      const first = sessions[0]?.id;
+      if (first) await openSession(first);
+    } catch {
+      await showMirror();
     }
   }
   async function openSession(id) {
     active = id;
-    const items = await client.invoke("sessions:transcript", { id });
-    renderTranscript(items);
     const meta = sessions.find((s) => s.id === id);
-    activeStatus = meta?.status ?? "idle";
-    el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
+    if (mode === "mirror") {
+      const snapshot = await client.mirrorSession(id);
+      if (!snapshot || active !== id) return;
+      renderTranscript(snapshot.items);
+      activeStatus = snapshot.status;
+      el("active-title").textContent = `${snapshot.title} \xB7 ${snapshot.status}${snapshot.truncated ? " \xB7 earlier history trimmed" : ""}`;
+    } else {
+      const items = await client.invoke("sessions:transcript", { id });
+      if (active !== id) return;
+      renderTranscript(items);
+      activeStatus = meta?.status ?? "idle";
+      el("active-title").textContent = meta ? `${meta.title} \xB7 ${activeStatus}` : "";
+    }
     syncControls();
     for (const row of Array.from(document.querySelectorAll(".session-row"))) row.classList.toggle("active", row.dataset.id === id);
   }
@@ -448,18 +558,22 @@
     return status === "running" || status === "starting" || status === "awaiting";
   }
   function syncControls() {
-    const running = !viewOnly && isRunning(activeStatus);
+    const running = mode === "live" && !viewOnly && isRunning(activeStatus);
     el("act-interrupt").hidden = !running;
     el("act-stop").hidden = !running;
   }
   function applyPolicy(next) {
     viewOnly = next;
+    updateWriteControls();
+  }
+  function updateWriteControls() {
+    const readOnly = viewOnly || mode === "mirror";
     const badge = el("policy");
-    badge.toggleAttribute("hidden", !viewOnly);
-    badge.textContent = viewOnly ? "view-only" : "";
-    for (const id of ["composer", "send", "new-session"]) el(id).toggleAttribute("disabled", viewOnly);
+    badge.toggleAttribute("hidden", !readOnly);
+    badge.textContent = mode === "mirror" ? "mirrored" : readOnly ? "view-only" : "";
+    for (const id of ["composer", "send", "new-session"]) el(id).toggleAttribute("disabled", readOnly);
     syncControls();
-    if (viewOnly) el("new-session-panel").setAttribute("hidden", "");
+    if (readOnly) el("new-session-panel").setAttribute("hidden", "");
   }
   function renderTranscript(items) {
     const root = el("transcript");
@@ -484,7 +598,7 @@
   function renderApproval(item) {
     const requestId = item.request.id;
     if (item.decision) return `<div class="msg approval decided"><b>Approval</b> <small>decided: ${esc(item.decision.optionId)}</small></div>`;
-    if (viewOnly) return `<div class="msg approval"><b>Approval needed</b><small> \u2014 decide on the desktop (view-only)</small></div>`;
+    if (viewOnly || mode === "mirror") return `<div class="msg approval"><b>Approval needed</b><small> \u2014 decide on the desktop${mode === "mirror" ? " (mirrored history)" : " (view-only)"}</small></div>`;
     return `<div class="msg approval"><b>Approval needed</b><div class="approval-actions" data-request="${esc(requestId)}"><button data-decision="allow">Allow</button><button data-decision="deny" class="danger">Deny</button></div></div>`;
   }
   async function toggleDevices() {
@@ -511,6 +625,7 @@
       applyPolicy(payload?.viewOnly === true);
       return;
     }
+    if (mode === "mirror") return;
     if (channel === "push:sessionEvent" && payload) {
       const env = payload;
       if (active && env.sessionId === active) {
