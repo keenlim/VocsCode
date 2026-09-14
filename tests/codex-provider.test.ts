@@ -31,7 +31,8 @@ vi.mock('../src/main/harness/spawn', () => ({
   },
   shutdownChild: async () => undefined,
   killTree: async () => undefined,
-  quoteWin: (arg: string) => arg
+  quoteWin: (arg: string) => arg,
+  usesWindowsCommandShim: () => false
 }));
 
 function makeFakeChild(): AnyRecord {
