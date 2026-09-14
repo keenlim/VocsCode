@@ -49,6 +49,7 @@ npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
 # In-app auto-update (issue #198) against a staged mock update feed (stages resources/app-update.yml in dist/win-unpacked).
+# Other packaged e2e runs default VOCS_CODE_UPDATER_DISABLE=1 via isolatedEnv; pass '' to re-enable the updater.
 npm run dist:dir && VOCS_CODE_E2E_UI=1 HARNESS_E2E_EXE="dist/win-unpacked/Vocs Code.exe" npx vitest run tests/e2e.update.test.ts
 ```
 
