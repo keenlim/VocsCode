@@ -4,8 +4,9 @@
  * scope proxy, which pins each call to the session's repo. Started lazily on the first session
  * that needs it and stopped on quit. No Electron imports.
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import net from 'node:net';
+import { killTree, spawnTool } from '../harness/spawn';
 
 export interface SharedGitnexusOptions {
   /** `gitnexus`, or a resolved absolute path. */
@@ -66,17 +67,13 @@ export class SharedGitnexusServer {
     return this.starting;
   }
 
-  stop(): void {
+  /** Awaits the Windows tree kill, so no cmd.exe-wrapped `gitnexus serve` outlives the app. */
+  async stop(): Promise<void> {
     this.stopped = true;
     this.url = null;
     const child = this.child;
     this.child = null;
-    if (!child) return;
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
+    if (child) await killTree(child);
   }
 
   private async start(): Promise<string | null> {
@@ -90,7 +87,8 @@ export class SharedGitnexusServer {
     const args = [...this.opts.baseArgs, '--port', String(port), '--host', '127.0.0.1'];
     let child: ChildProcess;
     try {
-      child = spawn(this.opts.command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });
+      // `gitnexus` on PATH is an npm `.cmd` shim on Windows; a bare spawn of one throws EINVAL.
+      child = spawnTool(this.opts.command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: process.env });
     } catch (e) {
       this.opts.log?.('warn', `gitnexus shared: could not start (${e instanceof Error ? e.message : String(e)})`);
       return null;
@@ -110,11 +108,11 @@ export class SharedGitnexusServer {
     const ready = await waitForMcp(url, this.opts.startupTimeoutMs ?? 45_000);
     if (!ready) {
       this.opts.log?.('warn', `gitnexus shared: did not become ready on ${url}`);
-      this.stopChild(child);
+      await this.stopChild(child);
       return null;
     }
     if (this.stopped) {
-      this.stopChild(child);
+      await this.stopChild(child);
       return null;
     }
     this.url = url;
@@ -122,12 +120,8 @@ export class SharedGitnexusServer {
     return url;
   }
 
-  private stopChild(child: ChildProcess): void {
+  private async stopChild(child: ChildProcess): Promise<void> {
     if (this.child === child) this.child = null;
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
+    await killTree(child);
   }
 }
