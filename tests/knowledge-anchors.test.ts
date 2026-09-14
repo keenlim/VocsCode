@@ -110,6 +110,22 @@ describe('anchor resolution', () => {
     expect(refused[0].status).toBe('unavailable');
   });
 
+  it('does not ask GitNexus to start when the project is not indexed', async () => {
+    let urlAsked = false;
+    const resolve = createGitnexusAnchorResolver({
+      url: async () => {
+        urlAsked = true;
+        return 'http://127.0.0.1:1/mcp';
+      },
+      repoName: async () => null,
+      log: () => undefined
+    });
+    const out = await resolve.resolve(scope(), [{ file: 'src/main/x.ts', symbol: 'x' }]);
+    expect(out[0]).toMatchObject({ status: 'unavailable', note: 'This project is not indexed by GitNexus.' });
+    // Starting the server for an unindexed project is the slow path the panel must never wait on.
+    expect(urlAsked).toBe(false);
+  });
+
   it('keeps the page order when only some anchors resolve', async () => {
     const url = await startGraph();
     const out = await resolver(url).resolve(scope(), [

@@ -68,9 +68,12 @@ export function createGitnexusAnchorResolver(deps: GitnexusAnchorDeps): AnchorRe
   return {
     async resolve(scope, anchors) {
       if (!anchors.length) return [];
-      const [url, repo] = await Promise.all([deps.url(), deps.repoName(scope)]);
-      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'GitNexus is not running.' }));
+      // Ask the registry first: an unindexed project must not start the GitNexus server at all (on a
+      // machine without the binary that is a slow npx attempt the panel would visibly wait on).
+      const repo = await deps.repoName(scope);
       if (!repo) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'This project is not indexed by GitNexus.' }));
+      const url = await deps.url();
+      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'GitNexus is not running.' }));
 
       const now = (deps.now ?? Date.now)();
       const ttl = deps.ttlMs ?? 300_000;

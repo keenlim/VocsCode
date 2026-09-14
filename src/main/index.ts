@@ -177,7 +177,8 @@ async function main(): Promise<void> {
       completer: createKnowledgeCompleter({ settings: () => settings.get(), getSecret: (id) => secrets.get(id), log })
     },
     anchors: createGitnexusAnchorResolver({
-      url: () => sharedGitnexus.ensure(),
+      // A cold shared server is started lazily; the panel must not wait on it forever.
+      url: () => Promise.race([sharedGitnexus.ensure(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000))]),
       repoName: async (scope) => {
         const registry = await readGitnexusRegistry(realGitnexusHome());
         const entry = visibleGitnexusEntries(registry, { projectRoot: scope.projectRoot, cwd: scope.cwd, sharedRoots: gitnexusSharedRoots(settings.get()) })[0];
