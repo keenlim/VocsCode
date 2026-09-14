@@ -461,6 +461,23 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
         startRename();
       }}
     >
+      {/* The pin lives at the start of the row, so its state reads before the title. */}
+      <div className="session-pin">
+        {s.archived ? (
+          s.pinned ? <span className="session-pin-indicator" title="Pinned"><Icon name="pin" size={13} /></span> : null
+        ) : (
+          <button
+            type="button"
+            className={`row-act-btn ${s.pinned ? 'is-pinned' : ''}`}
+            data-testid="session-pin"
+            title={s.pinned ? 'Unpin' : 'Pin to top'}
+            aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
+            onClick={(e) => { e.stopPropagation(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}
+          >
+            <Icon name="pin" size={13} />
+          </button>
+        )}
+      </div>
       <div className="session-main">
         {renaming ? (
           <input
@@ -483,7 +500,6 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
           />
         ) : (
           <div className="session-title">
-            {s.pinned && <Icon name="pin" size={11} />}
             <span title="Click to rename" onClick={(e) => { e.stopPropagation(); startRename(); }}>{s.title}</span>
           </div>
         )}
@@ -529,15 +545,6 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
           </>
         ) : (
           <>
-            <button
-              type="button"
-              className={`row-act-btn ${s.pinned ? 'is-pinned' : ''}`}
-              title={s.pinned ? 'Unpin' : 'Pin to top'}
-              aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
-              onClick={() => void invoke('sessions:pin', { id: s.id, pinned: !s.pinned })}
-            >
-              <Icon name="pin" size={15} />
-            </button>
             <ForkIntoDropdown session={s} />
             <button type="button" className="row-act-btn" title={s.worktreeBranch ? 'Archive & remove worktree' : 'Archive'} aria-label="Archive session" onClick={() => void archiveSession(s, toast)}>
               <Icon name="archive" size={15} />
