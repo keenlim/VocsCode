@@ -11,7 +11,7 @@
  */
 import type { HarnessId, ToolKindHint } from '../types';
 import { analyzeCommand, FILTER_EXES, isKnownToolchain, isOtherShellVocabulary, normalizeExecutable, type CommandComplexity, type CommandShape } from './command';
-import { classifyProcessOutcome } from './exit-semantics';
+import { classifyProcessOutcome, isTerminationCode } from './exit-semantics';
 import {
   CATEGORY_CLASS,
   CATEGORY_SOURCE,
@@ -403,6 +403,8 @@ function applyTextRules(facts: ExecutionFacts): ExecutionDerived | null {
 function diagnosticByOperation(facts: ExecutionFacts): ExecutionDerived | null {
   const op = facts.operation;
   if (op !== 'run_tests' && op !== 'check' && op !== 'build') return null;
+  // A run that was terminated or crashed never reported on the code under test, so it is not a result.
+  if (typeof facts.exitCode === 'number' && isTerminationCode(facts.exitCode)) return null;
   const category: ErrorCategory = op === 'run_tests' ? 'test_failures_reported' : op === 'check' ? 'check_failures_reported' : 'build_failed';
   const confirms = facts.excerpt ? DIAGNOSTIC_TEXT[op].test(facts.excerpt) : false;
   return stripOutcome(category, CATEGORY_SOURCE[category], confirms ? 'stderr_signature' : 'exit_semantics', confirms ? 'high' : 'medium', signatureOf(facts, category));
@@ -456,9 +458,10 @@ export function deriveOutcome(facts: ExecutionFacts): ExecutionDerived {
     return stripOutcome(verdict.category, verdict.source ?? CATEGORY_SOURCE[verdict.category], 'exit_semantics', confidence, signatureOf(facts, verdict.category), chained ? `exit code attributed to the last of ${new Set(exes).size} commands` : verdict.note);
   };
   // A documented exit meaning of the owning program comes first: `grep` exit 1 is "no match" even
-  // when the matched lines happen to contain the word "error".
+  // when the matched lines happen to contain the word "error". A forcible termination is the
+  // exception: it names only how the process ended, so the output gets to name the cause first.
   const documented = registry();
-  if (documented && documented.confidence === 'high' && documented.outcome !== 'failure') return documented;
+  if (documented && documented.confidence === 'high' && documented.outcome !== 'failure' && documented.category !== 'process_terminated') return documented;
 
   // The stderr text names most failures independent of exit code and shell.
   const text = applyTextRules(facts);
@@ -478,10 +481,12 @@ export function deriveOutcome(facts: ExecutionFacts): ExecutionDerived {
     return tolerate(facts, stripOutcome('process_nonzero_unknown', 'unknown', 'exit_semantics', 'low', signatureOf(facts, 'process_nonzero_unknown'), 'wrapper collapsed the exit code'));
   }
 
-  if (documented) return tolerate(facts, documented.outcome === 'diagnostic' ? diagnosticByOperation(facts) ?? documented : documented);
+  if (documented && documented.category !== 'process_terminated') return tolerate(facts, documented.outcome === 'diagnostic' ? diagnosticByOperation(facts) ?? documented : documented);
   const diag = diagnosticByOperation(facts);
   if (diag) return diag;
   if (text) return text; // program_error
+  // A forcible termination with no printed cause is control flow, never a failure.
+  if (documented) return tolerate(facts, documented);
   if (exitKnown) return tolerate(facts, stripOutcome('process_nonzero_unknown', 'unknown', 'exit_semantics', 'low', signatureOf(facts, 'process_nonzero_unknown')));
   if (facts.excerpt) return stripOutcome('unknown_failure', 'unknown', 'harness_signal', 'low', signatureOf(facts, 'unknown_failure'));
   return stripOutcome('legacy_unclassified', 'unknown', 'unknown', 'low', signatureOf(facts, 'legacy_unclassified'), 'no exit code and no output retained');

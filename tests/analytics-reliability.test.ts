@@ -212,6 +212,26 @@ describe('reliability report', () => {
     expect(report.coverage).toMatchObject({ records: 63, executions: 63, legacyUnclassified: 0, backfilled: 0, truncated: false });
   });
 
+  it('26 · a forcibly terminated run is control, never an unexpected failure', () => {
+    const records = [
+      rec({ id: 'ok', cmd: 'rg foo src' }),
+      rec({ id: 'kill1', cmd: 'npm test', status: 'error', exitCode: 0xffffffff }),
+      rec({ id: 'kill2', cmd: 'node server.js', status: 'error', exitCode: -1 }),
+      rec({ id: 'sig', cmd: 'node worker.js', status: 'error', exitCode: -9 }),
+      rec({ id: 'term', cmd: 'npm run dev', status: 'error', exitCode: -15 })
+    ];
+    const report = reliabilityReport(records, [], { now: T0 + DAY, rangeDays: 30, retention: { maxRecords: 1000, maxDays: 90 } });
+    const o = report.overall;
+    expect(o.counts).toMatchObject({ executed: 5, rawErrorStatus: 4, success: 1, failure: 0, informational: 0, diagnostic: 0, unknown: 0, control: 4 });
+    expect(o.rates.unexpectedFailure).toMatchObject({ n: 0, d: 5 });
+    // What a killed run looks like on the dashboard: named as termination, not as a failure.
+    expect(report.categories.map((c) => [c.category, c.count])).toEqual([
+      ['process_terminated', 2],
+      ['cancelled', 1],
+      ['killed', 1]
+    ]);
+  });
+
   it('lists signatures with sessions, harnesses, models, first/last seen, recovery and examples', () => {
     const { records, turns } = fixture();
     records.push(rec({ id: 'f4', session: 's2', harness: 'claude', model: 'a/opus', ts: T0 + 500_000, cmd: 'foo', out: 'Exit code 127\nbash: foo: command not found' }));

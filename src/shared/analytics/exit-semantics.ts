@@ -130,8 +130,24 @@ rules.ls = ({ exitCode }) => (exitCode === 2 ? { category: 'invalid_path', confi
 rules.dir = rules.ls;
 rules.cat = ({ exitCode }) => (exitCode === 1 ? { category: 'invalid_path', confidence: 'low' } : null);
 
+/**
+ * True when a status means the process was terminated or crashed rather than exiting with a code it
+ * chose: POSIX negative signals, the Windows 0xFFFFFFFF sentinel, and unsigned NTSTATUS values.
+ * A program's own exit codes are small positives, so this never swallows a documented meaning.
+ */
+export function isTerminationCode(code: number): boolean {
+  return code < 0 || code === 0xffffffff || code > 0x7fffffff;
+}
+
 /** Signals and shell conventions that mean the same whatever program ran. */
 function genericExit(exitCode: number): ExitVerdict | null {
+  // A negative status is how POSIX `wait()` reports a signal; a Windows harness reports the same
+  // event as 0xFFFFFFFF (−1) or a large unsigned NTSTATUS. None is a status the program chose.
+  if (exitCode === -1 || exitCode === 0xffffffff) return { category: 'process_terminated', confidence: 'high', note: 'forcibly terminated (0xFFFFFFFF); the program never returned a status' };
+  if (exitCode === -2) return { category: 'cancelled', confidence: 'high', note: 'SIGINT' };
+  if (exitCode === -9) return { category: 'killed', confidence: 'high', note: 'SIGKILL' };
+  if (exitCode === -15) return { category: 'cancelled', confidence: 'medium', note: 'SIGTERM' };
+  if (exitCode < 0) return { category: 'killed', confidence: 'medium', note: `terminated by signal ${-exitCode}` };
   switch (exitCode) {
     case 124:
       return { category: 'timeout', confidence: 'medium', note: 'timeout(1) convention' };
@@ -158,7 +174,8 @@ function genericExit(exitCode: number): ExitVerdict | null {
 
 /** Operation-level fallbacks when the executable itself has no entry. */
 function operationExit(input: ExitRuleInput): ExitVerdict | null {
-  if (input.exitCode <= 0) return null;
+  // A terminated or crashed run never reported on the code under test.
+  if (isTerminationCode(input.exitCode)) return null;
   switch (input.operation) {
     case 'run_tests':
       return { category: 'test_failures_reported', confidence: 'medium', note: 'non-zero exit of a test runner' };
