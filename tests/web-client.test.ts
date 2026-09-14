@@ -10,6 +10,7 @@ import { RelayClient } from '../relay/src/web-client';
 import { ENROLL, FakeRelay } from './fake-relay';
 import { RemoteHost } from '../src/main/remote/host';
 import { RemoteAudit } from '../src/main/remote/audit';
+import { importAesKey, sealBlob } from '../src/shared/crypto';
 import type { HandlerRegistry } from '../src/main/handlers';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -191,6 +192,34 @@ describe('relay web client (browser-side protocol)', () => {
       expect(audit.list().some((e) => e.action === 'pair-approve' && e.device === creds.webDeviceId)).toBe(true);
       expect(audit.list().some((e) => e.action === 'client-connect' && e.device === creds.webDeviceId)).toBe(true);
       expect(audit.list().some((e) => e.action === 'view-only-blocked' && e.detail === 'sessions:send')).toBe(true);
+
+      // Offline mirror (P4): the host seals an index + snapshot, the relay stores ciphertext, and the
+      // paired browser opens both with the key it received sealed at connect.
+      for (let i = 0; i < 20 && !client.hasMirror(); i++) await sleep(50);
+      expect(client.hasMirror()).toBe(true);
+      const mirrorKey = host.mirrorSecret();
+      expect(mirrorKey).toBeTruthy();
+      const key = await importAesKey(mirrorKey!);
+      await host.putMirror(
+        'index',
+        undefined,
+        await sealBlob(key, { hostName: 'Test PC', updatedAt: 1, sessions: [{ id: 's1', title: 'Mirrored secret title', status: 'idle', harness: 'native', projectRoot: '/repo', updatedAt: 1 }] })
+      );
+      await host.putMirror('session', 's1', await sealBlob(key, { id: 's1', title: 'Mirrored secret title', status: 'idle', harness: 'native', updatedAt: 1, items: [{ kind: 'user', text: 'mirrored body' }] }));
+
+      const index = await client.mirrorIndex();
+      expect(index?.hostName).toBe('Test PC');
+      expect(index?.sessions[0].title).toBe('Mirrored secret title');
+      expect((await client.mirrorSession('s1'))?.items).toEqual([{ kind: 'user', text: 'mirrored body' }]);
+
+      // The relay holds opaque bytes: neither the transcript nor the key is in its store.
+      const storedMirror = JSON.stringify(await relay.store.list('mirror:a:'));
+      expect(storedMirror).not.toContain('Mirrored secret title');
+      expect(storedMirror).not.toContain('mirrored body');
+      expect(storedMirror).not.toContain(mirrorKey);
+
+      await host.clearMirror();
+      expect(await client.mirrorIndex()).toBeNull();
 
       // Revoking the browser from the desktop drops its route and kills its token.
       await host.revokeDevice(creds.webDeviceId);

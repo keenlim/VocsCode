@@ -214,15 +214,19 @@ create/rename/setModel/setEffort/setPermissionMode` opened to paired clients, th
 gained a composer, interrupt/stop controls and a native-dialog-free new-session flow
 (folders come from the host's known folders, harnesses from live availability), and the
 canonical-JSON bug that broke void-returning invoke results was fixed. P4 hardening is
-partly landed: a durable **audit trail** (pairing, approval, connection, revocation and
-refused actions, in Settings → Remote access and `remote:get`), **view-only mode** (a
-desktop policy that refuses every write channel at dispatch, shows a web badge and hides
-write controls), and **cross-client device management** (the web client lists and revokes
-any paired device; the relay's `/devices` read is authenticated and returns public metadata
-only). The offline encrypted transcript mirror remains the one P4 item outstanding.
+implemented: a durable **audit trail** (pairing, approval, connection, revocation,
+refused actions and mirror blocks in Settings → Remote access and `remote:get`),
+**view-only mode** (a desktop policy that refuses every write channel at dispatch, shows a
+web badge and hides write controls), **cross-client device management** (the web client
+lists and revokes any paired device; the relay's `/devices` read is authenticated and
+returns public metadata only), and the **offline encrypted transcript mirror** — opt-in on
+the desktop, which seals an index plus per-session snapshots with a shared mirror key
+(handed to each browser sealed inside the e2e session) and uploads them as opaque, bounded,
+30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
+transcript while the desktop is unreachable.
 Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) — needs the
-Cloudflare account; QR pairing (deferred until the production relay URL exists); P3.5
-terminal over WAN; the P4 offline transcript mirror.
+Cloudflare account and the `app.code.vocs.io` custom domain on the relay Worker; QR
+pairing (deferred until the production relay URL exists); P3.5 terminal over WAN.
 
 Implementation notes: crypto primitives are P-256 ECDSA + ECDH, HKDF-SHA-256 and
 AES-256-GCM — all via WebCrypto so the identical module runs in Node and browsers with
@@ -287,9 +291,12 @@ Web (browser)                Relay                      Desktop (host)
 - Routing state: which desktop is online for which account; short-lived queues of
   *encrypted* payloads pending delivery.
 - Pairing codes (hashed, TTL'd, single-use).
-- **Never:** plaintext payloads, keys, transcripts. (The offline transcript mirror, if
-  enabled later (§8.3), is stored encrypted under a key derived from the pairing — still
-  opaque to the relay.)
+- **Offline mirror blobs** (P4, opt-in): the sealed session index and transcript snapshots,
+  keyed by `(account, host)`, capped at 200 sessions / 8 MB per blob with a 30-day TTL. The
+  key is generated on the desktop, stored in the OS keychain, and handed to each browser
+  sealed inside its e2e session — the relay stores only IVs, ciphertext and plaintext
+  routing metadata (session id, size, timestamp).
+- **Never:** plaintext payloads, keys, transcripts.
 
 ### 6.5 Session lifecycle and revocation
 

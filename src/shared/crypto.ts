@@ -169,3 +169,32 @@ function nonceOf(salt: Uint8Array, seq: number): Uint8Array {
   new DataView(nonce.buffer).setBigUint64(4, BigInt(seq));
   return nonce;
 }
+
+/** Fresh symmetric key material as base64url — for keys that travel sealed and never reach the relay. */
+export function randomKeyB64(bytes = 32): string {
+  return toB64Url(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+
+/** Imports a raw base64url AES-256 key (non-extractable). */
+export async function importAesKey(b64: string): Promise<CryptoKey> {
+  return subtle.importKey('raw', fromB64Url(b64) as BufferSource, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+/** A blob sealed to a symmetric key: random 96-bit IV + AES-256-GCM ciphertext, both base64url.
+ *  Used for the offline transcript mirror, where the relay stores the ciphertext and can never
+ *  open it (docs/REMOTE-ACCESS.md P4). */
+export interface SealedBlob {
+  iv: string;
+  ct: string;
+}
+
+export async function sealBlob(key: CryptoKey, plaintext: unknown): Promise<SealedBlob> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource, tagLength: 128 }, key, canonical(plaintext) as BufferSource);
+  return { iv: toB64Url(iv), ct: toB64Url(ct) };
+}
+
+export async function openBlob<T>(key: CryptoKey, blob: SealedBlob): Promise<T> {
+  const pt = await subtle.decrypt({ name: 'AES-GCM', iv: fromB64Url(blob.iv) as BufferSource, tagLength: 128 }, key, fromB64Url(blob.ct) as BufferSource);
+  return JSON.parse(new TextDecoder().decode(pt)) as T;
+}

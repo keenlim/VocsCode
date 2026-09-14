@@ -251,6 +251,145 @@ export async function revokeDevice(store: RelayStore, accountId: string, deviceI
   await store.delete(deviceKey(accountId, deviceId));
 }
 
+// --- offline transcript mirror (docs/REMOTE-ACCESS.md P4) ---
+// The relay stores opaque sealed blobs so a paired browser can read history while the desktop is
+// off. It never holds the key: only the IV, the ciphertext and plaintext routing metadata
+// (session id, size, timestamp). Every entry is bounded and TTL'd so one host cannot fill the DO.
+
+/** A sealed blob exactly as it travels: random 96-bit IV + AES-256-GCM ciphertext, base64url. */
+export interface MirrorBlob {
+  iv: string;
+  ct: string;
+}
+
+export interface MirrorSessionMeta {
+  sessionId: string;
+  updatedAt: number;
+  bytes: number;
+}
+
+export class MirrorError extends Error {
+  constructor(readonly code: 'invalid-id' | 'too-large' | 'quota') {
+    super(`mirror: ${code}`);
+  }
+}
+
+const MIRROR_MAX_SESSIONS = 200;
+/** Per-blob cap, so a single transcript cannot exhaust Durable Object storage. */
+const MIRROR_MAX_BYTES = 8 * 1024 * 1024;
+const MIRROR_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+const mirrorIndexKey = (accountId: string, hostId: string) => `mirror:${accountId}:${hostId}:index`;
+const mirrorPrefix = (accountId: string, hostId: string) => `mirror:${accountId}:${hostId}:s:`;
+const mirrorSessionKey = (accountId: string, hostId: string, sessionId: string) => `${mirrorPrefix(accountId, hostId)}${sessionId}`;
+
+interface MirrorIndexRecord {
+  blob: MirrorBlob;
+  updatedAt: number;
+}
+
+interface MirrorSessionRecord {
+  blob: MirrorBlob;
+  updatedAt: number;
+  bytes: number;
+}
+
+/** base64 length → decoded byte length, without decoding. */
+function sealedBytes(blob: MirrorBlob): number {
+  return Math.floor((blob.ct.length * 3) / 4);
+}
+
+/** Stores the sealed session index the browser's offline sidebar renders. */
+export async function putMirrorIndex(store: RelayStore, input: { accountId: string; hostId: string; blob: MirrorBlob }, now: number): Promise<void> {
+  if (sealedBytes(input.blob) > MIRROR_MAX_BYTES) throw new MirrorError('too-large');
+  await store.put<MirrorIndexRecord>(mirrorIndexKey(input.accountId, input.hostId), { blob: input.blob, updatedAt: now });
+  await pruneMirror(store, input.accountId, input.hostId, now);
+}
+
+export async function getMirrorIndex(store: RelayStore, accountId: string, hostId: string, now: number): Promise<{ blob: MirrorBlob; updatedAt: number } | undefined> {
+  const record = await store.get<MirrorIndexRecord>(mirrorIndexKey(accountId, hostId));
+  if (!record) return undefined;
+  if (now - record.updatedAt > MIRROR_TTL_MS) {
+    await store.delete(mirrorIndexKey(accountId, hostId));
+    return undefined;
+  }
+  return record;
+}
+
+/** Stores one sealed transcript snapshot, then enforces the per-host session budget. */
+export async function putMirrorSession(
+  store: RelayStore,
+  input: { accountId: string; hostId: string; sessionId: string; blob: MirrorBlob },
+  now: number
+): Promise<void> {
+  if (!SESSION_ID.test(input.sessionId)) throw new MirrorError('invalid-id');
+  if (sealedBytes(input.blob) > MIRROR_MAX_BYTES) throw new MirrorError('too-large');
+  await store.put<MirrorSessionRecord>(mirrorSessionKey(input.accountId, input.hostId, input.sessionId), {
+    blob: input.blob,
+    updatedAt: now,
+    bytes: sealedBytes(input.blob)
+  });
+  await pruneMirror(store, input.accountId, input.hostId, now);
+}
+
+export async function getMirrorSession(
+  store: RelayStore,
+  input: { accountId: string; hostId: string; sessionId: string },
+  now: number
+): Promise<MirrorBlob | undefined> {
+  if (!SESSION_ID.test(input.sessionId)) throw new MirrorError('invalid-id');
+  const record = await store.get<MirrorSessionRecord>(mirrorSessionKey(input.accountId, input.hostId, input.sessionId));
+  if (!record) return undefined;
+  if (now - record.updatedAt > MIRROR_TTL_MS) {
+    await store.delete(mirrorSessionKey(input.accountId, input.hostId, input.sessionId));
+    return undefined;
+  }
+  return record.blob;
+}
+
+/** Plaintext routing metadata only: the session id, when it last changed and its size. */
+export async function listMirrorSessions(store: RelayStore, accountId: string, hostId: string, now: number): Promise<MirrorSessionMeta[]> {
+  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
+  const prefixLength = mirrorPrefix(accountId, hostId).length;
+  const out: MirrorSessionMeta[] = [];
+  for (const [key, record] of entries) {
+    if (now - record.updatedAt > MIRROR_TTL_MS) {
+      await store.delete(key);
+      continue;
+    }
+    out.push({ sessionId: key.slice(prefixLength), updatedAt: record.updatedAt, bytes: record.bytes });
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function deleteMirrorSession(store: RelayStore, accountId: string, hostId: string, sessionId: string): Promise<void> {
+  await store.delete(mirrorSessionKey(accountId, hostId, sessionId));
+}
+
+/** Drops the whole mirror for a host — used when the user disables mirroring. */
+export async function clearMirror(store: RelayStore, accountId: string, hostId: string): Promise<void> {
+  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
+  for (const [key] of entries) await store.delete(key);
+  await store.delete(mirrorIndexKey(accountId, hostId));
+}
+
+/** Deletes expired entries and trims the oldest sessions past the budget. */
+async function pruneMirror(store: RelayStore, accountId: string, hostId: string, now: number): Promise<void> {
+  const entries = await store.list<MirrorSessionRecord>(mirrorPrefix(accountId, hostId));
+  const live: Array<[string, MirrorSessionRecord]> = [];
+  for (const [key, record] of entries) {
+    if (now - record.updatedAt > MIRROR_TTL_MS) await store.delete(key);
+    else live.push([key, record]);
+  }
+  if (live.length > MIRROR_MAX_SESSIONS) {
+    live.sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+    for (const [key] of live.slice(0, live.length - MIRROR_MAX_SESSIONS)) await store.delete(key);
+  }
+  const index = await store.get<MirrorIndexRecord>(mirrorIndexKey(accountId, hostId));
+  if (index && now - index.updatedAt > MIRROR_TTL_MS) await store.delete(mirrorIndexKey(accountId, hostId));
+}
+
 async function sweepExpired(store: RelayStore, now: number): Promise<void> {
   const pairs = await store.list<PairingRecord>('pair:');
   for (const [key, record] of pairs) {

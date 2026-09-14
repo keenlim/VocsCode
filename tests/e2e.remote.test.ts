@@ -67,6 +67,12 @@ describe.runIf(enabled)('remote access settings', () => {
     await toggle.click();
     await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { viewOnly?: boolean } }).remote?.viewOnly).toBe(true);
 
+    // Turning on the offline mirror is also persisted; the desktop would then sync snapshots.
+    const mirrorToggle = win.locator('.field:has-text("Offline mirror") .toggle');
+    await mirrorToggle.waitFor({ timeout: 10_000 });
+    await mirrorToggle.click();
+    await expect.poll(async () => (JSON.parse(await fs.readFile(settingsPath, 'utf8')) as { remote?: { mirror?: boolean } }).remote?.mirror).toBe(true);
+
     // The status line reflects the live relay connection rather than a stale "off".
     await expect.poll(async () => win.getByTestId('remote-status').innerText(), { timeout: 20_000 }).toMatch(/connecting|online/);
   });
