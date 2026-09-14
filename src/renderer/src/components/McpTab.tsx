@@ -156,6 +156,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
                 <span className="mcp-name">{b.def.id}</span>
                 <Badge tone="blue">built-in</Badge>
                 <span className="spacer" />
+                {b.disabledGlobally && <Badge tone="amber">off everywhere</Badge>}
                 {b.enabled && !b.indexed && <Badge tone="amber">not indexed</Badge>}
               </div>
               <div className="muted small">

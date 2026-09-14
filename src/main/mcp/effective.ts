@@ -55,9 +55,10 @@ export function effectiveEntries(input: EffectiveInput): McpEffectiveEntry[] {
 }
 
 /** The built-in servers' verdicts for a session, ahead of the user-defined ones. */
-export function builtinEntries(input: { builtin: McpServerDef[]; state: McpProjectState; harness: HarnessId; support: McpSupport }): McpEffectiveEntry[] {
+export function builtinEntries(input: { builtin: McpServerDef[]; state: McpProjectState; globalDisabled?: string[]; harness: HarnessId; support: McpSupport }): McpEffectiveEntry[] {
   const injectable = input.support === 'inject' || input.support === 'client';
-  const disabled = new Set(input.state.disabledBuiltin ?? []);
+  // The MCP page's app-wide switch and the repo's own switch are independent offs; either applies.
+  const disabled = new Set([...(input.state.disabledBuiltin ?? []), ...(input.globalDisabled ?? [])]);
   return input.builtin.map((def) => {
     const off = (reason: McpEffectiveEntry['reason']): McpEffectiveEntry => ({ def, scope: 'builtin', enabled: false, reason });
     if (disabled.has(def.id)) return off('disabled');

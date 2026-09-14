@@ -153,6 +153,9 @@ export interface McpServerDef {
   disabled?: boolean;
 }
 
+/** Ids of the MCP servers this app ships itself. A same-named user entry is not theirs to edit, so it is ignored everywhere. */
+export const MCP_BUILTIN_IDS: readonly string[] = ['gitnexus'];
+
 /** Per-user switches for one project root. Repo-defined servers stay off until enabled here. */
 export interface McpProjectState {
   /** Global server ids switched off for this repo. */
@@ -201,6 +204,8 @@ export interface McpBuiltinInfo {
   def: McpServerDef;
   /** Whether it will be handed to this session's harness. */
   enabled: boolean;
+  /** Whether the app-wide switch on the MCP page keeps it off; the repo toggle cannot override that. */
+  disabledGlobally?: boolean;
   /** Whether this repo's index is shared with sessions in other repos. */
   shared: boolean;
   /** Whether this repo has an index GitNexus can see for the session. */
@@ -984,6 +989,8 @@ export interface AppSettings {
   acpAgents: AcpAgentPreset[];
   /** Global MCP servers, offered to every harness that can take them. */
   mcpServers: McpServerDef[];
+  /** Built-in server ids switched off everywhere, from the MCP page. */
+  mcpDisabledBuiltins?: string[];
   /** Per-user MCP switches keyed by project root; see McpProjectState. */
   mcpProjectState?: Record<string, McpProjectState>;
   providers: ProviderConfig[];
