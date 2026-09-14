@@ -2,7 +2,7 @@
  *  and web clients for one provisioned account. Routing metadata only — never keys or
  *  plaintext. One Hub Durable Object per account hosts every socket. */
 import type { PublicIdentity } from '../../src/shared/crypto';
-import { claimPairing, deviceInfos, PairError, pollPairing, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type RelayStore } from './core';
+import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, PairError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStore } from './core';
 
 export interface Env {
   HUB: DurableObjectNamespace;
@@ -49,12 +49,24 @@ export class Hub {
       if (request.method === 'GET' && url.pathname === '/pair/poll') return json(await pollPairing(this.store, url.searchParams.get('code') ?? '', Date.now()));
       if (request.method === 'GET' && url.pathname === '/devices') return await this.deviceList(request);
       if (request.method === 'DELETE' && url.pathname === '/devices') return await this.deviceRevoke(url, request);
+      if (url.pathname === '/mirror') {
+        if (request.method === 'GET') return await this.mirrorGetIndex(request, url);
+        if (request.method === 'PUT') return await this.mirrorPutIndex(request);
+        if (request.method === 'DELETE') return await this.mirrorClear(request);
+      }
+      if (url.pathname.startsWith('/mirror/')) {
+        const sessionId = decodeURIComponent(url.pathname.slice('/mirror/'.length));
+        if (request.method === 'GET') return await this.mirrorGetSession(request, url, sessionId);
+        if (request.method === 'PUT') return await this.mirrorPutSession(request, sessionId);
+        if (request.method === 'DELETE') return await this.mirrorDeleteSession(request, sessionId);
+      }
       if (url.pathname === '/ws/host') return await this.wsConnect(request, 'host');
       if (url.pathname === '/ws/client') return await this.wsConnect(request, 'client');
       return json({ error: 'not found' }, 404);
     } catch (e) {
       // An unverifiable device token is an auth failure, not a server error — and the code
       // in the body is the only detail a caller gets.
+      if (e instanceof MirrorError) return json({ error: e.code }, e.code === 'too-large' ? 413 : 400);
       if (e instanceof PairError) return json({ error: e.code }, 401);
       return json({ error: e instanceof Error ? e.message : String(e) }, e instanceof PairingHttpError ? e.status : 500);
     }
@@ -99,13 +111,59 @@ export class Hub {
     return json({ ok: true });
   }
 
-  private async authDevice(request: Request): Promise<{ deviceId: string }> {
+  private async authDevice(request: Request): Promise<DeviceRecord> {
     // Browsers cannot set custom WS headers, so the device token may ride in the query.
     const url = new URL(request.url);
     const token = bearer(request) || url.searchParams.get('token') || '';
     const deviceId = url.searchParams.get('device') ?? '';
-    await verifyDeviceToken(this.store, { accountId: this.env.RELAY_ACCOUNT, deviceId, token }, Date.now());
-    return { deviceId };
+    return verifyDeviceToken(this.store, { accountId: this.env.RELAY_ACCOUNT, deviceId, token }, Date.now());
+  }
+
+  /** Writes to the mirror come from the desktop only; browsers read it. */
+  private async requireHost(request: Request): Promise<DeviceRecord> {
+    const device = await this.authDevice(request);
+    if (device.kind !== 'host') throw new PairingHttpError('forbidden', 403);
+    return device;
+  }
+
+  private async mirrorGetIndex(request: Request, url: URL): Promise<Response> {
+    const device = await this.authDevice(request);
+    // A browser names the desktop it paired with; a desktop defaults to itself.
+    const hostId = url.searchParams.get('host') || device.deviceId;
+    const record = await getMirrorIndex(this.store, this.env.RELAY_ACCOUNT, hostId, Date.now());
+    return json(record?.blob ?? null);
+  }
+
+  private async mirrorPutIndex(request: Request): Promise<Response> {
+    const host = await this.requireHost(request);
+    const blob = await readBlob(request);
+    await putMirrorIndex(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId: host.deviceId, blob }, Date.now());
+    return json({ ok: true });
+  }
+
+  private async mirrorClear(request: Request): Promise<Response> {
+    const host = await this.requireHost(request);
+    await clearMirror(this.store, this.env.RELAY_ACCOUNT, host.deviceId);
+    return json({ ok: true });
+  }
+
+  private async mirrorGetSession(request: Request, url: URL, sessionId: string): Promise<Response> {
+    const device = await this.authDevice(request);
+    const hostId = url.searchParams.get('host') || device.deviceId;
+    return json((await getMirrorSession(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId, sessionId }, Date.now())) ?? null);
+  }
+
+  private async mirrorPutSession(request: Request, sessionId: string): Promise<Response> {
+    const host = await this.requireHost(request);
+    const blob = await readBlob(request);
+    await putMirrorSession(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId: host.deviceId, sessionId, blob }, Date.now());
+    return json({ ok: true });
+  }
+
+  private async mirrorDeleteSession(request: Request, sessionId: string): Promise<Response> {
+    const host = await this.requireHost(request);
+    await deleteMirrorSession(this.store, this.env.RELAY_ACCOUNT, host.deviceId, sessionId);
+    return json({ ok: true });
   }
 
   private async wsConnect(request: Request, kind: 'host' | 'client'): Promise<Response> {
@@ -217,6 +275,13 @@ class PairingHttpError extends Error {
 function bearer(request: Request): string {
   const h = request.headers.get('authorization') ?? '';
   return h.startsWith('Bearer ') ? h.slice(7) : '';
+}
+
+/** Reads and shape-checks a sealed mirror blob; the relay never looks inside `ct`. */
+async function readBlob(request: Request): Promise<MirrorBlob> {
+  const body = (await request.json()) as Partial<MirrorBlob>;
+  if (!body || typeof body.iv !== 'string' || typeof body.ct !== 'string') throw new PairingHttpError('invalid', 400);
+  return { iv: body.iv, ct: body.ct };
 }
 
 function json(value: unknown, status = 200): Response {

@@ -9,6 +9,10 @@ let active: string | null = null;
 let activeStatus = 'idle';
 /** Desktop view-only policy (P4): read-only, so every write control is hidden. */
 let viewOnly = false;
+/** 'live' = driving the desktop; 'mirror' = reading the encrypted snapshots it left behind. */
+let mode: 'live' | 'mirror' = 'live';
+let reconnectTimer: ReturnType<typeof setInterval> | null = null;
+let connecting = false;
 
 function localStorageApi() {
   return {
@@ -74,7 +78,7 @@ function boot(): void {
 async function sendComposer(): Promise<void> {
   const box = el('composer') as HTMLTextAreaElement;
   const text = box.value.trim();
-  if (!text || !active || viewOnly) return;
+  if (!text || !active || viewOnly || mode === 'mirror') return;
   box.value = '';
   try {
     await client.invoke('sessions:send', { id: active, input: { text } });
@@ -84,7 +88,7 @@ async function sendComposer(): Promise<void> {
 }
 
 async function actOnActive(channel: string, request: unknown): Promise<void> {
-  if (!active) return;
+  if (!active || mode === 'mirror') return;
   try {
     await client.invoke(channel, request ? { id: active, ...request } : { id: active });
   } catch (e) {
@@ -93,6 +97,7 @@ async function actOnActive(channel: string, request: unknown): Promise<void> {
 }
 
 async function toggleNewSession(open: boolean): Promise<void> {
+  if (open && mode === 'mirror') return;
   el('new-session-panel').toggleAttribute('hidden', !open);
   if (!open) return;
   // Folders from the host's settings; harnesses from live availability.
@@ -110,6 +115,7 @@ async function toggleNewSession(open: boolean): Promise<void> {
 }
 
 async function createSession(): Promise<void> {
+  if (mode === 'mirror') return;
   const folder = (el('ns-folder') as HTMLInputElement).value.trim();
   const harness = (el('ns-harness') as HTMLSelectElement).value;
   const title = (el('ns-title') as HTMLInputElement).value.trim() || undefined;
@@ -145,61 +151,105 @@ async function startPairing(relay: string, code: string, name: string): Promise<
 
 async function enter(): Promise<void> {
   show('screen-app');
+  client.onPush((channel, payload) => void onPush(channel, payload));
+  await connectLoop();
+}
+
+/** Connects to the desktop; on failure shows the offline mirror and keeps retrying. */
+async function connectLoop(): Promise<void> {
+  if (connecting || !client.hasCredentials()) return;
+  connecting = true;
   try {
     await client.connect(() => {
       setConnection('reconnecting…');
-      // A dropped socket retries until it succeeds; the page keeps its last transcript.
-      const retry = setInterval(() => {
-        if (!client.hasCredentials()) return;
-        void client
-          .connect()
-          .then(() => {
-            setConnection('connected');
-            clearInterval(retry);
-          })
-          .catch(() => undefined);
-      }, 3000);
+      scheduleReconnect();
     });
-  } catch (e) {
-    setConnection(`connection failed: ${e instanceof Error ? e.message : String(e)}`);
+  } catch {
+    connecting = false;
+    await showMirror();
+    scheduleReconnect();
     return;
   }
+  connecting = false;
+  mode = 'live';
+  if (reconnectTimer) {
+    clearInterval(reconnectTimer);
+    reconnectTimer = null;
+  }
   setConnection('connected');
-  client.onPush((channel, payload) => void onPush(channel, payload));
-  // The desktop's view-only policy hides write controls before the first render of a transcript.
+  await loadPolicy();
+  await refreshSessions();
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimer || !client.hasCredentials()) return;
+  reconnectTimer = setInterval(() => void connectLoop(), 3000);
+}
+
+/** The desktop's view-only policy hides write controls before the first render of a transcript. */
+async function loadPolicy(): Promise<void> {
   try {
     const settings = (await client.invoke('settings:get', null)) as { remote?: { viewOnly?: boolean } };
     applyPolicy(settings.remote?.viewOnly === true);
   } catch {
     // An older host has no remote policy; stay interactive, matching P3 behavior.
   }
-  await refreshSessions();
 }
 
-async function refreshSessions(): Promise<void> {
+/** Renders the sealed snapshots the desktop uploaded, entirely offline. */
+async function showMirror(): Promise<void> {
+  if (!client.hasMirror()) {
+    setConnection('desktop offline');
+    return;
+  }
   try {
-    sessions = (await client.invoke('sessions:list', null)) as typeof sessions;
-    const list = el('session-list');
-    list.innerHTML = sessions
-      .map((s) => `<button class="session-row" data-id="${esc(s.id)}"><span>${esc(s.title)}</span><small>${esc(s.status)}</small></button>`)
-      .join('');
-    for (const row of Array.from(list.querySelectorAll('button'))) {
-      row.addEventListener('click', () => void openSession((row as HTMLElement).dataset.id!));
+    const index = await client.mirrorIndex();
+    if (!index) {
+      setConnection('desktop offline — no mirror uploaded yet');
+      return;
     }
+    mode = 'mirror';
+    sessions = index.sessions.map((s) => ({ id: s.id, title: s.title, status: s.status }));
+    renderSessionList();
+    setConnection(`offline — mirrored from ${index.hostName}`);
+    updateWriteControls();
     const first = sessions[0]?.id;
     if (first) await openSession(first);
   } catch (e) {
-    setConnection(`failed to list sessions: ${e instanceof Error ? e.message : String(e)}`);
+    setConnection(`desktop offline — ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function refreshSessions(): Promise<void> {
+  mode = 'live';
+  try {
+    sessions = (await client.invoke('sessions:list', null)) as typeof sessions;
+    renderSessionList();
+    updateWriteControls();
+    const first = sessions[0]?.id;
+    if (first) await openSession(first);
+  } catch {
+    // The desktop answered on connect but is gone now; fall back to what it mirrored.
+    await showMirror();
   }
 }
 
 async function openSession(id: string): Promise<void> {
   active = id;
-  const items = (await client.invoke('sessions:transcript', { id })) as TranscriptItem[];
-  renderTranscript(items);
   const meta = sessions.find((s) => s.id === id);
-  activeStatus = meta?.status ?? 'idle';
-  (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
+  if (mode === 'mirror') {
+    const snapshot = await client.mirrorSession(id);
+    if (!snapshot || active !== id) return;
+    renderTranscript(snapshot.items);
+    activeStatus = snapshot.status;
+    (el('active-title') as HTMLElement).textContent = `${snapshot.title} · ${snapshot.status}${snapshot.truncated ? ' · earlier history trimmed' : ''}`;
+  } else {
+    const items = (await client.invoke('sessions:transcript', { id })) as TranscriptItem[];
+    if (active !== id) return;
+    renderTranscript(items);
+    activeStatus = meta?.status ?? 'idle';
+    (el('active-title') as HTMLElement).textContent = meta ? `${meta.title} · ${activeStatus}` : '';
+  }
   syncControls();
   for (const row of Array.from(document.querySelectorAll('.session-row'))) row.classList.toggle('active', (row as HTMLElement).dataset.id === id);
 }
@@ -208,22 +258,27 @@ function isRunning(status: string): boolean {
   return status === 'running' || status === 'starting' || status === 'awaiting';
 }
 
-/** Interrupt/stop show only when the active session is live — and never in view-only mode. */
+/** Interrupt/stop show only while driving a live session — never in view-only or mirror mode. */
 function syncControls(): void {
-  const running = !viewOnly && isRunning(activeStatus);
+  const running = mode === 'live' && !viewOnly && isRunning(activeStatus);
   (el('act-interrupt') as HTMLElement).hidden = !running;
   (el('act-stop') as HTMLElement).hidden = !running;
 }
 
-/** Apply the desktop's view-only policy: hide every control that would write. */
+/** Apply the desktop's view-only policy; the mirror is read-only regardless of what it said. */
 function applyPolicy(next: boolean): void {
   viewOnly = next;
+  updateWriteControls();
+}
+
+function updateWriteControls(): void {
+  const readOnly = viewOnly || mode === 'mirror';
   const badge = el('policy');
-  badge.toggleAttribute('hidden', !viewOnly);
-  badge.textContent = viewOnly ? 'view-only' : '';
-  for (const id of ['composer', 'send', 'new-session']) (el(id) as HTMLButtonElement | HTMLTextAreaElement).toggleAttribute('disabled', viewOnly);
+  badge.toggleAttribute('hidden', !readOnly);
+  badge.textContent = mode === 'mirror' ? 'mirrored' : readOnly ? 'view-only' : '';
+  for (const id of ['composer', 'send', 'new-session']) (el(id) as HTMLButtonElement | HTMLTextAreaElement).toggleAttribute('disabled', readOnly);
   syncControls();
-  if (viewOnly) el('new-session-panel').setAttribute('hidden', '');
+  if (readOnly) el('new-session-panel').setAttribute('hidden', '');
 }
 
 function renderTranscript(items: TranscriptItem[]): void {
@@ -252,7 +307,7 @@ function renderTranscript(items: TranscriptItem[]): void {
 function renderApproval(item: Extract<TranscriptItem, { kind: 'approval' }>): string {
   const requestId = item.request.id;
   if (item.decision) return `<div class="msg approval decided"><b>Approval</b> <small>decided: ${esc(item.decision.optionId)}</small></div>`;
-  if (viewOnly) return `<div class="msg approval"><b>Approval needed</b><small> — decide on the desktop (view-only)</small></div>`;
+  if (viewOnly || mode === 'mirror') return `<div class="msg approval"><b>Approval needed</b><small> — decide on the desktop${mode === 'mirror' ? ' (mirrored history)' : ' (view-only)'}</small></div>`;
   return `<div class="msg approval"><b>Approval needed</b><div class="approval-actions" data-request="${esc(requestId)}"><button data-decision="allow">Allow</button><button data-decision="deny" class="danger">Deny</button></div></div>`;
 }
 
@@ -286,6 +341,8 @@ async function onPush(channel: string, payload: unknown): Promise<void> {
     applyPolicy((payload as { viewOnly?: boolean } | null)?.viewOnly === true);
     return;
   }
+  // A mirror is a snapshot: live events from a reconnecting socket do not apply to it.
+  if (mode === 'mirror') return;
   if (channel === 'push:sessionEvent' && payload) {
     const env = payload as { sessionId?: string; event?: { type?: string; status?: string } };
     if (active && env.sessionId === active) {

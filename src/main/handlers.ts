@@ -80,6 +80,8 @@ export interface HandlerDeps {
   knowledge?: KnowledgeService;
   /** Remote access host (docs/REMOTE-ACCESS.md); present when wired up in index.ts. */
   remote?: RemoteHost;
+  /** P4 offline mirror: synced/cleared when the desktop's mirror policy changes. */
+  remoteMirror?: { sync(): void; disable(): void };
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
   piConfig?: PiConfigStore;
   /** In-app auto-update (issue #198); absent in dev and other unpackaged runs. */
@@ -636,6 +638,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
       // Live policy change: refresh the desktop state and tell paired browsers to hide write controls.
       void remote.broadcastPolicy();
+      return remote.state();
+    });
+    handle('remote:setMirror', ({ mirror }) => {
+      void (async () => {
+        await settings.update({ remote: { ...remoteConfig(), mirror: mirror === true } });
+        deps.push(PUSH_CHANNELS.settingsChanged, settings.get());
+        if (mirror === true) deps.remoteMirror?.sync();
+        else await deps.remoteMirror?.disable();
+      })();
       return remote.state();
     });
     handle('remote:clearAudit', () => {

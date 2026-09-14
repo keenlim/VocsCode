@@ -1236,6 +1236,9 @@ export interface RemoteConfig {
   relayUrl?: string;
   /** P4 view-only mode: paired browsers may browse but not send, approve or change anything. */
   viewOnly?: boolean;
+  /** P4 offline mirror: upload sealed transcript snapshots so browsers can read history while
+   *  this desktop is offline. Opt-in, off by default. */
+  mirror?: boolean;
 }
 
 export interface RemoteState {

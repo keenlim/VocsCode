@@ -232,6 +232,8 @@ export interface IpcContract {
   'remote:revoke': [{ deviceId: string }, void];
   /** P4: view-only mode is a desktop policy, persisted in settings and pushed to paired browsers. */
   'remote:setViewOnly': [{ viewOnly: boolean }, RemoteState];
+  /** P4: the offline mirror is opt-in; enabling it syncs the existing sessions, disabling clears it. */
+  'remote:setMirror': [{ mirror: boolean }, RemoteState];
   'remote:clearAudit': [void, void];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];

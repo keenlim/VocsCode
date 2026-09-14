@@ -3,7 +3,7 @@
  *  registry over an e2e-encrypted session. Off by default; device credentials and the
  *  identity keys live in the secret store, never in settings or logs. */
 import { WebSocket } from 'ws';
-import { generateIdentity, hostAccept, openFrame, publicOf, sealFrame, verify, type Identity, type PublicIdentity } from '../../shared/crypto';
+import { generateIdentity, hostAccept, openFrame, publicOf, randomKeyB64, sealFrame, verify, type Identity, type PublicIdentity, type SealedBlob } from '../../shared/crypto';
 import type { RemoteAuditEntry, RemoteDeviceInfo, RemoteState } from '../../shared/types';
 import type { HandlerRegistry } from '../handlers';
 import type { SecretStore } from '../secrets';
@@ -97,6 +97,9 @@ interface HostCredentials {
   enrollToken?: string;
   /** Web devices paired with this host, by deviceId — the handshake trust anchors. */
   clients: Record<string, PublicIdentity>;
+  /** P4: the symmetric key that seals the offline transcript mirror. Shared with every paired
+   *  browser over the e2e session; never written to the relay. */
+  mirrorKey?: string;
 }
 
 interface Session {
@@ -182,6 +185,9 @@ export class RemoteHost {
     this.creds = stored ?? { identity: await generateIdentity(), relayUrl, enrollToken, clients: {} };
     this.creds.relayUrl = relayUrl;
     if (enrollToken) this.creds.enrollToken = enrollToken;
+    // One mirror key per host, handed to each browser at connect; generated once and kept so an
+    // existing mirror stays readable across restarts.
+    if (!this.creds.mirrorKey) this.creds.mirrorKey = randomKeyB64();
     await this.saveCreds();
     // The relay URL is configuration; tokens and keys stay out of the log.
     this.deps.log('info', `remote: enabled for ${relayUrl} (${stored ? `${Object.keys(stored.clients).length} paired device(s)` : 'new identity'}${this.creds.deviceId ? ', enrolled' : ', not yet enrolled'})`);
@@ -259,6 +265,35 @@ export class RemoteHost {
     this.sessions.delete(deviceId);
     this.deps.audit?.record('device-revoke', { device: deviceId });
     this.push();
+  }
+
+  /** The key that seals the offline mirror, or null before remote access was ever enabled. */
+  mirrorSecret(): string | null {
+    return this.creds?.mirrorKey ?? null;
+  }
+
+  /** Publishes a sealed mirror blob to the relay. False when not enrolled or the relay refused it. */
+  async putMirror(kind: 'index' | 'session', sessionId: string | undefined, blob: SealedBlob): Promise<boolean> {
+    if (!this.creds?.deviceId || !this.creds.deviceToken) return false;
+    const base = this.creds.relayUrl.replace(/\/$/, '');
+    const url = kind === 'index' ? `${base}/v1/mirror` : `${base}/v1/mirror/${encodeURIComponent(sessionId ?? '')}`;
+    const res = await fetch(`${url}?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${this.creds.deviceToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify(blob)
+    }).catch(() => null);
+    if (!res?.ok) this.deps.log('warn', `remote: mirror upload refused (${res?.status ?? 'network error'})`);
+    return !!res?.ok;
+  }
+
+  /** Drops the whole mirror at the relay (used when the user turns mirroring off). */
+  async clearMirror(): Promise<void> {
+    if (!this.creds?.deviceId || !this.creds.deviceToken) return;
+    const base = this.creds.relayUrl.replace(/\/$/, '');
+    await fetch(`${base}/v1/mirror?device=${encodeURIComponent(this.creds.deviceId)}&token=${encodeURIComponent(this.creds.deviceToken)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${this.creds.deviceToken}` }
+    }).catch(() => undefined);
   }
 
   // --- internals ---
@@ -391,6 +426,9 @@ export class RemoteHost {
       this.ws?.send(JSON.stringify({ t: 'hs', to: from, seq: 0, payload: session.reply }));
       this.deps.log('info', `remote: client ${from} connected (${this.sessions.size} online)`);
       this.deps.audit?.record('client-connect', { device: from });
+      // Hand the browser the mirror key sealed inside the just-established session; it needs the
+      // key before the desktop can ever be offline, and re-receives it on every reconnect.
+      if (this.creds.mirrorKey) await this.sendTo(from, { type: 'mirror.key', key: this.creds.mirrorKey });
     } catch (e) {
       this.deps.log('warn', `remote handshake failed for ${from}: ${e instanceof Error ? e.message : String(e)}`);
       this.deps.audit?.record('handshake-failed', { device: from });

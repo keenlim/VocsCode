@@ -3,7 +3,7 @@ import http from 'node:http';
  *  over the REAL relay core (relay/src/core.ts). Used by remote-e2e.test.ts and
  *  web-client.test.ts. Metadata-only routing, like the real Durable Object. */
 import { WebSocketServer, type WebSocket as WsLike } from 'ws';
-import { claimPairing, deviceInfos, pollPairing, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type RelayStore } from '../relay/src/core';
+import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStore } from '../relay/src/core';
 import type { PublicIdentity } from '../src/shared/crypto';
 
 export const ENROLL = 'enroll-secret';
@@ -72,8 +72,9 @@ export class FakeRelay {
     if (url.pathname === '/v1/devices' && (req.method === 'GET' || req.method === 'DELETE')) {
       // Matches the Worker: device/token authenticate the caller, target names the victim,
       // and only public metadata is returned.
+      let caller: DeviceRecord;
       try {
-        await verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now());
+        caller = await verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now());
       } catch {
         reply({ error: 'invalid' }, 401);
         return;
@@ -91,6 +92,57 @@ export class FakeRelay {
       for (const [ws, meta] of this.sockets) if (meta.id === target) ws.close();
       reply({ ok: true });
       return;
+    }
+    if (url.pathname === '/v1/mirror' || url.pathname.startsWith('/v1/mirror/')) {
+      // Mirror routing mirrors the Worker: device/token authenticate, only the desktop may
+      // write, and the blobs stay opaque.
+      let caller: DeviceRecord;
+      try {
+        caller = await verifyDeviceToken(this.store, { accountId: 'a', deviceId: url.searchParams.get('device') ?? '', token: auth }, Date.now());
+      } catch {
+        reply({ error: 'invalid' }, 401);
+        return;
+      }
+      const sessionId = url.pathname.startsWith('/v1/mirror/') ? decodeURIComponent(url.pathname.slice('/v1/mirror/'.length)) : undefined;
+      const hostId = url.searchParams.get('host') || caller.deviceId;
+      if (req.method !== 'GET' && caller.kind !== 'host') {
+        reply({ error: 'forbidden' }, 403);
+        return;
+      }
+      try {
+        if (sessionId) {
+          if (req.method === 'PUT') {
+            await putMirrorSession(this.store, { accountId: 'a', hostId: caller.deviceId, sessionId, blob: JSON.parse(body) as MirrorBlob }, Date.now());
+            reply({ ok: true });
+            return;
+          }
+          if (req.method === 'DELETE') {
+            await deleteMirrorSession(this.store, 'a', caller.deviceId, sessionId);
+            reply({ ok: true });
+            return;
+          }
+          reply((await getMirrorSession(this.store, { accountId: 'a', hostId, sessionId }, Date.now())) ?? null);
+          return;
+        }
+        if (req.method === 'PUT') {
+          await putMirrorIndex(this.store, { accountId: 'a', hostId: caller.deviceId, blob: JSON.parse(body) as MirrorBlob }, Date.now());
+          reply({ ok: true });
+          return;
+        }
+        if (req.method === 'DELETE') {
+          await clearMirror(this.store, 'a', caller.deviceId);
+          reply({ ok: true });
+          return;
+        }
+        reply((await getMirrorIndex(this.store, 'a', hostId, Date.now()))?.blob ?? null);
+        return;
+      } catch (e) {
+        if (e instanceof MirrorError) {
+          reply({ error: e.code }, e.code === 'too-large' ? 413 : 400);
+          return;
+        }
+        throw e;
+      }
     }
     reply({ error: 'not found' }, 404);
   }

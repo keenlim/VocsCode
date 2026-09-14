@@ -30,6 +30,7 @@ import { UpdateService } from './updater';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { RemoteAudit } from './remote/audit';
+import { RemoteMirror } from './remote/mirror';
 import { WebServer } from './web-server';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -191,6 +192,9 @@ async function main(): Promise<void> {
 
   // Fan-out hooks that need to run on every sessions change (the update prompt waits for idle).
   const sessionsChangedHooks: Array<() => void> = [];
+  // Declared before the manager so the push callbacks can mirror transcripts; assigned once the
+  // remote host exists (the callbacks only fire on real activity, long after boot).
+  let remoteMirror: RemoteMirror | null = null;
   sessions = new SessionManager({
     store,
     settings,
@@ -202,10 +206,14 @@ async function main(): Promise<void> {
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
     knowledgeDigest: (scope) => knowledge.digest(scope),
-    pushEvent: (env: SessionEventEnvelope) => pushAll(PUSH_CHANNELS.sessionEvent, env),
+    pushEvent: (env: SessionEventEnvelope) => {
+      pushAll(PUSH_CHANNELS.sessionEvent, env);
+      remoteMirror?.notify(env.sessionId);
+    },
     pushSessions: (list: SessionMeta[]) => {
       search.syncMeta(list);
       for (const hook of sessionsChangedHooks) hook();
+      remoteMirror?.notifyIndex();
       pushAll(PUSH_CHANNELS.sessionsChanged, list);
     },
     notify: (sessionId, title, body) => {
@@ -279,6 +287,16 @@ async function main(): Promise<void> {
     viewOnly: () => settings.get().remote?.viewOnly === true
   });
 
+  // Offline mirror (P4): the desktop seals transcript snapshots for paired browsers to read while
+  // it is offline. Off unless the user opts in; the key lives in the host's secret-store creds.
+  remoteMirror = new RemoteMirror({
+    host: () => remoteHost,
+    sessions: () => sessionsRef.list(),
+    transcript: (id) => sessionsRef.transcript(id),
+    enabled: () => settings.get().remote?.mirror === true,
+    log
+  });
+
   const registry = registerIpc({
     settings,
     secrets,
@@ -289,6 +307,7 @@ async function main(): Promise<void> {
     search,
     knowledge,
     remote: remoteHost,
+    remoteMirror: { sync: () => remoteMirror?.sync(), disable: () => void remoteMirror?.disable() },
     updater: updater ?? undefined,
     broadcast: (channel, payload) => {
       webServer?.broadcast(channel, payload);
@@ -303,6 +322,8 @@ async function main(): Promise<void> {
   if (remoteConfig?.enabled && remoteConfig.relayUrl) {
     const enrollToken = await secrets.get('remote-enroll');
     if (enrollToken) await remoteHost.enable(remoteConfig.relayUrl, enrollToken);
+    // The mirror resumes with it, reading the last snapshots back up from the same store.
+    if (remoteConfig.mirror) remoteMirror?.sync();
   }
 
   // Localhost web client (P1 dogfood, docs/REMOTE-ACCESS.md): explicit opt-in, dev-oriented.
