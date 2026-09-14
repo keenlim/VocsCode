@@ -57,7 +57,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   invokeMock.mockReset();
   prs = [];
-  useStore.setState({ panelTab: 'branches', toasts: [] });
+  // Reset the module-level store, activeId included, so each test's assertions stand on their own.
+  useStore.setState({ panelTab: 'branches', toasts: [], activeId: null });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'git:branchesOverview') return Promise.resolve(OVERVIEW);
@@ -157,31 +158,56 @@ describe('Git panel PR detail dialog', () => {
 
 /**
  * The row's New session action replaces the ⋯ menu: one click starts a review session on the repo
- * itself, with the review template as its first message.
+ * itself, after a dialog confirms the first message (the template, editable before it starts).
  */
 describe('Git panel PR review session', () => {
-  it('starts a review session on the repo from the row, review template included', async () => {
-    await openPrList();
+  it('confirms the first message in a dialog before starting the session', async () => {
+    await openPrList(true);
 
-    // The ⋯ menu and its list actions are gone, so the row's second action starts the session.
+    // The menu is gone, so the row's second action opens the dialog instead of starting anything.
     expect(screen.queryByTitle('PR actions')).toBeNull();
-
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'New session to review PR #7' }));
     });
 
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Start a session to review PR #7?')).toBeTruthy();
+    const prompt = within(dialog).getByTestId('pr-review-prompt') as HTMLTextAreaElement;
+    expect(prompt.value).toBe(
+      'Review pull request #7 "Add the thing" (https://github.com/o/r/pull/7), branch `feature/thing` into `develop`. Run `gh pr diff 7` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.'
+    );
+    // Nothing is created while the dialog is open.
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
+
+    // The edited first message is what the session opens with, on the repo itself (no worktree).
+    fireEvent.change(prompt, { target: { value: 'Review PR #7, focusing on the migration.' } });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start session' }));
+    });
+
     const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');
     expect(created).toHaveLength(1);
-    // The session lands on the repo itself (no worktree) and opens with the review template.
     expect(created[0]![1]).toEqual({
       config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'auto', useWorktree: false },
       title: 'Review PR #7',
-      initialPrompt:
-        'Review pull request #7 "Add the thing" (https://github.com/o/r/pull/7), branch `feature/thing` into `develop`. Run `gh pr diff 7` for the patch: summarize what it changes, flag risks, and say whether it is ready to merge.'
+      initialPrompt: 'Review PR #7, focusing on the migration.'
     });
-    // The button acts like the row's other actions: no dialog, the new session becomes active.
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(useStore.getState().activeId).toBe('s_new');
     expect(useStore.getState().toasts.some((t) => t.kind === 'success' && t.text === 'Session started to review PR #7')).toBe(true);
+  });
+
+  it('starts nothing when the dialog is dismissed', async () => {
+    await openPrList(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New session to review PR #7' }));
+    });
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    });
+
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(useStore.getState().activeId).toBeNull();
   });
 });
