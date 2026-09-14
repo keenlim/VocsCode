@@ -12,6 +12,12 @@ npm run build        # bundles to out/
 npm run dist:win     # NSIS installer + dist/win-unpacked/
 ```
 
+An unpackaged run (`npm run dev`, `npm run preview`) keeps its settings, sessions, logs and
+keychain entries in a `Vocs Code (Dev)` userData directory, under a `dev.vocs.vocscode.dev`
+AppUserModelID and `Vocs Code (Dev)` Start Menu shortcut, so it never shares the installed app's
+single-instance lock, shortcut or profile — the two run side by side. The e2e suites go further and
+isolate every launch with their own `VOCS_CODE_USER_DATA` temp directory.
+
 ## Verification suites
 
 ```bash

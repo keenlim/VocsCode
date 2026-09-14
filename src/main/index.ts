@@ -10,6 +10,7 @@ import { chromeFor, themeSourceFor, type ThemeId } from '../shared/themes';
 import { AnalyticsStore } from './analytics';
 import { watchEventLoop } from './diag';
 import { setGitLog } from './git';
+import { PRODUCT_APP_ID, resolveAppIdentity } from './identity';
 import { registerIpc, pushToRenderer } from './ipc';
 import { createLogger, describeError, type Logger } from './log';
 import { RendererRecovery } from './renderer-recovery';
@@ -29,7 +30,6 @@ import { WebServer } from './web-server';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isDev = !app.isPackaged && !!process.env.ELECTRON_RENDERER_URL;
 const APP_NAME = 'Vocs Code';
-const APP_ID = 'dev.vocs.vocscode';
 
 // The e2e suites drive real windows. Park them outside every display and never activate them, so a
 // test run neither covers the desktop nor takes the focus away from whatever the developer is doing.
@@ -42,12 +42,22 @@ if (e2eQuiet && !app.commandLine.hasSwitch('disable-features')) {
 }
 
 // Electron uses its own name and AppUserModelId in development unless the host sets them explicitly.
-// Set both before acquiring the single-instance lock so the taskbar uses the packaged identity too.
+// Keep the product name for the window and menu, but give an unpackaged run a `(Dev)` Windows
+// identity and profile so it never shares the installed app's AppUserModelID, Start Menu shortcut
+// or userData (see identity.ts). All of it lands before the single-instance lock, which is keyed on
+// userData: an unpackaged run that took the installed profile would hold the lock, so launching the
+// installed build while `npm run dev` is open would just focus the dev window and quit.
 app.setName(APP_NAME);
-if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
-// Isolate user data before the lock: the lock is keyed on userData, so an isolated run
-// (tests, a second checkout) must not collide with an instance using the default directory.
-if (process.env.VOCS_CODE_USER_DATA) app.setPath('userData', process.env.VOCS_CODE_USER_DATA);
+const identity = resolveAppIdentity({
+  packaged: app.isPackaged,
+  appDataDir: app.getPath('appData'),
+  userDataOverride: process.env.VOCS_CODE_USER_DATA
+});
+if (process.platform === 'win32') app.setAppUserModelId(identity.appUserModelId);
+// A packaged run already lands on identity.userDataDir by default, so leave the path alone and keep
+// honoring Chromium's `--user-data-dir`; unpackaged runs and an explicit override must be forced
+// before the lock.
+if (!app.isPackaged || process.env.VOCS_CODE_USER_DATA) app.setPath('userData', identity.userDataDir);
 
 let mainWindow: BrowserWindow | null = null;
 let sessions: SessionManager | null = null;
@@ -370,12 +380,12 @@ function appIconPath(appRoot: string): string {
   return path.join(iconRoot, iconName);
 }
 
-/** Write the AUMID's DisplayName/IconUri so the Windows taskbar menu shows the product name, not 'Electron'. */
+/** Write the AUMID's DisplayName/IconUri so the Windows taskbar menu shows this run's name, not 'Electron'. */
 function registerAppUserModelId(appRoot: string): void {
   if (process.platform !== 'win32') return;
-  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${APP_ID}`;
+  const key = `HKCU\\Software\\Classes\\AppUserModelId\\${identity.appUserModelId}`;
   const values: Array<[string, string]> = [
-    ['DisplayName', APP_NAME],
+    ['DisplayName', identity.displayName],
     ['IconUri', appIconPath(appRoot)]
   ];
   for (const [name, data] of values) {
@@ -390,20 +400,27 @@ function registerAppUserModelId(appRoot: string): void {
 }
 
 /** The shell resolves an AUMID's display name from a matching Start Menu shortcut before the registry,
- *  so in development we keep a correctly named 'Vocs Code' shortcut and drop stale ones (e.g. a leftover
- *  'Electron.lnk' from an earlier dev run) that would make the taskbar menu say 'Electron'. NSIS owns the
- *  shortcut once packaged, so this only runs unpackaged. */
+ *  so in development we keep a correctly named 'Vocs Code (Dev)' shortcut and drop stale ones (e.g. a
+ *  leftover 'Electron.lnk' from an earlier dev run) that would make the taskbar menu say 'Electron'.
+ *  NSIS owns the installed app's 'Vocs Code' shortcut, so this only runs unpackaged and never writes
+ *  its name. */
 function reconcileDevShortcut(appRoot: string): void {
   if (app.isPackaged) return;
   const menu = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
   const exe = process.execPath.toLowerCase();
+  const lnk = path.join(menu, identity.shortcutFile);
   try {
     for (const entry of readdirSync(menu)) {
-      if (!entry.toLowerCase().endsWith('.lnk') || entry === `${APP_NAME}.lnk`) continue;
       const file = path.join(menu, entry);
+      if (file === lnk || !entry.toLowerCase().endsWith('.lnk')) continue;
       try {
-        const lnk = shell.readShortcutLink(file);
-        if (lnk.appUserModelId === APP_ID && lnk.target.toLowerCase() === exe) rmSync(file, { force: true });
+        const shortcut = shell.readShortcutLink(file);
+        // Only remove shortcuts that point at *this* repo's Electron. The installed app's own Start
+        // Menu entry targets its install path, so it is never touched; anything else carrying one of
+        // our AUMIDs is a leftover dev shortcut — including one an older build wrote over the
+        // installed app's 'Vocs Code.lnk'.
+        const ours = shortcut.appUserModelId === PRODUCT_APP_ID || shortcut.appUserModelId === identity.appUserModelId;
+        if (ours && shortcut.target.toLowerCase() === exe) rmSync(file, { force: true });
       } catch {
         // Not one of our shortcuts (or unreadable); leave it alone.
       }
@@ -418,12 +435,11 @@ function reconcileDevShortcut(appRoot: string): void {
     const options = {
       target: process.execPath,
       cwd: appRoot,
-      description: APP_NAME,
+      description: identity.displayName,
       icon: appIconPath(appRoot),
       iconIndex: 0,
-      appUserModelId: APP_ID
+      appUserModelId: identity.appUserModelId
     };
-    const lnk = path.join(menu, `${APP_NAME}.lnk`);
     // 'replace' only overwrites an existing shortcut; fall back to 'create' on the first run.
     if (!shell.writeShortcutLink(lnk, existsSync(lnk) ? 'replace' : 'create', options)) {
       log('warn', 'could not write the dev Start Menu shortcut; taskbar icon may fall back to Electron\'s');
@@ -487,7 +503,7 @@ function createWindow(settings: SettingsStore, appRoot: string): void {
     }
   });
   if (process.platform === 'win32') {
-    win.setAppDetails({ appId: APP_ID, appIconPath: icon });
+    win.setAppDetails({ appId: identity.appUserModelId, appIconPath: icon });
   }
   mainWindow = win;
   log('debug', `window created ${bounds.width}x${bounds.height}${'x' in bounds && bounds.x !== undefined ? ` at ${bounds.x},${bounds.y}` : ''}`);
