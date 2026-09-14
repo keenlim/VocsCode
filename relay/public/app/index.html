@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vocs Code — remote</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/app/styles.css" />
   </head>
   <body>
     <!-- Pairing: enter the code shown by the desktop (Settings → Remote access). -->
@@ -13,7 +13,6 @@
         <h1>Vocs Code</h1>
         <p class="muted">Pair this browser with your desktop app. Enter the code shown under Settings → Remote access.</p>
         <form id="pair-form">
-          <label>Relay URL<input id="relay" type="url" placeholder="https://your-relay.workers.dev" required /></label>
           <label>Pairing code<input id="code" maxlength="9" placeholder="ABCD2345" autocomplete="off" required /></label>
           <label>Browser name<input id="device-name" placeholder="My laptop" /></label>
           <button type="submit" class="primary">Pair</button>
@@ -77,6 +76,6 @@
         </main>
       </div>
     </section>
-    <script src="/app.js"></script>
+    <script src="/app/app.js"></script>
   </body>
 </html>

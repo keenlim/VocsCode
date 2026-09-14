@@ -109,6 +109,9 @@
 
   // relay/src/web-client.ts
   var CREDS_KEY = "vocs-web-credentials";
+  function relayBaseFor(origin, override) {
+    return (override?.trim() || origin).replace(/\/$/, "");
+  }
   var RelayClient = class {
     constructor(deps) {
       this.deps = deps;
@@ -368,10 +371,9 @@
   function boot() {
     el("pair-form").addEventListener("submit", (ev) => {
       ev.preventDefault();
-      const relay = el("relay").value.trim();
       const code = el("code").value.trim();
       const name = el("device-name").value.trim() || "Browser";
-      void startPairing(relay, code, name);
+      void startPairing(code, name);
     });
     el("logout").addEventListener("click", () => {
       client.logout();
@@ -451,15 +453,18 @@
       el("ns-error").textContent = e instanceof Error ? e.message : String(e);
     }
   }
-  async function startPairing(relay, code, name) {
+  async function startPairing(code, name) {
     show("screen-pairing");
     try {
-      await client.pair({ relayBase: relay, code, deviceName: name });
+      await client.pair({ relayBase: relayBaseFor(window.location.origin, relayOverride()), code, deviceName: name });
       await enter();
     } catch (e) {
       el("pair-error").textContent = e instanceof Error ? e.message : String(e);
       show("screen-pair");
     }
+  }
+  function relayOverride() {
+    return new URLSearchParams(window.location.search).get("relay");
   }
   async function enter() {
     show("screen-app");
