@@ -21,6 +21,8 @@ users pair by entering the code their desktop shows.
 ## Layout
 
 - `src/core.ts` — pairing state machine + device registry (storage-agnostic, unit-tested)
+- `src/routes.ts` — the deny-by-default HTTP route table and its authentication (Cloudflare-free, unit-tested)
+- `src/rate.ts` — in-memory fixed-window rate limiter for the public pairing endpoints
 - `src/worker.ts` — the Worker + Hub Durable Object (REST + WebSocket glue)
 - `src/web-client.ts` — the browser-side pairing + e2e transport (DOM-free, unit-tested)
 - `src/page.ts` — the web page logic (bundled to `public/app.js` via `npm run relay:page` at the repo root)

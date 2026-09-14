@@ -1,8 +1,14 @@
 /** Vocs relay (docs/REMOTE-ACCESS.md): routes opaque e2e frames between paired desktops
  *  and web clients for one provisioned account. Routing metadata only — never keys or
- *  plaintext. One Hub Durable Object per account hosts every socket. */
-import type { PublicIdentity } from '../../src/shared/crypto';
-import { claimPairing, clearMirror, deleteMirrorSession, deviceInfos, getMirrorIndex, getMirrorSession, MirrorError, PairError, pollPairing, putMirrorIndex, putMirrorSession, resolvePairing, revokeDevice, startPairing, verifyDeviceToken, type DeviceRecord, type MirrorBlob, type RelayStore } from './core';
+ *  plaintext. One Hub Durable Object per account hosts every socket.
+ *
+ *  This file is only the platform glue: the HTTP surface and its authentication live in the
+ *  deny-by-default route table in ./routes, and the pairing/registry logic in ./core — both
+ *  Cloudflare-free and unit-tested in plain Node. What stays here is what genuinely needs the
+ *  runtime: the Durable Object, its storage adapter, WebSocket hibernation and frame routing. */
+import { resolvePairing, type RelayStore } from './core';
+import { FixedWindowLimiter } from './rate';
+import { authorizeSocket, handleHttp, json, type RouteContext } from './routes';
 
 export interface Env {
   HUB: DurableObjectNamespace;
@@ -20,6 +26,8 @@ const MAX_QUEUED = 64;
 
 export class Hub {
   private readonly store: RelayStore;
+  /** Per-isolate counters: cheap abuse control that never becomes a storage write. */
+  private readonly rate = new FixedWindowLimiter();
 
   constructor(private readonly state: DurableObjectState, private readonly env: Env) {
     this.store = {
@@ -41,146 +49,29 @@ export class Hub {
     };
   }
 
+  private context(request: Request): RouteContext {
+    return {
+      store: this.store,
+      accountId: this.env.RELAY_ACCOUNT,
+      enrollToken: this.env.ENROLL_TOKEN,
+      now: Date.now(),
+      ip: request.headers.get('cf-connecting-ip'),
+      rate: this.rate,
+      sockets: (tag) => this.state.getWebSockets(tag)
+    };
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    try {
-      if (request.method === 'POST' && url.pathname === '/pair/start') return await this.pairStart(request);
-      if (request.method === 'POST' && url.pathname === '/pair/claim') return await this.pairClaim(request);
-      if (request.method === 'GET' && url.pathname === '/pair/poll') return json(await pollPairing(this.store, url.searchParams.get('code') ?? '', Date.now()));
-      if (request.method === 'GET' && url.pathname === '/devices') return await this.deviceList(request);
-      if (request.method === 'DELETE' && url.pathname === '/devices') return await this.deviceRevoke(url, request);
-      if (url.pathname === '/mirror') {
-        if (request.method === 'GET') return await this.mirrorGetIndex(request, url);
-        if (request.method === 'PUT') return await this.mirrorPutIndex(request);
-        if (request.method === 'DELETE') return await this.mirrorClear(request);
-      }
-      if (url.pathname.startsWith('/mirror/')) {
-        const sessionId = decodeURIComponent(url.pathname.slice('/mirror/'.length));
-        if (request.method === 'GET') return await this.mirrorGetSession(request, url, sessionId);
-        if (request.method === 'PUT') return await this.mirrorPutSession(request, sessionId);
-        if (request.method === 'DELETE') return await this.mirrorDeleteSession(request, sessionId);
-      }
-      if (url.pathname === '/ws/host') return await this.wsConnect(request, 'host');
-      if (url.pathname === '/ws/client') return await this.wsConnect(request, 'client');
-      return json({ error: 'not found' }, 404);
-    } catch (e) {
-      // An unverifiable device token is an auth failure, not a server error — and the code
-      // in the body is the only detail a caller gets.
-      if (e instanceof MirrorError) return json({ error: e.code }, e.code === 'too-large' ? 413 : 400);
-      if (e instanceof PairError) return json({ error: e.code }, 401);
-      return json({ error: e instanceof Error ? e.message : String(e) }, e instanceof PairingHttpError ? e.status : 500);
+    if (url.pathname === '/ws/host' || url.pathname === '/ws/client') {
+      const kind = url.pathname === '/ws/host' ? 'host' : 'client';
+      const auth = await authorizeSocket(kind, request, this.context(request));
+      if (!auth.ok) return json({ error: auth.error }, auth.status);
+      const pair = new WebSocketPair();
+      this.state.acceptWebSocket(pair[1], [`${kind}:${auth.deviceId}`]);
+      return new Response(null, { status: 101, webSocket: pair[0] });
     }
-  }
-
-  private async pairStart(request: Request): Promise<Response> {
-    if (bearer(request) !== this.env.ENROLL_TOKEN) throw new PairingHttpError('forbidden', 403);
-    const body = (await request.json()) as { name?: string; platform?: string; hostPub?: PublicIdentity };
-    if (!body.hostPub) throw new PairingHttpError('invalid', 400);
-    const r = await startPairing(this.store, { accountId: this.env.RELAY_ACCOUNT, hostName: body.name ?? 'desktop', hostPlatform: body.platform ?? '', hostPub: body.hostPub }, Date.now());
-    return json(r);
-  }
-
-  private async pairClaim(request: Request): Promise<Response> {
-    const body = (await request.json()) as { code?: string; name?: string; platform?: string; webPub?: PublicIdentity };
-    if (!body.code || !body.webPub) throw new PairingHttpError('invalid', 400);
-    await claimPairing(this.store, { code: body.code, webName: body.name ?? 'browser', webPlatform: body.platform ?? '', webPub: body.webPub }, Date.now());
-    // Ask every online desktop of the account to confirm; first responder wins.
-    // ('host:enrolling' — a pre-pairing socket — matches the same prefix.)
-    for (const ws of this.state.getWebSockets('host:')) {
-      ws.send(JSON.stringify({ t: 'pair.request', code: body.code, name: body.name ?? 'browser', platform: body.platform ?? '' }));
-    }
-    return json({ ok: true });
-  }
-
-  private async deviceList(request: Request): Promise<Response> {
-    // Authenticated, and only public metadata leaves the DO: token hashes and key material stay put.
-    await this.authDevice(request);
-    return json(await deviceInfos(this.store, this.env.RELAY_ACCOUNT));
-  }
-
-  private async deviceRevoke(url: URL, request: Request): Promise<Response> {
-    // `device`/`token` authenticate the caller (either a paired desktop or browser); `target`
-    // names the device to drop, so one side can revoke the other (lost-laptop / lost-desktop).
-    await this.authDevice(request);
-    const target = url.searchParams.get('target');
-    if (!target) throw new PairingHttpError('invalid', 400);
-    await revokeDevice(this.store, this.env.RELAY_ACCOUNT, target);
-    for (const tag of [`client:${target}`, `host:${target}`]) {
-      for (const ws of this.state.getWebSockets(tag)) ws.close(1008, 'device revoked');
-    }
-    return json({ ok: true });
-  }
-
-  private async authDevice(request: Request): Promise<DeviceRecord> {
-    // Browsers cannot set custom WS headers, so the device token may ride in the query.
-    const url = new URL(request.url);
-    const token = bearer(request) || url.searchParams.get('token') || '';
-    const deviceId = url.searchParams.get('device') ?? '';
-    return verifyDeviceToken(this.store, { accountId: this.env.RELAY_ACCOUNT, deviceId, token }, Date.now());
-  }
-
-  /** Writes to the mirror come from the desktop only; browsers read it. */
-  private async requireHost(request: Request): Promise<DeviceRecord> {
-    const device = await this.authDevice(request);
-    if (device.kind !== 'host') throw new PairingHttpError('forbidden', 403);
-    return device;
-  }
-
-  private async mirrorGetIndex(request: Request, url: URL): Promise<Response> {
-    const device = await this.authDevice(request);
-    // A browser names the desktop it paired with; a desktop defaults to itself.
-    const hostId = url.searchParams.get('host') || device.deviceId;
-    const record = await getMirrorIndex(this.store, this.env.RELAY_ACCOUNT, hostId, Date.now());
-    return json(record?.blob ?? null);
-  }
-
-  private async mirrorPutIndex(request: Request): Promise<Response> {
-    const host = await this.requireHost(request);
-    const blob = await readBlob(request);
-    await putMirrorIndex(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId: host.deviceId, blob }, Date.now());
-    return json({ ok: true });
-  }
-
-  private async mirrorClear(request: Request): Promise<Response> {
-    const host = await this.requireHost(request);
-    await clearMirror(this.store, this.env.RELAY_ACCOUNT, host.deviceId);
-    return json({ ok: true });
-  }
-
-  private async mirrorGetSession(request: Request, url: URL, sessionId: string): Promise<Response> {
-    const device = await this.authDevice(request);
-    const hostId = url.searchParams.get('host') || device.deviceId;
-    return json((await getMirrorSession(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId, sessionId }, Date.now())) ?? null);
-  }
-
-  private async mirrorPutSession(request: Request, sessionId: string): Promise<Response> {
-    const host = await this.requireHost(request);
-    const blob = await readBlob(request);
-    await putMirrorSession(this.store, { accountId: this.env.RELAY_ACCOUNT, hostId: host.deviceId, sessionId, blob }, Date.now());
-    return json({ ok: true });
-  }
-
-  private async mirrorDeleteSession(request: Request, sessionId: string): Promise<Response> {
-    const host = await this.requireHost(request);
-    await deleteMirrorSession(this.store, this.env.RELAY_ACCOUNT, host.deviceId, sessionId);
-    return json({ ok: true });
-  }
-
-  private async wsConnect(request: Request, kind: 'host' | 'client'): Promise<Response> {
-    const url = new URL(request.url);
-    // A freshly enabled desktop has no device token yet: it authenticates with the
-    // enrollment secret and stays in pairing-only mode until pair.result mints one.
-    const enrolling = kind === 'host' && url.searchParams.get('device') === 'enrolling';
-    let deviceId: string;
-    if (enrolling) {
-      if (bearer(request) !== this.env.ENROLL_TOKEN) throw new PairingHttpError('invalid', 401);
-      deviceId = 'enrolling';
-    } else {
-      deviceId = (await this.authDevice(request)).deviceId;
-    }
-    const pair = new WebSocketPair();
-    this.state.acceptWebSocket(pair[1], [`${kind}:${deviceId}`]);
-    return new Response(null, { status: 101, webSocket: pair[0] });
+    return handleHttp(request, this.context(request));
   }
 
   /** A revived (hibernated) or fresh socket: for clients, drain frames queued offline. */
@@ -264,28 +155,6 @@ export class Hub {
     }
     ws.send(JSON.stringify({ t: 'host.gone', host }));
   }
-}
-
-class PairingHttpError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
-  }
-}
-
-function bearer(request: Request): string {
-  const h = request.headers.get('authorization') ?? '';
-  return h.startsWith('Bearer ') ? h.slice(7) : '';
-}
-
-/** Reads and shape-checks a sealed mirror blob; the relay never looks inside `ct`. */
-async function readBlob(request: Request): Promise<MirrorBlob> {
-  const body = (await request.json()) as Partial<MirrorBlob>;
-  if (!body || typeof body.iv !== 'string' || typeof body.ct !== 'string') throw new PairingHttpError('invalid', 400);
-  return { iv: body.iv, ct: body.ct };
-}
-
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 }
 
 export default {
