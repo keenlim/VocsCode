@@ -19,6 +19,7 @@
 
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   APPROVAL_MARKER,
   APPROVAL_OPTIONS,
@@ -215,12 +216,24 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
 
   const agentDir = resolveAgentDir(process.env);
   const runDir = process.env.VOCS_CODE_SUBAGENT_DIR?.trim() || null;
+  /** The repo's main checkout: its .pi/agents is the project's managed set. */
+  const projectRoot = process.env.VOCS_CODE_PROJECT_ROOT?.trim() || undefined;
+  /** The shipped templates live beside this file; a stray copy falls back to the compiled-in ones. */
+  const templateDir = (() => {
+    try {
+      return fileURLToPath(new URL('agents/', import.meta.url));
+    } catch {
+      return undefined;
+    }
+  })();
   const store = runDir ? new RunStore(runDir, (message) => process.stderr.write(`[vocs-code-subagents] ${message}\n`)) : null;
   const configuredCompletionMs = Number(process.env.VOCS_CODE_SUBAGENT_COMPLETION_MS ?? COMPLETION_DEBOUNCE_MS);
   const completionMs = Number.isFinite(configuredCompletionMs) && configuredCompletionMs >= 0 ? configuredCompletionMs : COMPLETION_DEBOUNCE_MS;
   const runs = new Map<string, ActiveRun>();
   const sessionAllowed = new Set<string>();
   let agents: AgentType[] = [...BUILTIN_AGENTS];
+  /** Resolves when the current session's agent discovery has landed, so the first tool call never sees a stale set. */
+  let agentsReady: Promise<void> = Promise.resolve();
   let mode: Mode = 'ask';
   let modeFile: string | undefined;
   let parentCtx: CtxLike | null = null;
@@ -586,6 +599,7 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
       }),
       execute: async (_toolCallId: string, params: { description: string; prompt: string; type?: string; background?: boolean; model?: string }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: CtxLike) => {
         parentCtx = ctx;
+        await agentsReady;
         await refreshMode();
         const run = await startRun(params, ctx, signal);
         if (run.mode === 'background') {
@@ -655,9 +669,9 @@ export async function createVocsCodeSubagents(pi: PiLike, deps: SubagentDeps): P
     // Readiness is emitted synchronously: the host checks it right after get_state, before any
     // await we start here could resolve. Discovery below only refines the tool description.
     ctx.ui?.notify('VCODE_PI_READY::' + JSON.stringify({ version: 1, nonce: process.env.VOCS_CODE_PI_NONCE, capability: 'subagents', ready: true }), 'info');
-    void (async () => {
+    agentsReady = (async () => {
       mode = await readModeFile(modeFile);
-      agents = await discoverAgents({ cwd: ctx.cwd ?? process.cwd(), agentDir });
+      agents = await discoverAgents({ cwd: ctx.cwd ?? process.cwd(), projectRoot, agentDir, templateDir });
       registerTools(); // refresh the tool description with the discovered types
     })();
   });

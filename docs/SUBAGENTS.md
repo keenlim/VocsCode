@@ -97,20 +97,39 @@ uncapped. Bounds live in the extension so a runaway loop cannot spawn dozens of 
 
 ## Agent types
 
-Claude Code parity — the same three built-ins, same names, so existing `.claude/agents/*.md` and
-`.pi/agents/*.md` files behave identically:
+The definitions are **the project's**, not the app's: Vocs Code ships templates, and a project's own
+files are what the session actually uses. `resources/pi/agents/{general-purpose,Explore,Plan}.md` are
+the shipped templates (read as data by both the runtime and, in time, the manager UI); the prompts
+compiled into `subagent-agents.ts` are only a fallback for a stray copy of the extension, and a test
+asserts the two stay identical.
 
-| Type | Tools | Notes |
-| --- | --- | --- |
-| `general-purpose` | full set | default |
-| `Explore` | `read`, `grep`, `find`, `ls`, `bash` | read-only prompt; bash is gated like any other |
-| `Plan` | read-only set | planning, no writes |
+Resolution order — first definition of a name wins, and a file replaces a template wholesale (no
+field merging):
 
-Discovery, in precedence order: project `.pi/agents/*.md` → project `.claude/agents/*.md` → global
-`~/.pi/agent/agents/*.md` → global `~/.claude/agents/*.md` → built-ins. Frontmatter: `name`,
-`description`, `tools`, optional `model`, `prompt_mode`. **Model defaults to the session model**; a
-type may pin one explicitly, and that pin is respected (unlike today's Vocs-managed Explore override,
-which exists only to defeat a third-party pin).
+1. `<projectRoot>/.pi/agents/*.md` — **the managed, project-level set**. This is what a project's
+   Subagents configuration edits, and it is read from `VOCS_CODE_PROJECT_ROOT`, not from the session
+   cwd, so every session on the repo sees the same set whether or not it runs in a worktree.
+2. `<cwd>/.pi/agents/*.md` — branch-only extras (a worktree that commits agents). These *add* types
+   the project set does not define; they never override it, so editing a managed file always wins.
+3. `<projectRoot>/.claude/agents/*.md` — Claude Code's project files.
+4. `~/.pi/agent/agents/*.md` — your global set.
+5. `~/.claude/agents/*.md` — your global Claude set.
+6. The shipped templates.
+
+Frontmatter: `name`, `description`, `tools`, optional `model`, `prompt_mode` (`append` | `replace`),
+`mcp: false`. **Model defaults to the session model**; a pinned model is respected, which is why the
+shipped templates pin nothing — a committed pin would oblige every teammate to have that provider.
+
+**Git practice.** Definitions are project knowledge but also personal workflow, so Vocs Code's rule
+is: write them, ignore them, and let the owner decide. `.pi/agents/*` belongs in the repo's
+`.gitignore` by default (per-file, so a single definition can be un-ignored), and the manager offers
+"track this one" for anything the whole team should share. Committed agents arrive with the branch;
+untracked ones live in the main checkout, which is exactly why the project root is authoritative.
+
+> **Not built yet.** The manager UI (list effective types with their origin, create from template,
+edit, delete, and the track/ignore toggle) is the remaining piece; today the interface is the files
+plus the tool description the model is given. Until then a project agent is created by writing
+`<projectRoot>/.pi/agents/<name>.md`.
 
 ## Permissions
 
@@ -251,16 +270,17 @@ New files under `resources/pi/`, copied by the existing `resources/pi → pi` en
 | File | Role |
 | --- | --- |
 | `vocs-code-subagents.ts` | Entry: tool registration, run manager, child session construction, event emission |
-| `subagent-agents.ts` | Agent file discovery/parsing, built-ins, tool allowlists |
+| `subagent-agents.ts` | Agent file discovery/parsing, templates, tool allowlists |
 | `subagent-gate.ts` | Shared permission decision + approval payload (also used by `vocs-code-approvals.ts`) |
 | `subagent-runs.ts` | Run records, run-file append, stats roll-up |
+| `agents/*.md` | The shipped templates, the project set's starting point |
 
 - Loaded with a new `-e` argument in `src/main/harness/pi.ts`, alongside the current five.
 - A new capability in the `VCODE_PI_READY::` handshake (`subagents`), so a broken extension fails
   loudly through the existing "Incompatible Pi runtime" path instead of silently degrading.
 - Reads the existing env contract — `VOCS_CODE_PERMISSION_MODE`, `VOCS_CODE_MODE_FILE`,
-  `VOCS_CODE_PI_NONCE`, `VOCS_CODE_EFFORT_FILE` — plus a new `VOCS_CODE_SUBAGENT_DIR` pointing at
-  `<sessionDir>/subagents` (the extension cannot see the app's session directory otherwise).
+  `VOCS_CODE_PI_NONCE`, `VOCS_CODE_EFFORT_FILE` — plus `VOCS_CODE_SUBAGENT_DIR` (where run files go)
+  and `VOCS_CODE_PROJECT_ROOT` (whose `.pi/agents` is the project's managed set).
 - Child sessions are built with the SDK: `createAgentSession()` + `SessionManager` + a
   `DefaultResourceLoader` using `noExtensions: true` and explicit extension paths only, so third-party
   discovery never leaks into children. The permission gate is an inline extension factory

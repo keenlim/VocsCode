@@ -83,6 +83,28 @@ describe.skipIf(!enabled)('Vocs Code subagents over the real Pi runtime', () => 
     expect(parsed.totals.turns).toBe(1);
   });
 
+  it("runs an agent the project defines in its own .pi/agents", async () => {
+    // The project's set is what the manager edits: a definition there is usable without touching
+    // anything global, and it is resolved from VOCS_CODE_PROJECT_ROOT, not from the session cwd.
+    await fs.mkdir(path.join(cwd, '.pi', 'agents'), { recursive: true });
+    await fs.writeFile(
+      path.join(cwd, '.pi', 'agents', 'reviewer.md'),
+      ['---', 'name: reviewer', 'description: Reviews diffs against the repo rules', 'tools: read, grep', 'prompt_mode: replace', '---', 'You review diffs.'].join('\n'),
+      'utf8'
+    );
+    const runner = start();
+    await runner.ready();
+    const events = await runner.prompt([call('s1', 'subagent', { description: 'Review the diff', prompt: 'Review it', type: 'reviewer' })]);
+    const ended = events.filter((event) => event.type === 'tool_execution_end');
+    expect(ended).toHaveLength(1);
+    expect(ended[0].result?.details).toMatchObject({ agent: 'reviewer', status: 'completed' });
+    expect(ended[0].isError).toBe(false);
+    expect(events.filter((event) => event.type === 'extension_error')).toEqual([]);
+    const run = parseRunFile(await fs.readFile(path.join(agentDir, 'subagents', (await fs.readdir(path.join(agentDir, 'subagents')))[0]!), 'utf8'))!;
+    expect(run.meta.agent).toBe('reviewer');
+    expect(run.status).toBe('completed');
+  });
+
   it('rejects an unknown agent type without running anything', async () => {
     const runner = start();
     await runner.ready();

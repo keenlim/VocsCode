@@ -18,6 +18,9 @@ export interface AgentModelRef {
 
 export type PromptMode = 'append' | 'replace';
 
+/** Where a definition came from, so the UI can say who owns it. */
+export type AgentOrigin = 'project' | 'branch' | 'claude' | 'global' | 'template';
+
 export interface AgentType {
   name: string;
   description: string;
@@ -29,8 +32,9 @@ export interface AgentType {
   model?: AgentModelRef;
   /** Whether the child inherits the session's MCP servers. */
   mcp: boolean;
-  /** Absolute file path, or `builtin`. */
+  /** Where it came from: a file path, or `template` for the shipped definitions. */
   source: string;
+  origin: AgentOrigin;
 }
 
 /** Every built-in tool pi can hand a child session; `powershell` only exists on Windows. */
@@ -102,7 +106,8 @@ export const BUILTIN_AGENTS: AgentType[] = [
     prompt: GENERAL_PURPOSE_PROMPT,
     promptMode: 'append',
     mcp: true,
-    source: 'builtin',
+    source: 'template',
+    origin: 'template',
   },
   {
     name: 'Explore',
@@ -112,7 +117,8 @@ export const BUILTIN_AGENTS: AgentType[] = [
     prompt: EXPLORE_PROMPT,
     promptMode: 'replace',
     mcp: false,
-    source: 'builtin',
+    source: 'template',
+    origin: 'template',
   },
   {
     name: 'Plan',
@@ -122,7 +128,8 @@ export const BUILTIN_AGENTS: AgentType[] = [
     prompt: PLAN_PROMPT,
     promptMode: 'replace',
     mcp: false,
-    source: 'builtin',
+    source: 'template',
+    origin: 'template',
   },
 ];
 
@@ -205,7 +212,7 @@ function parseModel(value: string | undefined): AgentModelRef | undefined {
 }
 
 /** Parse one agent file. Returns null when it has no usable name. */
-export function parseAgentFile(text: string, file = ''): AgentType | null {
+export function parseAgentFile(text: string, file = '', origin: AgentOrigin = 'project'): AgentType | null {
   const { fields, body } = parseFrontmatter(text);
   const name = (fields.name ?? '').trim();
   if (!name) return null;
@@ -222,12 +229,17 @@ export function parseAgentFile(text: string, file = ''): AgentType | null {
     model: parseModel(fields.model?.trim()),
     mcp: fields.mcp?.trim().toLowerCase() !== 'false',
     source: file || 'file',
+    origin,
   };
 }
 
 export interface DiscoverOptions {
   cwd: string;
   agentDir: string;
+  /** The repo's main checkout. Its `.pi/agents` is the managed, project-level set. */
+  projectRoot?: string;
+  /** Folder holding the shipped templates (`<resources>/pi/agents`). */
+  templateDir?: string;
   home?: string;
   env?: NodeJS.ProcessEnv;
   /** Project config directory name; pi rebrands use a different one. */
@@ -246,7 +258,7 @@ export function resolveAgentDir(env: NodeJS.ProcessEnv = process.env, home = env
   return fromEnv ? expandTilde(fromEnv, home) : path.join(home, '.pi', 'agent');
 }
 
-async function readAgentDir(dir: string): Promise<AgentType[]> {
+async function readAgentDir(dir: string, origin: AgentOrigin): Promise<AgentType[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(dir);
@@ -258,7 +270,7 @@ async function readAgentDir(dir: string): Promise<AgentType[]> {
     if (!entry.toLowerCase().endsWith('.md')) continue;
     const file = path.join(dir, entry);
     try {
-      const parsed = parseAgentFile(await fs.readFile(file, 'utf8'), file);
+      const parsed = parseAgentFile(await fs.readFile(file, 'utf8'), file, origin);
       if (parsed) agents.push(parsed);
     } catch {
       /* unreadable file: skip it rather than failing the whole discovery */
@@ -268,28 +280,42 @@ async function readAgentDir(dir: string): Promise<AgentType[]> {
 }
 
 /**
- * Agent types available in a workspace: project files first, then global files, then built-ins.
- * The first definition of a name wins, so a project file overrides the global one and any file
- * overrides a built-in.
+ * The definitions Vocs Code ships, read from `<resources>/pi/agents`. They are files so the app's
+ * agent manager and the pi runtime cannot disagree about a template; if the folder is missing
+ * (a stray copy of the extension) the prompts compiled into this module stand in for them.
+ */
+export async function loadTemplates(templateDir: string | undefined): Promise<AgentType[]> {
+  if (!templateDir) return BUILTIN_AGENTS;
+  const templates = await readAgentDir(templateDir, 'template');
+  return templates.length ? templates : BUILTIN_AGENTS;
+}
+
+/**
+ * Agent types available in a workspace. The project's managed set wins, then anything the branch
+ * adds, then Claude Code's project files, then the user's global files, then the shipped templates.
+ * The first definition of a name wins; a file replaces a template wholesale (no field merging).
  */
 export async function discoverAgents(opts: DiscoverOptions): Promise<AgentType[]> {
   const home = opts.home ?? opts.env?.USERPROFILE ?? opts.env?.HOME ?? os.homedir();
   const configDirName = opts.configDirName ?? '.pi';
-  const dirs = [
-    path.join(opts.cwd, configDirName, 'agents'),
-    path.join(opts.cwd, '.claude', 'agents'),
-    path.join(opts.agentDir, 'agents'),
-    path.join(home, '.claude', 'agents'),
+  const projectRoot = opts.projectRoot ?? opts.cwd;
+  const dirs: { dir: string; origin: AgentOrigin }[] = [
+    { dir: path.join(projectRoot, configDirName, 'agents'), origin: 'project' },
+    { dir: path.join(projectRoot, '.claude', 'agents'), origin: 'claude' },
+    { dir: path.join(opts.agentDir, 'agents'), origin: 'global' },
+    { dir: path.join(home, '.claude', 'agents'), origin: 'global' },
   ];
+  // A worktree session's own .pi/agents can add types the project set does not define (a branch that
+  // commits agents), but it never overrides the managed set — that is what the manager edits.
+  if (path.resolve(opts.cwd) !== path.resolve(projectRoot)) dirs.splice(1, 0, { dir: path.join(opts.cwd, configDirName, 'agents'), origin: 'branch' });
   const found = new Map<string, AgentType>();
-  for (const dir of dirs) {
-    for (const agent of await readAgentDir(dir)) {
+  for (const { dir, origin } of dirs) {
+    for (const agent of await readAgentDir(dir, origin)) {
       const key = agent.name.toLowerCase();
       if (!found.has(key)) found.set(key, agent); // first directory wins
     }
   }
-  // Built-ins have the lowest precedence: any file, project or global, overrides one by name.
-  for (const agent of BUILTIN_AGENTS) {
+  for (const agent of await loadTemplates(opts.templateDir)) {
     const key = agent.name.toLowerCase();
     if (!found.has(key)) found.set(key, agent);
   }

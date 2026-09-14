@@ -124,7 +124,8 @@ describe('discovery precedence', () => {
     const agents = await discoverAgents({ cwd, agentDir, home });
     expect(findAgent(agents, 'Explore')?.prompt).toBe('PROJECT_PI');
     expect(findAgent(agents, 'reviewer')?.prompt).toBe('REVIEW');
-    expect(findAgent(agents, 'general-purpose')?.source).toBe('builtin');
+    expect(findAgent(agents, 'general-purpose')?.source).toBe('template');
+    expect(findAgent(agents, 'general-purpose')?.origin).toBe('template');
     expect(findAgent(agents, 'EXPLORE')?.prompt).toBe('PROJECT_PI');
   });
 
@@ -142,7 +143,7 @@ describe('discovery precedence', () => {
     expect(findAgent(agents, 'Explore')?.prompt).toBe('GLOBAL_CLAUDE');
     await fs.rm(path.join(home, '.claude'), { recursive: true, force: true });
     agents = await discoverAgents({ cwd, agentDir, home });
-    expect(findAgent(agents, 'Explore')?.source).toBe('builtin');
+    expect(findAgent(agents, 'Explore')?.source).toBe('template');
   });
 
   it('ships the three Claude Code agents and survives an unreadable file', async () => {
@@ -184,5 +185,67 @@ describe('system prompt assembly', () => {
     const agent = { ...BUILTIN_AGENTS[0]!, promptMode: 'append' as const, prompt: 'ROLE' };
     expect(buildSystemPrompt(agent, 'PARENT')).toBe('PARENT\n\n# Your role\nROLE');
     expect(buildSystemPrompt(agent, '  ')).toBe('ROLE');
+  });
+});
+
+describe('project-level definitions', () => {
+  it('lets the project root win over the branch, and keeps branch-only types', async () => {
+    const dir = await tempDir();
+    const projectRoot = path.join(dir, 'repo');
+    const cwd = path.join(dir, 'worktree');
+    const home = path.join(dir, 'home');
+    await writeFile(path.join(projectRoot, '.pi', 'agents', 'Explore.md'), '---\nname: Explore\n---\nPROJECT');
+    await writeFile(path.join(cwd, '.pi', 'agents', 'Explore.md'), '---\nname: Explore\n---\nBRANCH');
+    await writeFile(path.join(cwd, '.pi', 'agents', 'reviewer.md'), '---\nname: reviewer\ndescription: Reviews diffs\n---\nREVIEW');
+    const agents = await discoverAgents({ cwd, projectRoot, agentDir: path.join(home, '.pi', 'agent'), home });
+    // The managed set is authoritative; a branch copy never silently overrides what the manager edits.
+    expect(findAgent(agents, 'Explore')).toMatchObject({ prompt: 'PROJECT', origin: 'project' });
+    // A type only the branch defines is still available, and says so.
+    expect(findAgent(agents, 'reviewer')).toMatchObject({ prompt: 'REVIEW', origin: 'branch', description: 'Reviews diffs' });
+  });
+
+  it('treats cwd as the project when no project root is given', async () => {
+    const dir = await tempDir();
+    const cwd = path.join(dir, 'repo');
+    await writeFile(path.join(cwd, '.pi', 'agents', 'Explore.md'), '---\nname: Explore\n---\nONLY');
+    const agents = await discoverAgents({ cwd, agentDir: path.join(dir, 'agent'), home: dir });
+    expect(findAgent(agents, 'Explore')).toMatchObject({ prompt: 'ONLY', origin: 'project' });
+  });
+
+  it('reads templates from disk and lets any definition override one', async () => {
+    const dir = await tempDir();
+    const projectRoot = path.join(dir, 'repo');
+    const templateDir = path.join(dir, 'templates');
+    await writeFile(path.join(templateDir, 'shipped.md'), '---\nname: shipped\ndescription: From the app\ntools: read\n---\nSHIPPED');
+    await writeFile(path.join(templateDir, 'Explore.md'), '---\nname: Explore\ndescription: Template Explore\n---\nTEMPLATE_EXPLORE');
+    let agents = await discoverAgents({ cwd: projectRoot, projectRoot, agentDir: path.join(dir, 'agent'), templateDir, home: dir });
+    expect(findAgent(agents, 'shipped')).toMatchObject({ prompt: 'SHIPPED', origin: 'template', source: path.join(templateDir, 'shipped.md') });
+    expect(findAgent(agents, 'Explore')).toMatchObject({ prompt: 'TEMPLATE_EXPLORE', origin: 'template' });
+    await writeFile(path.join(projectRoot, '.pi', 'agents', 'Explore.md'), '---\nname: Explore\n---\nPROJECT');
+    agents = await discoverAgents({ cwd: projectRoot, projectRoot, agentDir: path.join(dir, 'agent'), templateDir, home: dir });
+    expect(findAgent(agents, 'Explore')).toMatchObject({ prompt: 'PROJECT', origin: 'project' });
+  });
+
+  it('falls back to the compiled-in definitions when no template folder exists', async () => {
+    const dir = await tempDir();
+    const agents = await discoverAgents({ cwd: path.join(dir, 'repo'), agentDir: path.join(dir, 'agent'), templateDir: path.join(dir, 'missing'), home: dir });
+    expect(agents.map((a) => a.name).sort()).toEqual(['Explore', 'Plan', 'general-purpose']);
+  });
+
+  it('keeps the shipped template files and the compiled-in fallback in step', async () => {
+    const { loadTemplates } = await import('../resources/pi/subagent-agents');
+    const shippedDir = path.join(__dirname, '..', 'resources', 'pi', 'agents');
+    const shipped = await loadTemplates(shippedDir);
+    expect(shipped.map((a) => a.name).sort()).toEqual(['Explore', 'Plan', 'general-purpose']);
+    for (const template of shipped) {
+      const fallback = BUILTIN_AGENTS.find((a) => a.name === template.name)!;
+      // Same text, same knobs: the file is the source of truth and the module is only a safety net.
+      expect(template.prompt).toBe(fallback.prompt);
+      expect(template.description).toBe(fallback.description);
+      expect(template.tools).toEqual(fallback.tools);
+      expect(template.promptMode).toBe(fallback.promptMode);
+      expect(template.mcp).toBe(fallback.mcp);
+      expect(template.model).toBeUndefined();
+    }
   });
 });
