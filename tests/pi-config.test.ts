@@ -104,11 +104,11 @@ describe('PiConfigStore.read', () => {
     await fs.writeFile(path.join(agentDir, 'AGENTS.md'), '# house rules\n', 'utf8');
     const setup = await store.read();
     expect(setup.promptFiles.map((f) => [f.name, f.exists])).toEqual([
-      ['AGENTS.md', true],
+      ['SYSTEM.md', false],
       ['APPEND_SYSTEM.md', false],
-      ['SYSTEM.md', false]
+      ['AGENTS.md', true]
     ]);
-    expect(setup.promptFiles[0]?.content).toBe('# house rules\n');
+    expect(setup.promptFiles.find((f) => f.name === 'AGENTS.md')?.content).toBe('# house rules\n');
   });
 
   it('includes exact files a plain settings entry adds from outside the default dirs', async () => {

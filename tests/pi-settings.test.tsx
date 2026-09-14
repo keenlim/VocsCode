@@ -36,9 +36,9 @@ function setup(over: Partial<PiSetup> = {}): PiSetup {
     agents: [{ name: 'Explore', description: 'Read-only search', model: 'deepseek/deepseek-v4-pro', path: 'C:/pi/agent/agents/Explore.md' }],
     subagents: { reportUsage: true },
     promptFiles: [
-      { name: 'AGENTS.md', path: 'C:/pi/agent/AGENTS.md', exists: true, content: '# rules\n' },
+      { name: 'SYSTEM.md', path: 'C:/pi/agent/SYSTEM.md', exists: false, content: '' },
       { name: 'APPEND_SYSTEM.md', path: 'C:/pi/agent/APPEND_SYSTEM.md', exists: false, content: '' },
-      { name: 'SYSTEM.md', path: 'C:/pi/agent/SYSTEM.md', exists: false, content: '' }
+      { name: 'AGENTS.md', path: 'C:/pi/agent/AGENTS.md', exists: true, content: '# rules\n' }
     ],
     ...over
   };
@@ -143,7 +143,13 @@ describe('PiSection', () => {
   it('keeps Save disabled until a prompt file is edited, then writes it', async () => {
     mockBackend();
     render(<PiSection />);
-    const editor = (await screen.findByPlaceholderText('AGENTS.md is not set')) as HTMLTextAreaElement;
+    expect((await screen.findByPlaceholderText('SYSTEM.md is not set')) as HTMLTextAreaElement).toBeTruthy();
+    // Tabs follow the System, Append, Agent sequence and the first one is selected on load.
+    const tabNames = [...document.querySelectorAll('.pi-tab')].map((el) => (el.firstChild?.textContent ?? '').trim());
+    expect(tabNames).toEqual(['SYSTEM.md', 'APPEND_SYSTEM.md', 'AGENTS.md']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'AGENTS.md' }));
+    const editor = screen.getByPlaceholderText('AGENTS.md is not set') as HTMLTextAreaElement;
     expect(editor.value).toBe('# rules\n');
     const save = screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
