@@ -14,6 +14,8 @@ import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
 import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
+import type { UpdateState } from '../shared/types';
+import type { UpdateService } from './updater';
 import { isOutsideWorkspace } from './harness/permissions';
 import { globalStoreInfo, inspectServer, mergeById, normalizeStdio, projectInfo, readProjectMcp, readStore, resolveVars, secretKeyFor, toMcpJsonTable, writeProjectMcp } from './mcp';
 import { listHarnessModels } from './harness/registry';
@@ -76,6 +78,8 @@ export interface HandlerDeps {
   remote?: RemoteHost;
   /** Base-pi global config (Settings → Pi); a default store is created when absent. */
   piConfig?: PiConfigStore;
+  /** In-app auto-update (issue #198); absent in dev and other unpackaged runs. */
+  updater?: UpdateService;
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** Push an async event to the connected client (the window today, remote clients later). */
   push: (channel: string, payload: unknown) => void;
@@ -137,6 +141,13 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   }
 
   handle('app:info', () => ({ version: deps.desktop.appVersion(), platform: process.platform, userData: deps.desktop.userDataPath(), isPackaged: deps.desktop.isPackaged() }));
+  const idleUpdate: UpdateState = { status: 'idle' };
+  handle('update:state', () => deps.updater?.get() ?? idleUpdate);
+  handle('update:check', () => deps.updater?.check() ?? idleUpdate);
+  handle('update:download', () => deps.updater?.download() ?? idleUpdate);
+  handle('update:install', () => {
+    deps.updater?.install();
+  });
   handle('app:doctor', async (): Promise<DoctorReport> => {
     const harnesses = {} as Record<HarnessId, HarnessAvailability>;
     await Promise.all(HARNESSES.map(async (h) => (harnesses[h.id] = await runtime.availability(h.id))));

@@ -1,7 +1,7 @@
 /** Settings screen: harness detection and install, runtimes, providers and API keys. */
 import React, { useEffect, useRef, useState } from 'react';
 import { AUTO_COMPACTION_PRESETS } from '../../../shared/compaction';
-import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteDeviceInfo, RemoteState, SecretStatus } from '../../../shared/types';
+import type { AcpAgentPreset, AppSettings, DoctorReport, HarnessId, ModelInfo, ProviderConfig, ProviderKind, RemoteDeviceInfo, RemoteState, SecretStatus, UpdateState } from '../../../shared/types';
 import type { ShellKind, ShellOption, TerminalSettings } from '../../../shared/terminal';
 import { HARNESSES, PERMISSION_MODE_LABELS } from '../../../shared/harness-meta';
 import { parseModelOverrideKey } from '../../../shared/model-overrides';
@@ -938,9 +938,13 @@ function ShortcutCapture({ value, onChange }: { value: string | null; onChange: 
   );
 }
 
+/** The About section also hosts the in-app auto-update entry (issue #198): current version,
+ *  manual check, and the live state. In dev the update:* channels stay idle, so the button is
+ *  hidden for unpackaged builds. */
 function About() {
   const [report, setReport] = useState<DoctorReport | null>(null);
   const [info, setInfo] = useState<{ version: string; platform: string; userData: string; isPackaged: boolean } | null>(null);
+  const updateState = useStore((s) => s.updateState);
   useEffect(() => {
     void invoke('app:info', undefined).then(setInfo);
     void invoke('app:doctor', undefined).then(setReport);
@@ -951,6 +955,7 @@ function About() {
       <p>
         <strong>Vocs Code</strong> {info?.version} · Electron {report?.electron} · Node {report?.node} · {report?.platform}
       </p>
+      {info?.isPackaged && <UpdatesPanel state={updateState} currentVersion={info.version} />}
       <p className="muted small mono">{info?.userData}</p>
       <h3>Doctor</h3>
       {!report && <Spinner />}
@@ -974,6 +979,55 @@ function About() {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+/** Update entry for Settings → About (issue #198). State arrives via push:updateState, so the
+ *  panel stays live while a check or download runs elsewhere. */
+function UpdatesPanel({ state, currentVersion }: { state: UpdateState; currentVersion: string }) {
+  const [busy, setBusy] = useState(false);
+  const check = () => {
+    setBusy(true);
+    void invoke('update:check', undefined).finally(() => setBusy(false));
+  };
+  const download = () => void invoke('update:download', undefined);
+  const install = () => void invoke('update:install', undefined);
+  const line: string =
+    state.status === 'idle'
+      ? 'Not checked yet.'
+      : state.status === 'checking'
+        ? 'Checking for updates…'
+        : state.status === 'available'
+          ? `Update ${state.version} is available.`
+          : state.status === 'downloading'
+            ? `Downloading ${state.version ?? 'update'}… ${Math.round(state.progress?.percent ?? 0)}%`
+            : state.status === 'restart-pending'
+              ? `Update ${state.version} is ready. Restart Vocs Code to install it${state.deferred ? ' once every session is idle (or restart now)' : ''}.`
+              : state.status === 'up-to-date'
+                ? 'You are up to date.'
+                : `Update failed: ${state.error ?? 'unknown error'}`;
+  return (
+    <div className="settings-updates">
+      <p className="small muted">
+        {line}{' '}
+        {(state.status === 'idle' || state.status === 'up-to-date' || state.status === 'error') && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={check}>
+            Check for updates
+          </Button>
+        )}
+        {state.status === 'available' && (
+          <Button size="sm" variant="ghost" onClick={download}>
+            Download {state.version}
+          </Button>
+        )}
+        {state.status === 'restart-pending' && (
+          <Button size="sm" variant="ghost" onClick={install}>
+            Restart to update
+          </Button>
+        )}
+      </p>
+      <p className="muted small mono">current version {currentVersion}</p>
     </div>
   );
 }

@@ -47,6 +47,10 @@ mac:
     - target: dmg
       # Ship both silicon generations; CI builds both on the arm64 runner.
       arch: [x64, arm64]
+    # electron-updater's mac feed (latest-mac.yml) must point at a zip; a DMG alone cannot install
+    # an update. The zips ride along on the Release next to the user-facing DMGs.
+    - target: zip
+      arch: [x64, arm64]
   category: public.app-category.developer-tools
   artifactName: Vocs-Code-${version}-mac-${arch}.${ext}
 linux:

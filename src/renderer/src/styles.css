@@ -376,6 +376,33 @@ h4 {
   flex: 0 0 calc(100vw - env(titlebar-area-width, 100vw) - env(titlebar-area-x, 0px));
 }
 
+/* In-app auto-update pill (issue #198): appears in the lead strip only when there is something
+   to act on, styled like the web badge but clickable (the lead is app-region: no-drag). */
+.update-pill {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+.update-pill:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
+.update-pill-ready {
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.update-pill-ready:hover {
+  color: var(--fg);
+}
+
 /* Menu bar */
 .menubar {
   display: flex;

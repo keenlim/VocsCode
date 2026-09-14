@@ -19,7 +19,7 @@ Installers are currently unsigned, so expect one first-run prompt: Windows Smart
 
 On first launch the app starts with no agent configured — open **Settings → Harnesses** to see which runtimes were detected, install missing ones in one click, and add an API key. Keys are stored in your OS keychain, never in this repository.
 
-To update, download and install the newer installer from [Releases](https://github.com/vocsong/VocsCode/releases/latest) — it installs over the old one. (In-app auto-update is tracked in [#198](https://github.com/vocsong/VocsCode/issues/198).)
+The app updates itself: a packaged build checks GitHub Releases on startup (you can also check from **Settings → About**), shows a pill in the title bar when an update is available, and offers restart-to-install once the download is done — the prompt waits until no session is running a turn. Downloading the newer installer from [Releases](https://github.com/vocsong/VocsCode/releases/latest) still works. See [Releasing](docs/RELEASING.md) for how the update feed is produced.
 
 **Prefer to run it from source?** You'll need Node 22+ and npm:
 
