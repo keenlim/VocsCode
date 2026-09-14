@@ -63,6 +63,16 @@ describe('Vesta panel', () => {
     expect(screen.queryByLabelText('Vesta')).toBeNull();
   });
 
+  it('offers minimize rather than close, since the control only collapses to the avatar', () => {
+    setup([]);
+    const minimize = screen.getByLabelText('Minimize');
+    expect(minimize.getAttribute('title')).toBe('Minimize to the avatar');
+    expect(minimize.querySelector('[data-icon="minus"]')).toBeTruthy();
+    expect(minimize.querySelector('[data-icon="x"]')).toBeNull();
+    fireEvent.click(minimize);
+    expect(invoke).toHaveBeenCalledWith('settings:update', expect.objectContaining({ agent: expect.objectContaining({ collapsed: true }) }));
+  });
+
   it('names every target of a destructive batch before it is approved', () => {
     setup([deleteProposal]);
     expect(screen.getByText('Delete branch feature-a')).toBeTruthy();

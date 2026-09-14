@@ -205,8 +205,8 @@ export function Vesta() {
         <button className="icon-btn" title="Clear the conversation" aria-label="Clear the conversation" onClick={() => void invoke('agent:reset', undefined).catch(toastError)}>
           <Icon name="trash" size={13} />
         </button>
-        <button className="icon-btn" title="Minimize" aria-label="Minimize" onClick={toggle}>
-          <Icon name="x" size={13} />
+        <button className="icon-btn" title="Minimize to the avatar" aria-label="Minimize" onClick={toggle}>
+          <Icon name="minus" size={13} />
         </button>
       </div>
 
