@@ -38,8 +38,14 @@ async function readRunFile(file: string): Promise<SubagentRun | null> {
   }
 }
 
-/** Every run recorded for a session, newest first. Missing directory means "no runs yet". */
-export async function listSubagentRuns(sessionDir: string): Promise<SubagentRunSummary[]> {
+/**
+ * Every run recorded for a session, newest first. Missing directory means "no runs yet".
+ *
+ * `live` says whether the pi process that owns these runs is still alive. A run whose file has no end
+ * record and whose process is gone crashed with it (an app restart, a killed session), so it is
+ * reported as `interrupted` rather than pretending to still be running forever.
+ */
+export async function listSubagentRuns(sessionDir: string, options: { live?: boolean } = {}): Promise<SubagentRunSummary[]> {
   let files: string[];
   try {
     files = await fs.readdir(subagentDir(sessionDir));
@@ -52,17 +58,24 @@ export async function listSubagentRuns(sessionDir: string): Promise<SubagentRunS
     const runId = file.slice(0, -'.jsonl'.length);
     if (!isValidRunId(runId)) continue;
     const run = await readRunFile(path.join(subagentDir(sessionDir), file));
-    if (run) runs.push(summarizeRun(run));
+    if (run) runs.push(summarizeRun(settleStale(run, options.live !== false)));
   }
   return runs.sort((a, b) => b.startedAt - a.startedAt);
 }
 
 /** One run with its transcript items and per-call rows, or null when it does not exist. */
-export async function readSubagentRun(sessionDir: string, runId: string): Promise<SubagentRun | null> {
+export async function readSubagentRun(sessionDir: string, runId: string, options: { live?: boolean } = {}): Promise<SubagentRun | null> {
   if (!isValidRunId(runId)) return null;
   const file = path.join(subagentDir(sessionDir), `${runId}.jsonl`);
   // Defence in depth: the id is already a safe file name, and the resolved path must stay inside.
   const dir = subagentDir(sessionDir);
   if (path.dirname(path.resolve(file)) !== path.resolve(dir)) return null;
-  return readRunFile(file);
+  const run = await readRunFile(file);
+  return run ? settleStale(run, options.live !== false) : null;
+}
+
+/** A run with no end record whose owner is gone was interrupted; the file itself is left untouched. */
+function settleStale(run: SubagentRun, live: boolean): SubagentRun {
+  if (live || run.status !== 'running') return run;
+  return { ...run, status: 'interrupted', totals: run.totals };
 }

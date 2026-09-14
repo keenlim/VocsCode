@@ -151,7 +151,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
         </div>
       ) : (
         <div className="subagent-layout">
-          <ul className="subagent-list">
+          <ul className="subagent-list" data-testid="subagent-runs">
             {runs.map((run) => (
               <li key={run.runId}>
                 <button type="button" className={`subagent-row ${run.runId === selected ? 'active' : ''}`} onClick={() => setSelected(run.runId)}>
@@ -163,7 +163,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
                     <Badge tone={STATUS_TONE[run.status] ?? 'neutral'}>{statusLabel(run.status)}</Badge>
                   </span>
                   <span className="subagent-desc">{run.description || run.runId}</span>
-                  <span className="subagent-meta muted small">
+                    <span className="subagent-meta muted small">
                     {run.mode === 'background' ? 'background · ' : ''}
                     {run.model ?? 'session model'} · {run.turns} turn{run.turns === 1 ? '' : 's'} · {run.toolUses} tool{run.toolUses === 1 ? '' : 's'}
                     {run.costUsd ? ` · ${fmtCost(run.costUsd)}` : ''}

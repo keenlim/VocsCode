@@ -93,3 +93,34 @@ describe('run detail', () => {
     expect(isValidRunId('agent_1')).toBe(true);
   });
 });
+
+describe('runs whose owner is gone', () => {
+  it('reports a run with no end record as interrupted once the session is not running', async () => {
+    const dir = await tempDir();
+    const store = new RunStore(subagentDir(dir));
+    await store.start({ runId: 'agent_crash', agent: 'Explore', description: 'Killed mid-run', mode: 'background', cwd: '/repo', startedAt: 1000 });
+    await store.item('agent_crash', { id: 'i1', ts: 1001, kind: 'assistant', text: 'half an answer' });
+    await store.flush();
+
+    // While the pi process is alive the run really is running…
+    const live = await listSubagentRuns(dir, { live: true });
+    expect(live[0]).toMatchObject({ runId: 'agent_crash', status: 'running' });
+    expect((await readSubagentRun(dir, 'agent_crash', { live: true }))!.status).toBe('running');
+
+    // …and after a restart it is interrupted, not spinning forever in the panel.
+    const dead = await listSubagentRuns(dir, { live: false });
+    expect(dead[0]).toMatchObject({ runId: 'agent_crash', status: 'interrupted' });
+    const detail = await readSubagentRun(dir, 'agent_crash', { live: false });
+    expect(detail!.status).toBe('interrupted');
+    // The transcript up to the crash is kept: the file itself was never rewritten.
+    expect(detail!.items.map((item) => item.text)).toEqual(['half an answer']);
+    expect(await fs.readFile(path.join(subagentDir(dir), 'agent_crash.jsonl'), 'utf8')).not.toContain('"t":"end"');
+  });
+
+  it('leaves a finished run alone whatever the liveness says', async () => {
+    const dir = await tempDir();
+    await writeRun(dir, 'agent_done', { startedAt: 1000 });
+    expect((await listSubagentRuns(dir, { live: false }))[0]).toMatchObject({ status: 'completed' });
+    expect((await listSubagentRuns(dir, { live: true }))[0]).toMatchObject({ status: 'completed' });
+  });
+});

@@ -2532,10 +2532,12 @@ body.resizing-row {
   list-style: none;
   margin: 0;
   padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  /* Tiles, not full-width rows: several runs fit on a line and the panel stays scannable. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 22%, 200px), 1fr));
+  gap: 4px;
   border-bottom: 1px solid var(--border);
+  align-content: start;
 }
 .subagent-row {
   display: flex;
@@ -2574,6 +2576,13 @@ body.resizing-row {
 }
 .subagent-meta {
   font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-row {
+  min-width: 0;
+  overflow: hidden;
 }
 .subagent-detail {
   display: flex;
