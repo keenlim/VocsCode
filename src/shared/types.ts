@@ -5,6 +5,7 @@
 import type { TerminalSettings } from './terminal';
 import type { ThemeId } from './themes';
 import type { ShortcutCommand } from './shortcuts';
+import type { ReliabilityReport } from './analytics/reliability';
 
 export type HarnessId = 'claude' | 'codex' | 'codex-exec' | 'cursor' | 'pi' | 'acp' | 'native';
 
@@ -620,6 +621,8 @@ export interface AnalyticsSummary {
   sessionCount: number;
   activeDays: number;
   firstDay?: string;
+  /** Semantic outcome analytics over the retained execution log, for the requested range. */
+  reliability: ReliabilityReport;
 }
 
 export interface HarnessRef {
@@ -747,6 +750,8 @@ export type TranscriptItem =
       changes?: FileChange[];
       /** Parent tool (subagent) id when nested. */
       parentId?: string | null;
+      /** Model id that produced this call when the harness reports it per message (Claude); a subagent's differs from the session's. */
+      model?: string;
     }
   | {
       id: string;

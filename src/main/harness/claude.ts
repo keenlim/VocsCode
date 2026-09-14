@@ -429,7 +429,9 @@ export class ClaudeAdapter implements HarnessAdapter {
               input,
               summary: summarizeInput(block.name, input),
               status: 'running',
-              parentId: msg.parent_tool_use_id ?? null
+              parentId: msg.parent_tool_use_id ?? null,
+              // The generating model: inside a subagent it differs from the session's, and analytics charges the call to it.
+              model: msg.message.model
             };
             this.toolItems.set(block.id, item);
             this.ctx.emit({ type: 'item.upsert', item });

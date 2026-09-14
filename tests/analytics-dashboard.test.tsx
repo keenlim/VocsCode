@@ -5,6 +5,7 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest';
 import type { AnalyticsDayPoint, AnalyticsSummary, SessionMeta, UsageSessionRecord } from '../src/shared/types';
+import { emptyReliabilityReport } from '../src/shared/analytics/reliability';
 import { addCounters, addSlice, emptyCounters, emptyDimensions } from '../src/shared/usage-rollup';
 
 const DAY = 86_400_000;
@@ -67,7 +68,8 @@ const summary: AnalyticsSummary = {
   sessions: [rec('s1', 'claude', 'opus', 5, 6), rec('s2', 'pi', 'glm', 1, 2), rec('s3', 'pi', 'glm', 0.5, 1)],
   sessionCount: 3,
   activeDays: 3,
-  firstDay: days[0].date
+  firstDay: days[0].date,
+  reliability: emptyReliabilityReport(now)
 };
 
 const invokeMock = vi.fn().mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
@@ -158,7 +160,7 @@ describe('analytics dashboard', () => {
     // The bounded range rolls its per-model tool slices up from the day buckets, so the card is empty
     // until the stub days carry them; all time reads the summary directly.
     fireEvent.click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'All time') as HTMLButtonElement);
-    await waitFor(() => expect(container.textContent).toContain('Error rate by model'));
+    await waitFor(() => expect(container.textContent).toContain('Raw error rate by model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Model') as HTMLTableElement;
     expect(table).toBeTruthy();
     // Models are the rows in alphabetical order and Total leads the tool columns.
@@ -190,7 +192,7 @@ describe('analytics dashboard', () => {
     await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
     fireEvent.click(container.querySelector("[data-tab='tools']") as HTMLButtonElement);
     fireEvent.click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'All time') as HTMLButtonElement);
-    await waitFor(() => expect(container.textContent).toContain('Error rate by harness + model'));
+    await waitFor(() => expect(container.textContent).toContain('Raw error rate by harness + model'));
     const table = Array.from(container.querySelectorAll('.atable')).find((t) => t.querySelector('th')?.textContent === 'Harness · model') as HTMLTableElement;
     expect(table).toBeTruthy();
     // Same shape as the model table: harness+model rows alphabetical, tool columns, Total first.
@@ -230,7 +232,7 @@ describe('analytics dashboard', () => {
     invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
     const view = render(<AnalyticsDashboard />);
     const ui = within(view.container);
-    const table = () => ui.getByRole('table', { name: 'Error rate by harness' });
+    const table = () => ui.getByRole('table', { name: 'Raw error rate by harness' });
     const cells = () => within(table()).getAllByRole('row').slice(1).map((row) => within(row).getAllByRole('cell').map((cell) => cell.textContent));
     try {
       fireEvent.click(ui.getByRole('tab', { name: 'Tools & files' }));
@@ -242,7 +244,7 @@ describe('analytics dashboard', () => {
       ]));
       expect(within(table()).getAllByRole('columnheader').map((th) => th.textContent)).toEqual(['Harness', 'Total', 'read', 'bash']);
       expect(ui.getByText(/Recorded since update/).textContent).toContain('same model and workload');
-      expect(ui.getByText(/Error rate = errors/).textContent).toContain('executed calls (calls − declined)');
+      expect(ui.getByText(/Raw error rate = harness-flagged errors/).textContent).toContain('executed calls (calls − declined)');
       fireEvent.click(ui.getByRole('radio', { name: '7 days' }));
       await waitFor(() => expect(cells()[0]).toEqual(['Claude', '(1/2) 50%', '(1/2) 50%', '—']));
       expect(invokeMock).toHaveBeenCalledWith('analytics:summary', { days: 7 });

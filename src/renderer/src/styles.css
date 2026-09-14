@@ -5850,3 +5850,54 @@ body.resizing {
 .pi-package .provider-body {
   padding-top: 0;
 }
+
+/* Reliability tab: signature drill-down and representative executions. */
+.link-btn.active {
+  text-decoration: underline;
+  color: var(--accent);
+}
+.exec-drilldown {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev, transparent);
+}
+.exec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  max-height: 480px;
+  overflow: auto;
+}
+.exec-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.exec-row:last-child {
+  border-bottom: 0;
+}
+.exec-preview,
+.exec-excerpt {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken, rgba(127, 127, 127, 0.08));
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow: auto;
+}
+.acard-body h4.acard-sub {
+  margin: 10px 0 6px;
+}
+.callout ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}

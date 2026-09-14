@@ -981,6 +981,7 @@ export class SessionManager {
         const streaming = item.kind === 'assistant' && item.streaming;
         if (!streaming || !active) this.appendTranscript(sessionId, item);
         if (item.kind === 'turn' && meta) this.onTurnFinished(meta, item);
+        if (item.kind === 'user' && meta) this.deps.analytics.recordUserMessage(meta, item);
         if (item.kind === 'tool') {
           // Keep the model from the start of the call: a model switch before its terminal upsert
           // must not move the call to the newly selected model.

@@ -95,7 +95,7 @@ function stubDeps(overrides: Partial<Deps> = {}): { registry: HandlerRegistry; d
       install: async () => ({ ok: false, log: '' }),
       resolve: () => null
     } as unknown as RuntimeResolver,
-    analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }) } as unknown as AnalyticsStore,
+    analytics: { summary: async () => ({ totals: ZERO_USAGE, speed: null, days: [] }), noteHarnessVersion: () => undefined } as unknown as AnalyticsStore,
     search: { search: async () => ({ items: [], total: 0 }) } as unknown as SearchIndex,
     log: (level, message) => logs.push([level, message]),
     push: (channel, payload) => pushes.push([channel, payload]),

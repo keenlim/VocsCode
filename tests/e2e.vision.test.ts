@@ -156,14 +156,14 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       const win = await app.firstWindow();
       await openAnalytics(win);
       await win.getByRole('tab', { name: 'Tools & files' }).click();
-      const table = win.getByRole('table', { name: 'Error rate by harness' });
+      const table = win.getByRole('table', { name: 'Raw error rate by harness' });
       const rows = () => table.getByRole('row').evaluateAll((els) => els.slice(1).map((row) => Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent)));
       const expected = (claude: string[]) => [claude, ['Pi', '(0/1) 0%', '(0/1) 0%', '—']];
       await table.waitFor();
       expect(await table.getByRole('columnheader').allTextContents()).toEqual(['Harness', 'Total', 'read', 'bash']);
       expect(await rows()).toEqual(expected(['Claude', '(1/3) 33%', '(1/3) 33%', '—']));
       expect(await win.getByText(/Recorded since update/).innerText()).toContain('same model and workload');
-      expect(await win.getByText(/Error rate = errors/).innerText()).toContain('executed calls (calls − declined)');
+      expect(await win.getByText(/Raw error rate = harness-flagged errors/).innerText()).toContain('executed calls (calls − declined)');
       expect(await win.getByText(`last 30 days · ${dateOf(29)} – ${dateOf(0)}`).count()).toBe(1);
 
       await win.getByRole('radio', { name: '7 days', exact: true }).click();
@@ -190,10 +190,86 @@ describe.runIf(enabled)('analytics harness/tool reliability UI', () => {
       await openAnalytics(restarted);
       await restarted.getByRole('tab', { name: 'Tools & files' }).click();
       await restarted.getByRole('radio', { name: 'All time' }).click();
-      const restored = restarted.getByRole('table', { name: 'Error rate by harness' });
+      const restored = restarted.getByRole('table', { name: 'Raw error rate by harness' });
       await restored.waitFor();
       await expect.poll(() => restored.getByRole('row').evaluateAll((els) => els.slice(1).map((row) => Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent))))
         .toEqual(expected(['Claude', '(2/5) 40%', '(2/5) 40%', '—']));
+    } finally {
+      await app?.close();
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it('separates raw harness errors into real failures, informational exits and unknowns, then drills into a signature', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-reliability-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const now = Date.now();
+    const sessions: SessionMeta[] = (['claude', 'pi'] as const).map((harness) => ({
+      id: harness, title: `${harness} reliability workload`, createdAt: now - 40 * 86_400_000, updatedAt: now,
+      config: { harness, projectRoot: project, permissionMode: 'ask' }, cwd: project, status: 'idle', harnessRef: {},
+      activeModel: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
+      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 }
+    }));
+    // Seed through the production store: four executed shell calls with real exit codes, one denial.
+    const store = new AnalyticsStore(userData, { log: () => undefined });
+    await store.load(sessions);
+    let id = 0;
+    const call = (session: string, item: Partial<Extract<TranscriptItem, { kind: 'tool' }>> & { name: string; status: Extract<TranscriptItem, { kind: 'tool' }>['status'] }) => {
+      const ts = now - 1_000;
+      store.recordToolCall(session, { id: String(++id), kind: 'tool', ts, ...item } as Extract<TranscriptItem, { kind: 'tool' }>, ts);
+    };
+    // A real failure: non-zero exit with a program error in the output.
+    call('claude', { name: 'Bash', status: 'error', exitCode: 1, input: { command: 'node build.js' }, output: 'Error: Cannot find module ./missing\n' });
+    // A non-zero exit that is not a failure: a search that matched nothing.
+    call('claude', { name: 'Bash', status: 'error', exitCode: 1, input: { command: 'rg needle src' }, output: '' });
+    call('claude', { name: 'Bash', status: 'done', exitCode: 0, input: { command: 'npm test' }, output: 'ok\n' });
+    // A second harness: a non-zero exit the rules cannot attribute.
+    call('pi', { name: 'bash', status: 'error', exitCode: 2, input: { command: 'git push origin main' }, output: 'fatal: could not read from remote\n' });
+    call('pi', { name: 'read', status: 'declined' });
+    await store.flush();
+
+    try {
+      app = await electron.launch({ ...launchOptions, env: isolatedEnv(userData), timeout: 60_000 });
+      const win = await app.firstWindow();
+      await openAnalytics(win);
+      await win.getByRole('tab', { name: 'Reliability' }).click();
+      const kpi = (label: string) => win.locator('.kpi').filter({ has: win.locator('.kpi-label', { hasText: new RegExp(`^${label}$`) }) }).locator('.kpi-value');
+      // Three raw errors out of four executed calls are not three failures: one failure, one
+      // informational exit (the empty search), one the rules refuse to name.
+      await expect.poll(() => kpi('Raw error status').innerText()).toBe('75% (3/4)');
+      await expect.poll(() => kpi('Unexpected failures').innerText()).toBe('25% (1/4)');
+      await expect.poll(() => kpi('Executed calls').innerText()).toBe('4');
+
+      const byHarness = win.getByRole('table', { name: 'Reliability by harness', exact: true });
+      const claudeRow = byHarness.getByRole('row').filter({ hasText: 'Claude' });
+      expect(await byHarness.getByRole('columnheader').allTextContents()).toEqual(['Harness', 'Executed', 'Raw error status', 'Unexpected failures', 'Informational', 'Diagnostic', 'Unknown', 'Incidents', 'Recovered', 'Unrecovered', 'Turns completed', 'Sample']);
+      expect(await claudeRow.getByRole('cell').allTextContents()).toEqual(['Claude', '3', '67% (2/3) n<20', '33% (1/3) n<20', '33% (1/3) n<20', '0% (0/3) n<20', '0% (0/3) n<20', '33% (1/3) n<20', '0% (0/1) n<20', '33% (1/3) n<20', '—', 'n<20']);
+
+      // Each pattern sorts into its own signature; the informational exit is labelled as such, not as a failure.
+      const signatures = win.getByRole('table', { name: 'Failure signatures', exact: true });
+      const search = signatures.getByRole('row').filter({ hasText: 'search_no_match' });
+      await search.waitFor();
+      expect(await search.innerText()).toContain('Informational non-zero');
+      const unknown = signatures.getByRole('row').filter({ hasText: 'process_nonzero_unknown' });
+      expect(await unknown.innerText()).toContain('Unknown');
+      const failure = signatures.getByRole('button', { name: 'bash | program_error | node' });
+      await failure.waitFor();
+
+      // Drilling into the signature fetches the real execution: its command and exit code.
+      await failure.click();
+      const drill = win.getByTestId('signature-drilldown');
+      await drill.waitFor();
+      const row = drill.getByTestId('execution-row');
+      await expect.poll(() => row.count()).toBe(1);
+      const text = await row.innerText();
+      expect(text).toContain('node build.js');
+      expect(text).toContain('exit 1');
+      expect(text).toContain('Program raised an error');
     } finally {
       await app?.close();
       app = null;

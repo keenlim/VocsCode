@@ -129,7 +129,7 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
     <>
       <KpiGrid caption={scope.previousLabel ? `Change is against the ${scope.previousLabel}.` : undefined}>
         <StatTile label="Tool calls" value={fmtCompact(t.toolCalls)} delta={delta(t.toolCalls, p?.toolCalls)} spark={scope.days.map((d) => d.usage.toolCalls)} sub={t.turns ? `${(t.toolCalls / t.turns).toFixed(1)} per turn` : undefined} />
-        <StatTile label="Errors" value={fmtCompact(tt.errors)} sub={errorRate !== null ? `${fmtPct(errorRate)} of calls` : undefined} />
+        <StatTile label="Raw error status" value={fmtCompact(tt.errors)} sub={errorRate !== null ? `${fmtPct(errorRate)} of calls · see Reliability` : undefined} title="Calls the harness flagged as errors, including informational non-zero exits such as a search with no match" />
         <StatTile label="Declined" value={fmtCompact(tt.declined)} sub="approvals you refused" />
         <StatTile label="Distinct tools" value={fmtCompact(scope.tools.length)} sub={scope.tools[0] ? `${scope.tools[0].name || '(unnamed)'} is the busiest` : undefined} />
         <StatTile label="Files touched" value={fmtCompact(scope.files.length)} sub={scope.files.length ? `${plural(scope.files.reduce((a, f) => a + f.total, 0), 'change')}` : undefined} />
@@ -137,8 +137,8 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
       </KpiGrid>
 
       <div className="agrid agrid-meter">
-        <ChartCard title="Error rate" subtitle="Calls that ended in an error">
-          <Meter value={errorRate} label="Errors ÷ calls" tone={errorRate !== null && errorRate > 0.15 ? 'red' : errorRate !== null && errorRate > 0.05 ? 'amber' : 'accent'} sub={errorRate === null ? 'No tool calls recorded yet.' : `${plural(tt.errors, 'error')} in ${plural(tt.calls, 'call')}`} />
+        <ChartCard title="Raw error-status rate" subtitle="Calls the harness flagged as errors; the Reliability tab separates real failures from informational exits">
+          <Meter value={errorRate} label="Flagged errors ÷ calls" tone={errorRate !== null && errorRate > 0.15 ? 'red' : errorRate !== null && errorRate > 0.05 ? 'amber' : 'accent'} sub={errorRate === null ? 'No tool calls recorded yet.' : `${plural(tt.errors, 'error')} in ${plural(tt.calls, 'call')}`} />
         </ChartCard>
         <ChartCard title="Tool calls per day" subtitle={split === 'none' ? scope.label : `By ${split} · ${scope.label}`} actions={<Segmented value={split} options={SPLITS} onChange={setSplit} ariaLabel="Split tool calls by" />} table={seriesTable(dates, calls, fmtCompact)} className="acard-span2">
           <ColumnChart dates={dates} series={calls} format={fmtCompact} ariaLabel="Tool calls per day" height={180} integer />
@@ -173,23 +173,23 @@ export function ToolsTab({ scope, summary }: { scope: Scope; summary: AnalyticsS
           )}
         </ChartCard>
       </div>
-      <ChartCard title="Error rate by harness" subtitle={`${scope.label} · ${dates[0]} – ${dates[dates.length - 1]}`}>
+      <ChartCard title="Raw error rate by harness" subtitle={`${scope.label} · ${dates[0]} – ${dates[dates.length - 1]}`}>
         <p className="muted small">Recorded since update; historical calls are not backfilled. Compare harnesses only with the same model and workload.</p>
-        <p className="muted small">Error rate = errors ÷ executed calls (calls − declined); no executed calls shows —. Tool names are grouped by casing, not aliases.</p>
+        <p className="muted small">Raw error rate = harness-flagged errors ÷ executed calls (calls − declined); no executed calls shows —. Tool names are grouped by casing, not aliases. A flagged error is not always a failure: the Reliability tab classifies each one.</p>
         {scope.harnessTools.length === 0 ? (
           <div className="chart-empty">No per-harness tool calls recorded in this range.</div>
         ) : (
-          <DataTable ariaLabel="Error rate by harness" table={harnessRateTable(scope.harnessTools)!} compact />
+          <DataTable ariaLabel="Raw error rate by harness" table={harnessRateTable(scope.harnessTools)!} compact />
         )}
       </ChartCard>
-      <ChartCard title="Error rate by model" subtitle={`Errors ÷ calls for each tool, by the model that made it · ${scope.label}`}>
+      <ChartCard title="Raw error rate by model" subtitle={`Flagged errors ÷ calls for each tool, by the model that made it · ${scope.label}`}>
         {scope.modelTools.length === 0 ? (
           <div className="chart-empty">No per-model tool calls recorded yet — filled by new tool calls.</div>
         ) : (
           <DataTable table={errorRateTable(scope.modelTools)!} compact />
         )}
       </ChartCard>
-      <ChartCard title="Error rate by harness + model" subtitle={`Errors ÷ calls for each tool, by the harness and model that made it · ${scope.label}`}>
+      <ChartCard title="Raw error rate by harness + model" subtitle={`Flagged errors ÷ calls for each tool, by the harness and model that made it · ${scope.label}`}>
         {scope.harnessModelTools.length === 0 ? (
           <div className="chart-empty">No per-harness tool calls recorded yet — filled by new tool calls.</div>
         ) : (
