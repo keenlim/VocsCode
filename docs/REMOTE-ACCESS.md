@@ -223,7 +223,11 @@ returns public metadata only), and the **offline encrypted transcript mirror** â
 the desktop, which seals an index plus per-session snapshots with a shared mirror key
 (handed to each browser sealed inside the e2e session) and uploads them as opaque, bounded,
 30-day-TTL blobs; the web client opens them locally and renders a read-only sidebar and
-transcript while the desktop is unreachable.
+transcript while the desktop is unreachable. The relay's HTTP surface is now a
+**deny-by-default route table** (`relay/src/routes.ts`): every route declares the auth it needs
+(`public`/`enroll`/`device`/`host`), the dispatcher authorizes before the handler runs, and the
+whole surface is unit-tested in plain Node (`tests/relay-routes.test.ts`) instead of relying on
+review. The public pairing endpoints also carry in-memory fixed-window rate limits.
 Remaining: real deployment (`cd relay && npx wrangler deploy`, secrets) â€” needs the
 Cloudflare account and the `app.code.vocs.io` custom domain on the relay Worker; QR
 pairing (deferred until the production relay URL exists); P3.5 terminal over WAN.
