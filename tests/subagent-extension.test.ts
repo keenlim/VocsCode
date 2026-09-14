@@ -15,11 +15,16 @@ import { GRANT_EVENT, PLAN_REASON } from '../resources/pi/subagent-gate';
 import { parseRunFile } from '../src/shared/subagents';
 
 const tempDirs: string[] = [];
-const envKeys = ['VOCS_CODE_MODE_FILE', 'VOCS_CODE_PERMISSION_MODE', 'VOCS_CODE_SUBAGENT_DIR', 'VOCS_CODE_SUBAGENT_COMPLETION_MS', 'VOCS_CODE_PI_NONCE', 'PI_CODING_AGENT_DIR'] as const;
+const envKeys = ['VOCS_CODE_MODE_FILE', 'VOCS_CODE_PERMISSION_MODE', 'VOCS_CODE_SUBAGENT_DIR', 'VOCS_CODE_SUBAGENT_COMPLETION_MS', 'VOCS_CODE_PI_NONCE', 'VOCS_CODE_PROJECT_ROOT', 'PI_CODING_AGENT_DIR'] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   for (const key of envKeys) savedEnv[key] = process.env[key];
+  // This suite runs the extension in-process, and a developer's shell inherits the pi session's own
+  // Vocs Code variables. Left alone, a fake run would be written into the live session's run
+  // directory and show up in the Subagents panel as real work. Only the test that asserts persistence
+  // sets Vocs Code's variables, and it sets them to a temp directory.
+  for (const key of ['VOCS_CODE_SUBAGENT_DIR', 'VOCS_CODE_PROJECT_ROOT', 'VOCS_CODE_MODE_FILE'] as const) delete process.env[key];
 });
 afterEach(async () => {
   for (const key of envKeys) {
@@ -187,6 +192,15 @@ function childGate(loader: Record<string, unknown>): (event: Record<string, unkn
 }
 
 const subagentCall = { description: 'Find the registry', prompt: 'Where is the harness registry?', type: 'Explore' };
+
+describe('suite hygiene', () => {
+  it('never inherits the developer own Vocs Code run directory', () => {
+    // The extension reads VOCS_CODE_SUBAGENT_DIR when it is constructed, so an inherited value would
+    // write this suite's fake runs into the live session's Subagents panel.
+    expect(process.env.VOCS_CODE_SUBAGENT_DIR).toBeUndefined();
+    expect(process.env.VOCS_CODE_PROJECT_ROOT).toBeUndefined();
+  });
+});
 
 describe('registration', () => {
   it('registers the three tools and points the model at them', async () => {

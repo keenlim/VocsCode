@@ -472,14 +472,16 @@ export class SessionManager {
   async subagentRuns(id: string): Promise<SubagentRunSummary[]> {
     const meta = this.get(id);
     if (!meta) return [];
-    return listSubagentRuns(this.deps.store.sessionDir(id));
+    // The panel is often opened after a restart, when nothing is running: runs whose process is gone
+    // are reported as interrupted instead of spinning forever.
+    return listSubagentRuns(this.deps.store.sessionDir(id), { live: this.active.has(id) });
   }
 
   /** One subagent run with its transcript and per-call rows, or null when it is gone. */
   async subagentRun(id: string, runId: string): Promise<SubagentRun | null> {
     const meta = this.get(id);
     if (!meta) return null;
-    return readSubagentRun(this.deps.store.sessionDir(id), runId);
+    return readSubagentRun(this.deps.store.sessionDir(id), runId, { live: this.active.has(id) });
   }
 
   /**
