@@ -173,7 +173,7 @@ describe('codex-exec adapter', () => {
           { type: 'item.started', item: { id: 'c1', type: 'command_execution', command: 'ls -la', aggregated_output: '', status: 'in_progress' } },
           { type: 'item.completed', item: { id: 'c1', type: 'command_execution', command: 'ls -la', aggregated_output: 'file.txt', status: 'completed', exit_code: 0 } },
           { type: 'item.completed', item: { id: 'r1', type: 'reasoning', text: 'thinking' } },
-          { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 3, cache_write_input_tokens: 1, reasoning_output_tokens: 2 } }
+          { type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 4, cache_write_input_tokens: 1, reasoning_output_tokens: 2 } }
         ]
       }
     ]);
@@ -198,9 +198,11 @@ describe('codex-exec adapter', () => {
     const reasoning = items.get('r1');
     expect(reasoning && reasoning.kind === 'assistant' && reasoning.thinking).toBe('thinking');
 
-    expect(usageEvent(events)?.totals).toMatchObject({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 3, cacheWriteTokens: 1, reasoningTokens: 2, turns: 1 });
+    // input_tokens includes the cached subset: input is the uncached remainder (10 - 4), while the
+    // cached 4 are counted once as cache reads so hit rates and costs do not bill them twice.
+    expect(usageEvent(events)?.totals).toMatchObject({ inputTokens: 6, outputTokens: 5, cacheReadTokens: 4, cacheWriteTokens: 1, reasoningTokens: 2, turns: 1 });
     const turn = turnItems(items).at(-1);
-    expect(turn && [turn.status, turn.usage?.inputTokens, turn.usage?.outputTokens]).toEqual(['completed', 10, 5]);
+    expect(turn && [turn.status, turn.usage?.inputTokens, turn.usage?.outputTokens]).toEqual(['completed', 6, 5]);
     await a.dispose();
   });
 
