@@ -29,7 +29,7 @@ import { readJson, writeJson } from './util/fs';
 export { emptyFileUsage, emptyToolUsage };
 
 interface AnalyticsFile {
-  version: 1;
+  version: 2;
   /** UTC day -> aggregated usage. */
   days: Record<string, UsageDay>;
   /** Last recorded cumulative totals per session, for delta computation. */
@@ -50,7 +50,7 @@ interface AnalyticsFile {
   files: Record<string, FileUsage>;
 }
 
-const EMPTY_FILE: AnalyticsFile = { version: 1, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
+const EMPTY_FILE: AnalyticsFile = { version: 2, days: {}, recorded: {}, sessions: {}, tools: {}, modelTools: {}, harnessModelTools: {}, harnessTools: {}, recordedTools: [], files: {} };
 
 /** Older calls remain deduped in memory; only this recent window survives restart. */
 const RECENT_TOOL_LIMIT = 10_000;
@@ -239,6 +239,57 @@ export function toolCallFromItem(item: Extract<TranscriptItem, { kind: 'tool' }>
   return { usage, changes };
 }
 
+/**
+ * One-time repair for stores written before the Codex adapters subtracted cached input from their
+ * input token count. Codex reports the cached subset inside its input tokens, so pre-fix records
+ * carried every cached token twice — once inside inputTokens, once as cacheReadTokens — which
+ * roughly halved the cache hit rate and over-billed input cost for codex-sourced usage. Removes
+ * the cached part from each codex slice (day total, harness slice, session snapshots and delta
+ * baselines) and spreads it across that day's model and project slices weighted by their own
+ * cache reads — exact where codex ran a single model, proportional where it did not. Runs when
+ * the first build with the fix loads a version-1 store: everything on disk then predates it.
+ * Returns the number of days repaired.
+ */
+export function migrateCodexCachedInput(data: AnalyticsFile, sessions: SessionMeta[]): number {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  let fixed = 0;
+  for (const day of Object.values(data.days)) {
+    const codex = day.by?.harness?.codex;
+    if (!codex) continue;
+    const removed = Math.min(codex.inputTokens, codex.cacheReadTokens);
+    if (!(removed > 0)) continue;
+    codex.inputTokens -= removed;
+    day.inputTokens = Math.max(0, day.inputTokens - removed);
+    const active = (codex.sessions ?? []).map((id) => byId.get(id)).filter((s): s is SessionMeta => s !== undefined);
+    const spread = (dim: 'model' | 'project') => {
+      const slices = day.by?.[dim];
+      if (!slices) return;
+      const keys = [...new Set(active.flatMap((s) => (dim === 'model' ? (s.activeModel?.model ? [`${s.activeModel.provider ?? ''}/${s.activeModel.model}`] : []) : [s.config.projectRoot])))].filter((k) => slices[k]);
+      if (!keys.length) return;
+      const parts = apportion(removed, keys.map((k) => slices[k].cacheReadTokens), true);
+      keys.forEach((k, i) => (slices[k].inputTokens = Math.max(0, slices[k].inputTokens - parts[i])));
+    };
+    spread('model');
+    spread('project');
+    fixed++;
+  }
+  const repair = (u: UsageTotals): void => {
+    u.inputTokens = Math.max(0, u.inputTokens - u.cacheReadTokens);
+  };
+  for (const [id, s] of Object.entries(data.sessions)) {
+    if (s.harness !== 'codex') continue;
+    repair(s.usage);
+    const recorded = data.recorded[id];
+    if (recorded) repair(recorded);
+  }
+  // Live sessions resume from their meta usage; correcting it in place keeps the next cumulative
+  // sample from the (fixed) adapter continuous instead of re-counting the old cached tokens.
+  for (const m of sessions) {
+    if (m.config.harness === 'codex') repair(m.usage);
+  }
+  return fixed;
+}
+
 export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string, UsageDay>, tools: Record<string, ToolUsage>, modelTools: Record<string, Record<string, ToolUsage>>, harnessModelTools: Record<string, Record<string, ToolUsage>>, files: Record<string, FileUsage>, dayLimit: number, now: number, harnessTools: Record<string, Record<string, ToolUsage>> = {}): AnalyticsSummary {
   const seed = (): UsageTotals => ({ ...EMPTY_USAGE });
   const sessionTotals = sessions.reduce<UsageTotals>((acc, s) => {
@@ -388,8 +439,9 @@ export class AnalyticsStore {
    */
   async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
     const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined, { log: this.deps.log });
+    const fromV1 = (stored?.version ?? 1) < 2;
     this.data = {
-      version: 1,
+      version: 2,
       days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
       recorded: stored?.recorded && typeof stored.recorded === 'object' ? stored.recorded : {},
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
@@ -407,6 +459,12 @@ export class AnalyticsStore {
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
       if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'harnessModelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
       if (day.by?.harnessTool !== undefined && (typeof day.by.harnessTool !== 'object' || day.by.harnessTool === null)) delete day.by.harnessTool;
+    }
+    // One-time repair before anything reads the numbers: version-1 stores were written entirely by
+    // builds that double-counted Codex's cached input, so every codex record on disk needs it.
+    if (fromV1) {
+      const fixed = migrateCodexCachedInput(this.data, existing);
+      if (fixed) this.deps.log('info', `analytics: removed the cached-input double-count from ${fixed} codex day(s) recorded before the fix`);
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
