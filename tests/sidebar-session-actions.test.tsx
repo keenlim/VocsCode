@@ -36,16 +36,22 @@ const session = (id: string, patch: Partial<SessionMeta>): SessionMeta => ({
 });
 
 describe('sidebar session actions', () => {
-  it('shows pin/fork/archive actions and no 3-dot menu on an active row', () => {
+  it('shows the pin on the left and fork/archive on the right, and no 3-dot menu on an active row', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
     const row = container.querySelector('.session-row') as HTMLElement;
     expect(row.querySelector('.row-menu-btn')).toBeNull();
-    const btns = row.querySelectorAll('.row-act-btn');
-    expect(btns).toHaveLength(3);
-    expect((btns[0] as HTMLElement).title).toBe('Pin to top');
-    expect((btns[2] as HTMLElement).title).toBe('Archive');
-    fireEvent.click(btns[0]);
+    // The pin owns a leading gutter, before the title block.
+    const pin = row.querySelector('[data-testid="session-pin"]') as HTMLElement;
+    expect(row.querySelector('.session-pin')?.contains(pin)).toBe(true);
+    const main = row.querySelector('.session-main') as Node;
+    expect(pin.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The title no longer carries a second pin icon.
+    expect(row.querySelectorAll('[data-icon="pin"]')).toHaveLength(1);
+    // The hover action cluster keeps only fork and archive.
+    const actions = row.querySelector('.row-actions') as HTMLElement;
+    expect([...actions.querySelectorAll('.row-act-btn')].map((b) => b.getAttribute('aria-label'))).toEqual(['Fork session', 'Archive session']);
+    fireEvent.click(pin);
     expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: true });
   });
 
@@ -128,6 +134,18 @@ describe('sidebar session actions', () => {
     expect(row.getAttribute('draggable')).toBe('false');
     fireEvent.click(btns[0]);
     expect(invokeMock).toHaveBeenCalledWith('sessions:archive', { id: 's_a', archived: false });
+  });
+
+  it('keeps a read-only pin on the left of a pinned archived row', () => {
+    useStore.setState({ sessions: [session('s_a', { title: 'A', archived: true, pinned: true, pinnedAt: 5 })], settings, activeId: null, view: 'chat' });
+    const { container } = render(<Sidebar />);
+    // Archived sessions only appear once the Archived toggle is on.
+    const archived = [...container.querySelectorAll('.sidebar-link')].find((b) => (b.textContent ?? '').includes('Archived')) as HTMLElement;
+    fireEvent.click(archived);
+    const row = container.querySelector('.session-row') as HTMLElement;
+    // Pinned state still reads on the left, but an archived row offers no pin toggle.
+    expect(row.querySelector('.session-pin .session-pin-indicator')).toBeTruthy();
+    expect(row.querySelector('[data-testid="session-pin"]')).toBeNull();
   });
 
   it('dragging one pinned row over another persists the new pin order', () => {
