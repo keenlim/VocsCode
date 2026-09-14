@@ -6,7 +6,7 @@ import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, Suba
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
-import { shutdownChild, spawnTool } from './spawn';
+import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -46,6 +46,16 @@ function isTerminalSubagentStatus(status: string | undefined): status is string 
   return status === 'completed' || status === 'error' || status === 'stopped' || status === 'aborted';
 }
 const PI_TOOL_PROMPT = 'Pi tools: prefer path (file_path is accepted). edit uses edits[]; a single old_string/new_string pair is accepted, including empty new_string. replace_all:true is unsupported: use unique non-overlapping edits. bash timeout is seconds; timeout_ms explicitly means milliseconds. Never send both timeout fields or guess their units.';
+
+async function appendSystemPrompt(args: string[], value: string, command: string, fallbackFile: string): Promise<void> {
+  let argument = value;
+  if (usesWindowsCommandShim(command) && /[%\r\n]/.test(value)) {
+    // Pi accepts prompt-file paths. This crosses cmd.exe without changing the prompt text.
+    await fs.writeFile(fallbackFile, value, 'utf8');
+    argument = fallbackFile;
+  }
+  args.push('--append-system-prompt', argument);
+}
 
 function toolPath(input: Record<string, unknown> | undefined): string | undefined {
   return typeof input?.path === 'string' ? input.path : typeof input?.file_path === 'string' ? input.file_path : undefined;
@@ -243,9 +253,10 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
-    // Pi accumulates this flag; separate arguments avoid introducing newlines into Windows cmd shims.
-    if (meta.config.appendSystemPrompt) args.push('--append-system-prompt', meta.config.appendSystemPrompt);
-    args.push('--append-system-prompt', PI_TOOL_PROMPT);
+    if (meta.config.appendSystemPrompt) {
+      await appendSystemPrompt(args, meta.config.appendSystemPrompt, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
+    }
+    await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
     args.push(...(s.pi.extraArgs ?? []));
 
     this.modeFile = path.join(sessionDir, 'permission-mode.txt');

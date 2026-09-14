@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { basename, fmtCost, fmtRate, fmtTokens, speedOfTurns } from '../src/renderer/src/format';
-import { quoteWin } from '../src/main/harness/spawn';
+import { quoteWin, usesWindowsCommandShim } from '../src/main/harness/spawn';
 
 describe('renderer format helpers', () => {
   it('basename handles Windows and POSIX separators', () => {
@@ -20,6 +20,12 @@ describe('renderer format helpers', () => {
 });
 
 describe('quoteWin', () => {
+  it.runIf(process.platform === 'win32')('detects command shims that require cmd.exe', () => {
+    expect(usesWindowsCommandShim('C:\\runtime\\pi.cmd')).toBe(true);
+    expect(usesWindowsCommandShim('C:\\runtime\\pi.BAT')).toBe(true);
+    expect(usesWindowsCommandShim('C:\\runtime\\pi.exe')).toBe(false);
+  });
+
   it('quotes arguments with spaces and escapes embedded quotes', () => {
     expect(quoteWin('plain')).toBe('plain');
     expect(quoteWin('C:\\Program Files\\x.cmd')).toBe('"C:\\Program Files\\x.cmd"');

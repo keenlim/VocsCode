@@ -11,7 +11,11 @@ import type { SessionEvent } from '../src/shared/types';
 import type vocsCodeTools from '../resources/pi/vocs-code-tools';
 type ShippedToolsFactory = typeof vocsCodeTools;
 
-const spawn = vi.hoisted(() => ({ spawnTool: vi.fn(), shutdownChild: vi.fn() }));
+const spawn = vi.hoisted(() => ({
+  spawnTool: vi.fn(),
+  shutdownChild: vi.fn(),
+  usesWindowsCommandShim: (file: string) => /\.(cmd|bat)$/i.test(file)
+}));
 vi.mock('../src/main/harness/spawn', () => spawn);
 const roots: string[] = [];
 afterEach(async () => {
@@ -19,7 +23,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function setup(capabilities: string[], extensionError = false) {
+async function setup(capabilities: string[], extensionError = false, options: { appendSystemPrompt?: string; piPath?: string } = {}) {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'vocs-pi-startup-'));
   roots.push(root);
   const events: SessionEvent[] = [];
@@ -53,13 +57,13 @@ async function setup(capabilities: string[], extensionError = false) {
   });
   spawn.shutdownChild.mockImplementation(async (child) => { child.emit('close', 0); });
   const ctx = {
-    session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: 'Keep my custom instructions.' } }),
+    session: () => ({ cwd: root, usage: {}, harnessRef: {}, config: { appendSystemPrompt: options.appendSystemPrompt ?? 'Keep my custom instructions.' } }),
     settings: () => ({ pi: { extraArgs: ['--no-skills'] } }),
-    runtime: { resolve: () => ({ path: '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
+    runtime: { resolve: () => ({ path: options.piPath ?? '/fake/pi' }), resource: (...segments: string[]) => path.join(root, 'resources', ...segments) },
     sessionDir: root, permissionMode: () => 'ask', effort: () => undefined, getApiKey: async () => undefined, mcpServers: async () => [], ownedMcpIds: () => [],
     emit: (event: SessionEvent) => events.push(event), log: () => {}, updateRef: () => {}, updateMeta: () => {},
   } as unknown as HarnessContext;
-  return { adapter: new PiAdapter(ctx), events, commands, children };
+  return { adapter: new PiAdapter(ctx), events, commands, children, root };
 }
 
 describe('Pi adapter startup capability boundary', () => {
@@ -83,6 +87,23 @@ describe('Pi adapter startup capability boundary', () => {
     const appends = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
     expect(appends).toHaveLength(2);
     expect(appends[0]).toBe('Keep my custom instructions.');
+    expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
+    await adapter.dispose();
+  });
+  it.runIf(process.platform === 'win32')('passes command-unsafe append text through a prompt file without changing it', async () => {
+    const prompt = 'Knowledge header\r\n\r\n- Coverage: 50%\n- Keep exact spacing';
+    const { adapter, commands, root } = await setup(['approvals', 'tools', 'subagents'], false, {
+      appendSystemPrompt: prompt,
+      piPath: 'C:\\runtime\\pi.cmd'
+    });
+    await adapter.send({ text: 'accepted' });
+    expect(commands.filter((command) => command.type === 'prompt')).toHaveLength(1);
+    const args = spawn.spawnTool.mock.calls[0][1] as string[];
+    expect(args.every((arg) => !/[%\r\n]/.test(arg))).toBe(true);
+    const appends = args.flatMap((arg, index) => arg === '--append-system-prompt' ? [args[index + 1]] : []);
+    expect(appends).toHaveLength(2);
+    expect(appends[0]).toBe(path.join(root, 'pi', 'append-system-prompt.txt'));
+    expect(await fs.readFile(appends[0], 'utf8')).toBe(prompt);
     expect(appends[1]).toContain('timeout_ms explicitly means milliseconds');
     await adapter.dispose();
   });

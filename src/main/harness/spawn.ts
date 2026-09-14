@@ -2,6 +2,11 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 
 const isWin = process.platform === 'win32';
 
+/** Whether this launch crosses the cmd.exe parsing boundary used by npm shims. */
+export function usesWindowsCommandShim(file: string): boolean {
+  return isWin && /\.(cmd|bat)$/i.test(file);
+}
+
 /** Quote one argument for cmd.exe the way cross-spawn does. */
 export function quoteWin(arg: string): string {
   // cmd.exe expands percent pairs and treats newlines as command separators before the target
@@ -20,7 +25,7 @@ export function quoteWin(arg: string): string {
  */
 export function spawnTool(file: string, args: string[], opts: SpawnOptions = {}): ChildProcess {
   const base: SpawnOptions = { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, ...opts };
-  if (isWin && /\.(cmd|bat)$/i.test(file)) {
+  if (usesWindowsCommandShim(file)) {
     const command = [quoteWin(file), ...args.map(quoteWin)].join(' ');
     return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], {
       ...base,
