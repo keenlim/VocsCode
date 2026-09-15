@@ -256,6 +256,38 @@ describe('sidebar session pin visibility', () => {
   });
 });
 
+describe('sidebar header row', () => {
+  // jsdom never applies styles.css, so the spacing that keeps the live-session count off the
+  // wordmark — and the truncation that keeps the row from overflowing at 200px — is only reachable
+  // as text. Placement in the DOM is covered by tests/sidebar-running-badge.test.tsx.
+  const styles = fs.readFileSync(path.join(process.cwd(), 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+  const rule = (selector: string): string => {
+    const start = styles.indexOf(`\n${selector} {`);
+    // Comments stripped: these rules explain themselves in prose, which would match below.
+    return start < 0 ? '' : styles.slice(styles.indexOf('{', start) + 1, styles.indexOf('}', start)).replace(/\/\*[\s\S]*?\*\//g, '');
+  };
+  /** The left component of a `margin` shorthand or a `margin-left`, in px. */
+  const leftMargin = (declarations: string): number => {
+    const shorthand = /margin:\s*([^;]+);/.exec(declarations);
+    if (shorthand) {
+      const parts = shorthand[1]!.trim().split(/\s+/).map((v) => (v.endsWith('px') ? Number.parseFloat(v) : 0));
+      return parts[3] ?? parts[1] ?? 0;
+    }
+    return Number.parseFloat(/margin-left:\s*([\d.]+)px/.exec(declarations)?.[1] ?? '0');
+  };
+
+  it('keeps a margin between the wordmark and the running count', () => {
+    expect(rule('.sidebar-running'), 'the running badge rule moved; keep this test with it').not.toBe('');
+    expect(leftMargin(rule('.sidebar-running'))).toBeGreaterThan(0);
+  });
+
+  it('lets the wordmark truncate instead of pushing the running count off the row', () => {
+    expect(rule('.brand')).toMatch(/min-width:\s*0/);
+    expect(rule('.brand > span')).toMatch(/overflow:\s*hidden/);
+    expect(rule('.brand > span')).toMatch(/white-space:\s*nowrap/);
+  });
+});
+
 describe('model list for a session whose harness has not started', () => {
   const session = (id: string, harness: HarnessId): SessionMeta =>
     ({ id, config: { harness } }) as SessionMeta;
