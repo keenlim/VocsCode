@@ -28,6 +28,7 @@ import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, empt
 import type { ExecutionRecord } from '../shared/analytics/records';
 import { reliabilityReport, type ReliabilityReport } from '../shared/analytics/reliability';
 import { ExecutionLog, type ExecutionContext, type ExecutionQuery } from './analytics-executions';
+import { pricedModelOf, repricingOf } from './util/usage-repair';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
@@ -318,6 +319,67 @@ export function migrateCodexCachedInput(data: AnalyticsFile, sessions: SessionMe
   return fixed;
 }
 
+/**
+ * One-time repair for spend the Claude adapter recorded at the Claude CLI's fallback rates, which
+ * overstated a third-party model by two orders of magnitude — see `util/usage-repair` for why the
+ * record looks the way it does and how one is recognised.
+ *
+ * Every copy of the figure moves together, because each is read on its own:
+ *   - the session meta, which also seeds the adapter's next cumulative sample — a repaired session
+ *     whose meta kept the old dollars would report a spend that can never grow;
+ *   - the analytics snapshot the dashboard's session rows and totals are built from;
+ *   - `recorded`, the same delta baseline, which is why the codex repair moves it too;
+ *   - the day slices the usage was attributed to, so the day, harness, model, harness × model and
+ *     project breakdowns all lose the phantom dollars rather than only the top line.
+ *
+ * Unlike the codex repair this runs on every load instead of behind a version gate: the recognition
+ * test is self-limiting, since a record that has been repriced no longer matches it. Sessions whose
+ * per-day share cannot be recovered (one resumed across midnight, so its usage sits on more than
+ * one day) have the dollars split evenly between those days — the session total is exact either
+ * way, only the day it is charted under is approximate.
+ */
+export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: SessionMeta[]): { ids: string[]; usd: number } {
+  const ids: string[] = [];
+  let usd = 0;
+  const cut = (slice: { costUsd: number } | undefined, by: number): void => {
+    if (slice) slice.costUsd = Math.max(0, slice.costUsd - by);
+  };
+  for (const meta of sessions) {
+    if (meta.config.harness !== 'claude') continue;
+    const ref = pricedModelOf(meta);
+    const repricing = repricingOf(ref, meta.usage);
+    if (!ref || !repricing) continue;
+    const delta = repricing.from - repricing.to;
+    const snapshot = data.sessions[meta.id];
+    const recorded = data.recorded[meta.id];
+    meta.usage.costUsd = repricing.to;
+    if (snapshot) snapshot.usage.costUsd = repricing.to;
+    if (recorded) recorded.costUsd = repricing.to;
+    const modelKey = `${ref.provider}/${ref.model}`;
+    // Days already carrying this session are where its usage was attributed. A session the store
+    // has no record of is not on any day yet — the backfill below adds it, already repriced, so
+    // there is nothing to take back; one whose day slices predate dimension tracking sits entirely
+    // on its last active day, which is where the backfill would have put it.
+    const carriers = Object.keys(data.days).filter((key) => data.days[key].by?.harness?.claude?.sessions.includes(meta.id));
+    const lastDay = dayKey(meta.updatedAt);
+    const targets = carriers.length ? carriers : (recorded || snapshot) && data.days[lastDay] ? [lastDay] : [];
+    const shares = apportion(delta, targets.map(() => 1), false);
+    targets.forEach((key, i) => {
+      const day = data.days[key];
+      day.costUsd = Math.max(0, day.costUsd - shares[i]);
+      const by = day.by;
+      if (!by) return;
+      cut(by.harness?.claude, shares[i]);
+      cut(by.model?.[modelKey], shares[i]);
+      cut(by.harnessModel?.[harnessModelKey('claude', modelKey)], shares[i]);
+      cut(by.project?.[meta.config.projectRoot], shares[i]);
+    });
+    ids.push(meta.id);
+    usd += delta;
+  }
+  return { ids, usd };
+}
+
 /** The usage half of a summary; `AnalyticsStore.summary` adds the reliability report from the execution log. */
 export type UsageSummary = Omit<AnalyticsSummary, 'reliability'>;
 
@@ -471,6 +533,8 @@ export class AnalyticsStore {
   readonly executions: ExecutionLog;
   /** Resolves when historical transcripts have been replayed into the execution log. */
   private backfill: Promise<void> = Promise.resolve();
+  /** Sessions whose spend the load-time repair repriced; their transcript turn rows follow. */
+  repricedSessions: string[] = [];
   private reliabilityCache?: { key: string; report: ReliabilityReport };
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
@@ -512,6 +576,11 @@ export class AnalyticsStore {
     if (fromV1) {
       const fixed = migrateCodexCachedInput(this.data, existing);
       if (fixed) this.deps.log('info', `analytics: removed the cached-input double-count from ${fixed} codex day(s) recorded before the fix`);
+    }
+    const repriced = migrateClaudeFallbackSpend(this.data, existing);
+    this.repricedSessions = repriced.ids;
+    if (repriced.ids.length) {
+      this.deps.log('info', `analytics: repriced ${repriced.ids.length} claude session(s) recorded at the CLI's fallback rates, removing $${repriced.usd.toFixed(2)}`);
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
