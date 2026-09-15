@@ -27,6 +27,7 @@ import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
 import { UpdateService } from './updater';
+import { pricedModelOf, repricingOf, turnUsageTotals } from './util/usage-repair';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { RemoteAudit } from './remote/audit';
@@ -127,6 +128,25 @@ async function main(): Promise<void> {
   await store.load();
   const analytics = new AnalyticsStore(userData, { log: logTo });
   await analytics.load(store.list(), (id) => store.readTranscript(id));
+
+  // Spend the Claude adapter recorded at the CLI's fallback rates before it priced third-party
+  // models from the app catalog is corrected here, once and before anything reads it: `load` has
+  // already fixed the session index and the rollups (see `migrateClaudeFallbackSpend`), and the
+  // transcript turn rows the Usage panel's per-turn list is built from follow below. Waiting for
+  // this keeps the headline spend and the turns under it in agreement from the first paint; it
+  // costs about a second on the one boot that has something to repair, and nothing after that,
+  // because a repriced record no longer looks like a fallback-priced one.
+  if (analytics.repricedSessions.length) {
+    let rows = 0;
+    for (const id of analytics.repricedSessions) {
+      const meta = store.get(id);
+      const ref = meta ? pricedModelOf(meta) : undefined;
+      if (!ref) continue;
+      rows += await store.repriceTurns(id, (turn) => repricingOf(ref, turnUsageTotals(turn))?.to);
+    }
+    await store.persist();
+    logTo('info', `usage: repriced ${analytics.repricedSessions.length} claude session(s) recorded at the CLI's fallback rates (${rows} turn row(s))`);
+  }
 
   // Deep search index: derived from transcripts, so it lives beside them and rebuilds itself.
   const search = new SearchIndex(userData, { store, log });
