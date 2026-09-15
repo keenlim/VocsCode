@@ -4,7 +4,7 @@ import type { GitBranchOverview, GitBranchOverviewItem, GitIssue, GitIssueList, 
 import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
-import { useStore } from '../store';
+import { useStore, type GitPanelView } from '../store';
 import { GitSetup, remoteWebUrl } from './GitSetup';
 import { askConfirm, askPrompt, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
 
@@ -24,7 +24,7 @@ const FILTERS: { id: Filter; label: string }[] = [
   { id: 'merged', label: 'Merged' }
 ];
 
-type View = 'branches' | 'worktrees' | 'prs' | 'issues';
+type View = GitPanelView;
 type PrFilter = 'open' | 'merged' | 'closed' | 'all';
 type IssueFilter = 'open' | 'closed' | 'all';
 
@@ -60,7 +60,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   const [data, setData] = useState<GitBranchOverview | null>(null);
   /** Guided-setup state reported by GitSetup, for the housekeeping menu's "Set up GitHub" entry. */
   const [setup, setSetup] = useState<GitSetupStatus | null>(null);
-  const [view, setView] = useState<View>('branches');
+  // The selected view outlives this component: the panel is unmounted and mounted again when the
+  // active session changes — starting a session from a PR row does it — and coming back to Branches
+  // instead of the list the user was reading would be a regression, not a reset.
+  const view = useStore((s) => s.gitPanelView);
+  const setView = useStore((s) => s.setGitPanelView);
   const [filter, setFilter] = useState<Filter>('all');
   const [query, setQuery] = useState('');
   /** Pull requests are pulled from GitHub separately (slower, needs gh); loaded on open and kept fresh by the background poll. */

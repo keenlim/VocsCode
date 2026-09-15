@@ -8,6 +8,8 @@ import { invoke, on } from './api';
 import { recencyAt, sortSessionRows } from './sessionOrder';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
+/** The Git panel's inner view: the repo, its worktrees, or the two GitHub lists. */
+export type GitPanelView = 'branches' | 'worktrees' | 'prs' | 'issues';
 /** The panel's lower half: live session services rather than workspace views. */
 export type PanelBottomTab = 'mcp' | 'subagents' | 'knowledge';
 export type View = 'chat' | 'settings' | 'analytics' | 'skills' | 'mcp';
@@ -86,6 +88,12 @@ interface State {
    * unmounts whenever the user leaves the chat view, e.g. for Settings.
    */
   panelBottomOpened: PanelBottomTab[];
+  /**
+   * The Git panel's inner view. It lives here for the same reason `panelBottomOpened` does: the panel
+   * unmounts and mounts again on a session switch — opening a session from a PR row does exactly that —
+   * and a local state would drop the user back on Branches every time.
+   */
+  gitPanelView: GitPanelView;
   /** One-shot request to show a file in the Files tab, set by transcript file links. */
   fileReveal: FileReveal | null;
   /** One-shot request to open one subagent run, set by a subagent tool card. */
@@ -127,6 +135,7 @@ interface State {
   toggleSidebar(): void;
   togglePanel(open?: boolean): void;
   setPanelTab(t: PanelTab | 'mcp'): void;
+  setGitPanelView(v: GitPanelView): void;
   setPanelBottomTab(t: PanelBottomTab): void;
   /** Opens the Files tab on a path (workspace-relative or absolute inside the session cwd). */
   revealFile(sessionId: string, path: string, line?: number): void;
@@ -287,6 +296,7 @@ export const useStore = create<State>((set, get) => ({
   panelTab: 'changes',
   panelBottomTab: 'mcp',
   panelBottomOpened: [],
+  gitPanelView: 'branches',
   fileReveal: null,
   subagentReveal: null,
   newSessionOpen: false,
@@ -598,6 +608,9 @@ export const useStore = create<State>((set, get) => ({
     // MCP moved to the lower half; asking for that tab opens the half instead of an empty top pane.
     if (tab === 'mcp') set((s) => ({ panelBottomTab: 'mcp', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'mcp'), panelOpen: true }));
     else set({ panelTab: tab, panelOpen: true });
+  },
+  setGitPanelView(gitPanelView) {
+    set({ gitPanelView });
   },
   setPanelBottomTab(panelBottomTab) {
     set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));

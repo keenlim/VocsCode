@@ -51,7 +51,7 @@ beforeEach(() => {
   failPrs = false;
   overview = OVERVIEW;
   setupStatus = {};
-  useStore.setState({ panelTab: 'branches', toasts: [] });
+  useStore.setState({ panelTab: 'branches', gitPanelView: 'branches', toasts: [] });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'git:branchesOverview') return Promise.resolve(overview);
@@ -212,5 +212,25 @@ describe('Git panel background refresh', () => {
       vi.advanceTimersByTime(120_000);
     });
     expect(calls('git:pullRequests')).toBe(before);
+  });
+
+  it('comes back on the GitHub list the user was reading when the panel is mounted again', async () => {
+    issues = [issue(7)];
+    const panel = render(<RightPanel session={session()} />);
+    await act(async () => {});
+    await act(async () => {
+      issueTab().click();
+    });
+    expect(screen.getByRole('button', { name: 'Read issue #7: Issue 7' })).toBeTruthy();
+
+    // A session switch can unmount the panel for a frame: the started session becomes active before
+    // the store has been told about it, so the panel has no session and is dropped. Whatever the
+    // user was looking at has to be there when it comes back — starting a session from a PR row
+    // must not silently send the Git panel back to Branches.
+    panel.unmount();
+    render(<RightPanel session={session()} />);
+    await act(async () => {});
+    expect(issueTab().className).toContain('active');
+    expect(screen.getByRole('button', { name: 'Read issue #7: Issue 7' })).toBeTruthy();
   });
 });
