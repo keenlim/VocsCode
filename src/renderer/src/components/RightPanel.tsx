@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, SessionMeta } from '../../../shared/types';
+import { nativeGoalCommands } from '../../../shared/goal-driver';
 import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
+import { clamp, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
@@ -385,16 +387,7 @@ function GoalTab({ session }: { session: SessionMeta }) {
   const act = (action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', extra: { objective?: string; autoContinue?: boolean; maxIterations?: number } = {}) => void invoke('sessions:goal', { id: session.id, action, ...extra });
   // The harness owns `/goal` in this session, so there is no app-side goal to drive: show who has it
   // instead of controls that would start a second, competing goal.
-  if (session.nativeGoal) {
-    return (
-      <div className="goal pad">
-        <p className="muted small">
-          <code>/{session.nativeGoal}</code> belongs to {HARNESS_BY_ID[session.config.harness].name} in this session. Typing it in the composer sends the command straight to the harness, which keeps its own goal state — the app's goal engine stays out of the way.
-        </p>
-        <p className="muted small">Turn off <strong>Prefer a harness's own /goal</strong> under Settings → Goal defaults to give the command back to the app.</p>
-      </div>
-    );
-  }
+  if (session.nativeGoal) return <NativeGoalTab session={session} />;
   return (
     <div className="goal pad">
       <p className="muted small">A goal keeps the session working until the agent proves completion (it must end a reply with <code>GOAL_COMPLETE</code>) or the iteration guard stops it. Modeled on Codex's <code>/goal</code>, available for every harness.</p>
@@ -424,6 +417,84 @@ function GoalTab({ session }: { session: SessionMeta }) {
         {g && g.status !== 'complete' && <Button icon="check" onClick={() => act('complete')}>Mark complete</Button>}
         {g && <Button variant="ghost" icon="trash" onClick={() => act('clear')}>Clear</Button>}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The Goal panel for a session whose harness answers `/goal` itself. The harness keeps its goal state
+ * to itself, so the panel shows what the app does own: the goal commands this session sent, read back
+ * out of the transcript (the creation kickoff and every composer send both land there as a user item),
+ * and the harness's own answer to the latest one. No controls — the app runs no goal here.
+ */
+function NativeGoalTab({ session }: { session: SessionMeta }) {
+  const command = session.nativeGoal as string;
+  const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
+  // The transcript arrives on an async load, so on first paint it is empty for a session that does
+  // have goal commands. Claiming "none sent yet" then would state something the panel cannot know.
+  const loaded = useStore((s) => s.loaded[session.id] === true);
+  const sent = useMemo(() => nativeGoalCommands(items, command), [items, command]);
+  const latest = sent[sent.length - 1];
+  const at = useMemo(() => (latest ? items.findIndex((i) => i.id === latest.id) : -1), [items, latest]);
+  // Everything the agent has said since the command, as the goal loop works through it.
+  const replies = useMemo(() => (at < 0 ? 0 : items.slice(at + 1).filter((i) => i.kind === 'assistant').length), [items, at]);
+  // The harness states its goal — status, budget, what it will do next — in the conversation, so its
+  // answer to the command is the one place that state reaches the app. Quote the run of messages
+  // before the user speaks again; never parse another tool's prose for a status of our own.
+  const reply = useMemo(() => {
+    if (at < 0) return null;
+    for (let i = at + 1; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'user') break;
+      if (item.kind === 'assistant' && item.text.trim()) return item.text.trim();
+    }
+    return null;
+  }, [items, at]);
+  const busy = session.status === 'running' || session.status === 'awaiting' || session.status === 'starting';
+  const line = (c: { command: string; argument: string }) => `${c.command}${c.argument ? ` ${c.argument}` : ''}`;
+  return (
+    <div className="goal pad">
+      <p className="muted small">
+        <code>/{command}</code> belongs to {HARNESS_BY_ID[session.config.harness].name} in this session. Typing it in the composer sends the command straight to the harness, which keeps its own goal state — the app's goal engine stays out of the way.
+      </p>
+      {!loaded ? (
+        <Spinner />
+      ) : !latest ? (
+        <p className="muted small">
+          No <code>/{command}</code> command sent in this session yet.
+        </p>
+      ) : (
+        <>
+          <Field label="Current goal">
+            <div className="mono">{line(latest)}</div>
+          </Field>
+          <p className="muted small">
+            Sent {relTime(latest.ts)} · {replies} agent {replies === 1 ? 'reply' : 'replies'} since{busy ? ' · working on it now' : ''}
+          </p>
+          {reply && (
+            <div className="callout" title={reply}>
+              {clamp(reply, 400)}
+            </div>
+          )}
+          {sent.length > 1 && (
+            <>
+              <div className="muted small">Earlier</div>
+              {sent
+                .slice(0, -1)
+                .reverse()
+                .map((c) => (
+                  <div key={c.id} className="row gap8">
+                    <span className="file-path mono" title={line(c)}>
+                      {line(c)}
+                    </span>
+                    <span className="muted small">{relTime(c.ts)}</span>
+                  </div>
+                ))}
+            </>
+          )}
+        </>
+      )}
+      <p className="muted small">Turn off <strong>Prefer a harness's own /goal</strong> under Settings → Goal defaults to give the command back to the app.</p>
     </div>
   );
 }

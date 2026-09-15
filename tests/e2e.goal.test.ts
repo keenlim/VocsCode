@@ -1,8 +1,9 @@
 /**
  * Electron end-to-end for the delegated goal: a session whose harness owns `/goal` shows who has the
- * command in the Goal panel instead of the app's own controls, while an ordinary session keeps them.
- * Two sessions are seeded on disk, so the whole thing is driven through the real UI with no harness
- * and no provider key. Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
+ * command in the Goal panel — plus the goal commands the session actually sent, read back out of its
+ * transcript — instead of the app's own controls, while an ordinary session keeps them. Two sessions
+ * are seeded on disk, so the whole thing is driven through the real UI with no harness and no provider
+ * key. Requires `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -10,7 +11,7 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import type { SessionMeta } from '../src/shared/types';
+import type { SessionMeta, TranscriptItem } from '../src/shared/types';
 import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
@@ -53,6 +54,14 @@ describe.runIf(enabled)('electron e2e: delegated /goal', () => {
         session('s_goal_app', 'App goal', { config: { harness: 'native', projectRoot: project, permissionMode: 'ask' }, cwd: project, goal: { objective: 'ship it', status: 'active', createdAt: T, updatedAt: T, iterations: 0, maxIterations: 25, autoContinue: true } })
       ])
     );
+    // The harness keeps its own goal state, so the panel's only source is the transcript the app owns:
+    // the goal command the session sent, and what the harness answered.
+    const transcript: TranscriptItem[] = [
+      { id: 'u_goal', kind: 'user', ts: T, text: '/goal ship the release by Friday' },
+      { id: 'a_goal', kind: 'assistant', ts: T + 1, text: 'Goal set. Status: active.' }
+    ];
+    await fs.mkdir(path.join(userData, 'sessions', 's_goal_native'), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', 's_goal_native', 'transcript.jsonl'), transcript.map((i) => JSON.stringify(i)).join('\n') + '\n');
 
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
@@ -70,12 +79,19 @@ describe.runIf(enabled)('electron e2e: delegated /goal', () => {
     await panel.waitFor({ timeout: 30_000 });
 
     // The harness owns the command: say so, and offer nothing that would start a second goal.
-    expect(await panel.innerText()).toContain('belongs to Claude Agent SDK');
-    expect(await panel.innerText()).toContain('Settings → Goal defaults');
+    const text = await panel.innerText();
+    expect(text).toContain('belongs to Claude Agent SDK');
+    expect(text).toContain('Settings → Goal defaults');
     expect(await panel.locator('textarea').count()).toBe(0);
     expect(await panel.getByText('Set goal').count()).toBe(0);
     expect(await panel.getByText('Restart goal').count()).toBe(0);
     expect(await panel.getByText('Iteration guard').count()).toBe(0);
+
+    // And it shows the goal the session sent, with the harness's own answer to it — the state the
+    // harness keeps to itself reaches the app only as transcript text, and that is what is quoted.
+    expect(text).toContain('/goal ship the release by Friday');
+    expect(text).toContain('Goal set. Status: active.');
+    expect(text).toContain('Current goal');
 
     // The other session is unchanged: the app's own goal, with its controls (its seeded goal is
     // active, so the primary button offers a restart rather than a first set).
