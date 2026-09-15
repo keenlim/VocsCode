@@ -14,7 +14,7 @@ const invokeMock = vi.fn();
   on: vi.fn().mockReturnValue(() => undefined)
 };
 
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { useStore } from '../src/renderer/src/store';
 import type { GitBranchOverview, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, SessionMeta } from '../src/shared/types';
@@ -32,6 +32,10 @@ const session = (status: SessionMeta['status'] = 'idle'): SessionMeta => ({
 });
 
 const OVERVIEW: GitBranchOverview = { isRepo: true, base: 'develop', branches: [{ name: 'develop', current: true, isBase: true, merged: false }], worktrees: [] };
+/** The overview the panel reads; tests swap it to model a server-side change between refreshes. */
+let overview: GitBranchOverview = OVERVIEW;
+/** The repo's setup status, which carries the origin URL the housekeeping menu links to. */
+let setupStatus: Record<string, unknown> = {};
 const pr = (n: number, state: GitPullRequest['state'] = 'OPEN'): GitPullRequest => ({ number: n, title: `PR ${n}`, state, url: `https://github.com/o/r/pull/${n}` });
 const issue = (n: number): GitIssue => ({ number: n, title: `Issue ${n}`, state: 'OPEN', url: `https://github.com/o/r/issues/${n}` });
 
@@ -45,12 +49,15 @@ beforeEach(() => {
   prs = [];
   issues = [];
   failPrs = false;
+  overview = OVERVIEW;
+  setupStatus = {};
   useStore.setState({ panelTab: 'branches', toasts: [] });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
-    if (channel === 'git:branchesOverview') return Promise.resolve(OVERVIEW);
+    if (channel === 'git:branchesOverview') return Promise.resolve(overview);
     if (channel === 'git:pullRequests') return failPrs ? Promise.reject(new Error('gh exploded')) : Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
     if (channel === 'git:issues') return Promise.resolve({ issues: [...issues], fetchedAt: Date.now() } satisfies GitIssueList);
+    if (channel === 'git:setupStatus') return Promise.resolve(setupStatus);
     return Promise.resolve({});
   });
 });
@@ -131,6 +138,68 @@ describe('Git panel background refresh', () => {
     });
     expect(prTab().textContent).toContain('1');
     expect(useStore.getState().toasts).toHaveLength(0);
+  });
+
+  it('re-syncs remote refs on Refresh, and only on Refresh', async () => {
+    render(<RightPanel session={session()} />);
+    await act(async () => {});
+    // Opening the tab reads local state: no network on mount, and none on the minute tick either.
+    expect(calls('git:fetchPrune')).toBe(0);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(calls('git:branchesOverview')).toBe(2);
+    expect(calls('git:fetchPrune')).toBe(0);
+
+    // The refresh button is what reaches the remote, and it must do so before re-reading the list —
+    // without the prune, a branch deleted on the server keeps its stale ref and the read changes nothing.
+    await act(async () => {
+      fireEvent.click(screen.getByTitle(/^Refresh/));
+    });
+    const order = invokeMock.mock.calls.map(([c]) => c as string);
+    expect(order.indexOf('git:fetchPrune')).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf('git:fetchPrune')).toBeLessThan(order.lastIndexOf('git:branchesOverview'));
+    expect(calls('git:branchesOverview')).toBe(3);
+  });
+
+  it('marks a branch deleted on the server instead of reading as live', async () => {
+    overview = {
+      isRepo: true,
+      base: 'develop',
+      branches: [
+        { name: 'develop', current: true, isBase: true, merged: false },
+        { name: 'feature/widget', current: false, isBase: false, merged: false, upstream: 'origin/feature/widget' },
+        { name: 'feature/ghost', current: false, isBase: false, merged: false, upstream: 'origin/feature/ghost', upstreamGone: true }
+      ],
+      worktrees: []
+    };
+    render(<RightPanel session={session()} />);
+    await act(async () => {});
+
+    const gone = screen.getByText('Deleted on origin').closest('.branch-row')!;
+    expect(gone.textContent).toContain('feature/ghost');
+    expect(gone.textContent).not.toContain('synced');
+    const live = screen.getByText('feature/widget').closest('.branch-row')!;
+    expect(live.textContent).toContain('synced');
+    expect(live.textContent).not.toContain('Deleted on origin');
+  });
+
+  it('offers the server-side branch list from the housekeeping menu', async () => {
+    setupStatus = {
+      isRepo: true,
+      hasCommits: true,
+      published: true,
+      pushed: true,
+      remote: 'https://github.com/acme/repo.git',
+      identity: { name: 'e2e', email: 'e2e@example.com' },
+      gh: { installed: true, authenticated: true }
+    };
+    render(<RightPanel session={session()} />);
+    await act(async () => {});
+
+    fireEvent.click(screen.getByTitle('Housekeeping'));
+    fireEvent.click(screen.getByText('Open branches on GitHub'));
+    expect(invokeMock).toHaveBeenCalledWith('app:openExternal', { url: 'https://github.com/acme/repo/branches' });
   });
 
   it('stops polling when the panel unmounts', async () => {

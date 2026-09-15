@@ -186,6 +186,27 @@ describe('gitBranchesOverview', () => {
     ]);
   });
 
+  it('flags a branch whose upstream was deleted on the server', async () => {
+    runCapture.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === 'rev-parse') return { code: 0, stdout: 'C:/repo', stderr: '' };
+      if (args[0] === 'worktree') return { code: 0, stdout: 'worktree C:/repo\nbranch refs/heads/develop\n', stderr: '' };
+      if (args[0] === 'for-each-ref') {
+        return { code: 0, stderr: '', stdout: 'develop\t1700000000\tBase\torigin/develop\t\nghost\t1690000000\tOld work\torigin/ghost\t[gone]\nlive\t1701000000\tWork\torigin/live\t[ahead 2]' };
+      }
+      if (args[0] === 'rev-list') return { code: 0, stdout: '9\t0\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const overview = await gitBranchesOverview('C:/repo');
+    const byName = new Map(overview.branches.map((b) => [b.name, b]));
+    // The local ref outlives a server-side delete, so the row stays — but it must not read as live.
+    expect(byName.get('ghost')).toMatchObject({ upstream: 'origin/ghost', upstreamGone: true });
+    expect(byName.get('ghost')!.upstreamAhead).toBeUndefined();
+    expect(byName.get('ghost')!.upstreamBehind).toBeUndefined();
+    // A branch with an upstream that is still there is not flagged.
+    expect(byName.get('live')!.upstreamGone).toBeUndefined();
+    expect(byName.get('live')!.upstreamAhead).toBe(2);
+  });
+
   it('attaches GitHub PR state when gh is available', async () => {
     which.mockImplementation((cmd: string) => (cmd === 'git' ? GIT : cmd === 'gh' ? '/usr/bin/gh' : null));
     gitReply(['rev-parse', '--show-toplevel'], { code: 0, stdout: 'C:/repo' });

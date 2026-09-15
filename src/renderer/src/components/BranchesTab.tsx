@@ -5,7 +5,7 @@ import { invoke } from '../api';
 import { basename, relTime } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore } from '../store';
-import { GitSetup } from './GitSetup';
+import { GitSetup, remoteWebUrl } from './GitSetup';
 import { askConfirm, askPrompt, Badge, Button, Dropdown, Icon, MenuItem, Modal, Spinner } from './ui';
 
 /** Branches untouched for this long land in the Stale filter. */
@@ -86,9 +86,26 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
   /** Previous turn status, so the panel can refresh once a turn ends (the app-level "git hook"). */
   const prevStatus = useRef(session.status);
 
-  /** `background` refreshes stay silent: no spinner and no toast, so a transient gh failure leaves the last list on screen. */
-  const refresh = async (opts: { background?: boolean } = {}) => {
+  /**
+   * `background` refreshes stay silent: no spinner and no toast, so a transient gh failure leaves the last list on screen.
+   * `remote` re-syncs remote-tracking refs first (`fetch --prune`). The list is the repo's LOCAL branches, which a
+   * server-side delete never touches: without the prune, a branch deleted on GitHub keeps its stale `origin/<name>`
+   * ref and reads as live, so re-reading alone looks like a refresh that did nothing. Only an explicit refresh pays
+   * for the round trip; the minute poll stays local.
+   */
+  const refresh = async (opts: { background?: boolean; remote?: boolean } = {}) => {
     const sid = session.id;
+    if (opts.remote) {
+      try {
+        const f = await invoke('git:fetchPrune', { sessionId: sid });
+        if (liveId.current !== sid) return;
+        // The branch list is still worth showing, so a failed fetch reports itself instead of aborting the refresh.
+        if (!f.ok) toast(f.output || 'Could not reach the remote — showing local branch state.', 'error');
+      } catch (e) {
+        if (liveId.current !== sid) return;
+        toast(String((e as Error).message ?? e), 'error');
+      }
+    }
     try {
       const r = await invoke('git:branchesOverview', { sessionId: sid });
       if (liveId.current === sid) setData(r);
@@ -414,8 +431,22 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           {(close) => {
             const root = setup?.mainRoot ?? setup?.root ?? session.cwd;
             const skipped = useStore.getState().settings?.gitSetupSkipped ?? [];
+            // The panel lists this checkout's branches; the server's own list is the cross-check, so keep
+            // a way out of the app within reach of the list it disagrees with.
+            const repoUrl = setup?.remote ? remoteWebUrl(setup.remote) : undefined;
             return (
               <>
+                {repoUrl && (
+                  <MenuItem
+                    onClick={() => {
+                      close();
+                      void invoke('app:openExternal', { url: `${repoUrl}/branches` });
+                    }}
+                    hint={repoUrl.replace(/^https?:\/\//, '')}
+                  >
+                    Open branches on GitHub
+                  </MenuItem>
+                )}
                 {setup?.isRepo && !setup.published && skipped.includes(root) && (
                   <MenuItem
                     onClick={() => {
@@ -456,11 +487,11 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           disabled={prLoading || issueLoading}
           onClick={() => {
             lastPollAt.current = Date.now();
-            void refresh();
+            void refresh({ remote: true });
             void refreshPrs();
             void refreshIssues();
           }}
-          title={view === 'prs' ? 'Pull the PR list from GitHub again' : view === 'issues' ? 'Pull the issue list from GitHub again' : 'Refresh'}
+          title={view === 'prs' ? 'Pull the PR list from GitHub again' : view === 'issues' ? 'Pull the issue list from GitHub again' : 'Refresh — re-syncs with the remote, then re-reads the branch list'}
         />
       </div>
 
@@ -647,6 +678,11 @@ function BranchRow({
         )}
       </span>
       <span className="branch-status">
+        {b.upstreamGone && (
+          <Badge tone="red" title={`${b.upstream} is gone from the server — this branch exists only in this checkout. Its work is not lost; delete it here when it is merged.`}>
+            Deleted on origin
+          </Badge>
+        )}
         {pr ? (
           <Badge
             tone={pr.state === 'OPEN' ? 'blue' : pr.state === 'MERGED' ? 'purple' : 'neutral'}
@@ -661,7 +697,7 @@ function BranchRow({
         )}
         {b.upstream && b.upstreamBehind !== undefined && <span className="muted small" title={`Behind ${b.upstream}`}>↓{b.upstreamBehind}</span>}
         {b.upstream && b.upstreamAhead !== undefined && <span className="muted small" title={`Ahead of ${b.upstream}`}>↑{b.upstreamAhead}</span>}
-        {b.upstream && b.upstreamAhead === undefined && b.upstreamBehind === undefined && <span className="muted small" title={b.upstream}>synced</span>}
+        {b.upstream && !b.upstreamGone && b.upstreamAhead === undefined && b.upstreamBehind === undefined && <span className="muted small" title={b.upstream}>synced</span>}
       </span>
       <div className="branch-actions">
         <span className="branch-inline">
