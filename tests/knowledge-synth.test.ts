@@ -1,4 +1,4 @@
-/** The knowledge jobs: bootstrap drafts from real docs, distillation proposals from episodes. */
+/** The knowledge jobs: the recursive incremental docs scan, distillation and PR reflection. */
 import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
@@ -56,49 +56,92 @@ describe('salvageArrayEntries', () => {
 });
 
 describe('bootstrapKnowledge', () => {
-  it('turns project docs into draft pages with file provenance', async () => {
+  it('scans markdown recursively (skipping vendor trees) and ingests pages immediately', async () => {
     const projectRoot = tmpDir('vocs-synth-');
     await fs.writeFile(path.join(projectRoot, 'README.md'), '# Demo\n\nA demo project with a main process and a renderer. The main process owns privileged work, and the renderer talks to it through a narrow typed bridge; nothing in the UI layer touches Node APIs directly, which is what keeps the sandbox honest.\n', 'utf8');
-    await fs.mkdir(path.join(projectRoot, 'docs'), { recursive: true });
-    await fs.writeFile(path.join(projectRoot, 'docs', 'ARCH.md'), '# Architecture\n\nThe main process owns state and lifecycle. Renderer views subscribe to pushed events and keep no durable state of their own; every mutation goes through an IPC channel with a validated payload.\n', 'utf8');
+    await fs.mkdir(path.join(projectRoot, 'docs', 'deep'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, 'docs', 'deep', 'ARCH.md'), '# Architecture\n\nThe main process owns state and lifecycle. Renderer views subscribe to pushed events and keep no durable state of their own; every mutation goes through an IPC channel with a validated payload.\n', 'utf8');
+    await fs.mkdir(path.join(projectRoot, 'node_modules', 'pkg'), { recursive: true });
+    await fs.writeFile(path.join(projectRoot, 'node_modules', 'pkg', 'README.md'), '# Vendor\n\nThis must never be scanned into the wiki.\n', 'utf8');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const store = new KnowledgeStore();
+    const prompts: string[] = [];
     const completer = {
       label: () => 'test/model',
-      complete: async () => JSON.stringify({
-        pages: [
-          {
-            title: 'Process split',
-            kind: 'architecture',
-            claim: 'All privileged work happens in the main process.',
-            body: '## Intent\n\nThe renderer never touches Node directly, which keeps the trust boundary in one place and lets the UI stay sandboxed.',
-            keywords: ['main process', 'renderer'],
-            sources: [{ type: 'doc', ref: 'docs/ARCH.md' }],
-            anchors: [{ file: 'src/main/index.ts' }]
-          },
-          { title: 'Too short', kind: 'concept', body: 'nope' }
-        ]
-      })
+      complete: async (req: { prompt: string }) => {
+        prompts.push(req.prompt);
+        return JSON.stringify({
+          pages: [
+            {
+              title: 'Process split',
+              kind: 'architecture',
+              claim: 'All privileged work happens in the main process.',
+              body: '## Intent\n\nThe renderer never touches Node directly, which keeps the trust boundary in one place and lets the UI stay sandboxed.',
+              labels: ['Architecture', 'renderer'],
+              keywords: ['main process', 'renderer'],
+              sources: [{ type: 'doc', ref: 'docs/deep/ARCH.md' }],
+              anchors: [{ file: 'src/main/index.ts' }]
+            },
+            { title: 'Too short', kind: 'concept', body: 'nope' }
+          ]
+        });
+      }
     };
     const result = await bootstrapKnowledge(scope, deps({ store, completer }));
     expect(result.ok).toBe(true);
     const pages = await store.load(scope);
     expect(pages).toHaveLength(1);
-    expect(pages[0].meta.status).toBe('draft');
+    expect(pages[0].meta.status).toBe('current');
+    expect(pages[0].meta.updatedBy).toBe('agent:bootstrap');
     expect(pages[0].meta.kind).toBe('architecture');
     expect(pages[0].meta.scope).toBe('repo');
-    expect(pages[0].meta.sources).toEqual([{ type: 'doc', ref: 'docs/ARCH.md' }]);
+    expect(pages[0].meta.labels).toEqual(['architecture', 'renderer']);
+    expect(pages[0].meta.sources).toEqual([{ type: 'doc', ref: 'docs/deep/ARCH.md' }]);
     expect(pages[0].meta.anchors).toEqual([{ file: 'src/main/index.ts' }]);
     expect(pages[0].body).toContain('trust boundary');
+    const seen = prompts.join('\n');
+    expect(seen).toContain('docs/deep/ARCH.md');
+    expect(seen).not.toContain('node_modules');
   });
 
-  it('refuses to guess when there is nothing to read', async () => {
+  it('is incremental: a second run with unchanged documents does not call the model again', async () => {
+    const projectRoot = tmpDir('vocs-synth-');
+    await fs.writeFile(path.join(projectRoot, 'README.md'), `# Demo\n\n${'The main process owns state and the renderer keeps none of it. '.repeat(12)}\n`, 'utf8');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    let calls = 0;
+    const completer = {
+      label: () => 'x',
+      complete: async () => {
+        calls++;
+        return JSON.stringify({ pages: [{ title: 'Process split', kind: 'architecture', claim: 'The main process owns state.', body: 'The renderer keeps no durable state of its own; every mutation crosses one validated IPC channel and nothing in the UI touches Node directly.' }] });
+      }
+    };
+    expect((await bootstrapKnowledge(scope, deps({ store, completer }))).ok).toBe(true);
+    expect(calls).toBe(1);
+    const second = await bootstrapKnowledge(scope, deps({ store, completer }));
+    expect(second.ok).toBe(true);
+    expect(second.detail).toContain('no changed documentation');
+    expect(calls).toBe(1);
+  });
+
+  it('reports a failure when the model returns nothing usable', async () => {
+    const projectRoot = tmpDir('vocs-synth-');
+    await fs.writeFile(path.join(projectRoot, 'README.md'), `# Demo\n\n${'The main process owns state and the renderer keeps none of it. '.repeat(12)}\n`, 'utf8');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const result = await bootstrapKnowledge(scope, deps({ store, completer: { label: () => 'x', complete: async () => 'no json at all' } }));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('no usable pages');
+  });
+
+  it('does nothing when there are no documents', async () => {
     const projectRoot = tmpDir('vocs-synth-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const store = new KnowledgeStore();
     const result = await bootstrapKnowledge(scope, deps({ store, completer: { label: () => 'x', complete: async () => '{}' } }));
-    expect(result.ok).toBe(false);
-    expect(result.error).toContain('Not enough project documentation');
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain('no changed documentation');
   });
 
   it('keeps the pages a truncated reply did write', async () => {
@@ -132,6 +175,7 @@ describe('distillKnowledge', () => {
       scope: 'repo',
       claim: 'A harness belongs to one session.',
       keywords: [],
+      labels: [],
       sources: [],
       anchors: [],
       related: [],
@@ -160,10 +204,66 @@ describe('distillKnowledge', () => {
       })
     );
     expect(result.ok).toBe(true);
-    expect(result.detail).toContain('proposed 1');
+    expect(result.detail).toContain('recorded 1');
     expect(proposed).toHaveLength(1);
     expect(proposed[0].title).toBe('PTY guard');
     expect(proposed[0].kind).toBe('gotcha');
+  });
+
+  it('reflects a PR episode and its diff over the whole wiki', async () => {
+    const projectRoot = tmpDir('vocs-synth-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    await store.write(
+      scope,
+      {
+        id: 'architecture/process-split',
+        title: 'Process split',
+        kind: 'architecture',
+        status: 'current',
+        scope: 'repo',
+        claim: 'The main process owns state.',
+        keywords: [],
+        labels: ['architecture'],
+        sources: [],
+        anchors: [],
+        related: [],
+        supersedes: [],
+        contradicts: []
+      },
+      'body'
+    );
+    await store.appendEpisode(scope, {
+      kind: 'pr',
+      sessionId: 's1',
+      at: '2026-09-14T10:00:00.000Z',
+      summary: 'PR into develop',
+      detail: 'Commits:\nabc123 Add a PTY guard\n\nDiff:\n+ guard the reconnect'
+    });
+    const proposed: KnowledgeProposalInput[] = [];
+    const result = await distillKnowledge(
+      scope,
+      deps({
+        store,
+        propose: async (input) => {
+          proposed.push(input);
+          return { promoted: true, rejected: false };
+        },
+        completer: {
+          label: () => 'x',
+          complete: async (req) => {
+            expect(req.prompt).toContain('Commits:');
+            expect(req.prompt).toContain('abc123');
+            expect(req.prompt).toContain('architecture/process-split');
+            return JSON.stringify({ proposals: [{ title: 'Process split', pageId: 'architecture/process-split', claim: 'The main process owns state and the guard.', body: 'Updated body.' }] });
+          }
+        }
+      }),
+      { mode: 'reflect' }
+    );
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain('reflected 1');
+    expect(proposed[0].pageId).toBe('architecture/process-split');
   });
 
   it('reports nothing to do without episodes', async () => {

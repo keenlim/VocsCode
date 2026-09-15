@@ -8,8 +8,10 @@
  * no database, no network, no Electron.
  *
  * Tools are deliberately pull-based and narrow — search, read, related, propose, status — because
- * a wiki that is pasted into every prompt is just context bloat. `propose` writes a proposal file
- * and nothing else; accepting or rejecting one is a human decision in the app.
+ * a wiki that is pasted into every prompt is just context bloat. `propose` writes durable knowledge
+ * straight into the wiki (status: current, updated_by: agent:mcp); a claim tombstoned in
+ * `_rejected.json` is refused instead. Pages carry labels, and retrieval walks the relation graph
+ * derived from related / supersedes / contradicts / wikilinks / shared anchors / shared labels.
  *
  * The frontmatter subset here must stay in lockstep with src/shared/knowledge.ts. That pairing is
  * covered by tests/knowledge-mcp.test.ts, which writes with one side and reads with the other.
@@ -22,6 +24,12 @@ const MAX_SNIPPET = 220;
 const MAX_QUERY_TERMS = 8;
 /** One chatty session must not drown the rest of the project's history. */
 const MAX_SESSION_HITS = 3;
+/** Retrieval walks the relation graph out from this many strongest lexical matches. */
+const MAX_SEARCH_SEEDS = 8;
+const GRAPH_HOPS = 2;
+const GRAPH_DECAY = 0.5;
+/** A page id must survive the app's isKnowledgeId check, or the store never reads the page back. */
+const ID_RE = /^[a-z0-9][a-z0-9/_-]*$/;
 
 /** Mirrors src/shared/analytics/text.ts: nothing read out of a transcript is served raw. */
 const SECRET_PATTERNS = [
@@ -139,6 +147,29 @@ function list(value, cap = 12) {
   return typeof value === 'string' && value.trim() ? [value.trim()] : [];
 }
 
+/** Mirrors normalizeLabel in src/shared/knowledge.ts: `Auth & Security` → `auth-security`. */
+function normalizeLabel(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+function normalizeLabels(values) {
+  const out = new Set();
+  for (const value of values) {
+    const label = normalizeLabel(value);
+    if (label) out.add(label);
+    if (out.size >= 24) break;
+  }
+  return [...out];
+}
+
+function isValidPageId(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 160 && ID_RE.test(value);
+}
+
 function sourcesOf(raw) {
   if (!Array.isArray(raw.sources)) return [];
   const out = [];
@@ -183,11 +214,14 @@ function toPage(text, abs) {
     claim: typeof raw.claim === 'string' ? raw.claim : undefined,
     confidence: typeof raw.confidence === 'string' ? raw.confidence : undefined,
     keywords: list(raw.keywords),
+    labels: normalizeLabels(list(raw.labels, 24)),
     sources: sourcesOf(raw),
     anchors: anchorsOf(raw),
     related: list(raw.related),
     supersedes: list(raw.supersedes),
+    contradicts: list(raw.contradicts),
     supersededBy: typeof raw.superseded_by === 'string' ? raw.superseded_by : undefined,
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : undefined,
     updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
     updatedBy: typeof raw.updated_by === 'string' ? raw.updated_by : undefined,
     reviewState: typeof raw.review_state === 'string' ? raw.review_state : undefined,
@@ -292,7 +326,7 @@ function snippet(body, terms) {
   return `${start > 0 ? '…' : ''}${flat.slice(start, at)}\u0001${flat.slice(at, at + term.length)}\u0002${flat.slice(at + term.length, end)}${end < flat.length ? '…' : ''}`;
 }
 
-export function searchPages(pages, query, { limit = 12, includeHistorical = false } = {}) {
+export function searchPages(pages, query, { limit = 12, includeHistorical = false, graph } = {}) {
   const terms = tokenize(query);
   if (!terms.length) return [];
   const out = [];
@@ -311,10 +345,24 @@ export function searchPages(pages, query, { limit = 12, includeHistorical = fals
     if (page.status === 'uncertain') score -= 1;
     out.push({ page, score, snippet: snippet(page.body, terms) });
   }
+  const ranked = out.sort((a, b) => b.score - a.score);
+  // Graph-aware recall: a page linked to the strongest matches surfaces even when it shares no
+  // query terms, which is what labels and relations are for.
+  const boost = expandQuery(graph ?? buildGraph(pages), ranked.slice(0, MAX_SEARCH_SEEDS).map((r) => r.page.id), GRAPH_HOPS, GRAPH_DECAY);
+  if (boost.size) {
+    const matched = new Set(out.map((r) => r.page.id));
+    for (const [id, value] of boost) {
+      if (matched.has(id)) continue;
+      const page = pages.find((p) => p.id === id);
+      if (!page || (!includeHistorical && !servable(page))) continue;
+      out.push({ page, score: value * 4 + Math.max(0, 4 - authorityOf(page)) });
+    }
+  }
   return out.sort((a, b) => b.score - a.score).slice(0, Math.min(limit, 40));
 }
 
-function summaryOf({ page, score, snippet: text }) {
+function summaryOf({ page, score, snippet: text }, degrees) {
+  const degree = degrees?.get(page.id);
   return {
     id: page.id,
     title: page.title,
@@ -325,6 +373,8 @@ function summaryOf({ page, score, snippet: text }) {
     ...(page.branch ? { branch: page.branch } : {}),
     ...(page.claim ? { claim: page.claim } : {}),
     keywords: page.keywords,
+    labels: page.labels,
+    ...(degree !== undefined ? { degree } : {}),
     ...(page.updatedAt ? { updatedAt: page.updatedAt } : {}),
     ...(page.evidenceCount !== undefined ? { evidenceCount: page.evidenceCount } : {}),
     ...(text ? { snippet: text } : {}),
@@ -332,10 +382,99 @@ function summaryOf({ page, score, snippet: text }) {
   };
 }
 
-function relatedOf(pages, page) {
-  const ids = new Set(page.related);
-  for (const other of pages) if (other.related.includes(page.id) || new RegExp(`\\[\\[${page.id}(\\||\\]\\])`).test(other.body)) ids.add(other.id);
-  return pages.filter((p) => ids.has(p.id) && p.id !== page.id);
+/* ─────────────────────────── relation graph ────────────────────────────── */
+
+/** `[[page-id]]`, `[[page-id|label]]` and a relative markdown link are all edges. */
+function wikilinkIds(body) {
+  const out = [];
+  const wiki = /\[\[([a-z0-9][a-z0-9/_-]*)(?:\|[^\]]*)?\]\]/g;
+  let match;
+  while ((match = wiki.exec(body))) out.push(match[1]);
+  const markdown = /\]\(\.?\/?([a-z0-9][a-z0-9/_-]*)\.md\)/g;
+  while ((match = markdown.exec(body))) out.push(match[1]);
+  return out;
+}
+
+/** Links every member of a group to its next few peers, so a popular label stays cheap. */
+function groupEdges(ids, type, weight, add) {
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i++) {
+    for (let j = i + 1; j < unique.length && j <= i + 8; j++) add(unique[i], unique[j], type, weight);
+  }
+}
+
+/** Mirrors buildKnowledgeGraph in src/shared/knowledge.ts over the flat page shape used here. */
+export function buildGraph(pages) {
+  const known = new Set(pages.map((p) => p.id));
+  const edges = new Map();
+  const add = (from, to, type, weight) => {
+    if (from === to || !known.has(from) || !known.has(to)) return;
+    const key = `${from}\u0000${to}\u0000${type}`;
+    const existing = edges.get(key);
+    if (existing) existing.weight = Math.max(existing.weight, weight);
+    else edges.set(key, { from, to, type, weight });
+  };
+  const byAnchor = new Map();
+  const byLabel = new Map();
+  for (const page of pages) {
+    for (const id of page.related) add(page.id, id, 'related', 2);
+    for (const id of page.supersedes) add(page.id, id, 'supersedes', 3);
+    for (const id of page.contradicts) add(page.id, id, 'contradicts', 3);
+    for (const id of wikilinkIds(page.body)) add(page.id, id, 'link', 1);
+    for (const anchor of page.anchors) {
+      const key = anchor.file.replace(/\\/g, '/');
+      const group = byAnchor.get(key);
+      if (group) group.push(page.id);
+      else byAnchor.set(key, [page.id]);
+    }
+    for (const label of page.labels) {
+      const group = byLabel.get(label);
+      if (group) group.push(page.id);
+      else byLabel.set(label, [page.id]);
+    }
+  }
+  for (const ids of byAnchor.values()) groupEdges(ids, 'anchor', 1, add);
+  for (const ids of byLabel.values()) groupEdges(ids, 'label', 1, add);
+  const adjacency = new Map();
+  for (const edge of edges.values()) {
+    adjacency.set(edge.from, (adjacency.get(edge.from) ?? 0) + 1);
+    adjacency.set(edge.to, (adjacency.get(edge.to) ?? 0) + 1);
+  }
+  return {
+    builtAt: new Date().toISOString(),
+    nodes: pages.map((p) => ({ id: p.id, kind: p.kind, status: p.status, labels: p.labels, degree: adjacency.get(p.id) ?? 0 })),
+    edges: [...edges.values()]
+  };
+}
+
+/** Mirrors expandKnowledgeQuery: a BFS whose contribution decays with distance. */
+export function expandQuery(graph, seeds, hops = 2, decay = 0.5) {
+  const neighbours = new Map();
+  const push = (id, entry) => {
+    const group = neighbours.get(id);
+    if (group) group.push(entry);
+    else neighbours.set(id, [entry]);
+  };
+  for (const edge of graph.edges) {
+    push(edge.from, { id: edge.to, weight: edge.weight });
+    push(edge.to, { id: edge.from, weight: edge.weight });
+  }
+  const seen = new Set(seeds);
+  const boost = new Map();
+  let frontier = [...new Set(seeds)].filter((id) => neighbours.has(id));
+  for (let hop = 1; hop <= hops && frontier.length; hop++) {
+    const next = [];
+    for (const id of frontier) {
+      for (const { id: other, weight } of neighbours.get(id) ?? []) {
+        if (seen.has(other)) continue;
+        seen.add(other);
+        boost.set(other, (boost.get(other) ?? 0) + weight * decay ** (hop - 1));
+        next.push(other);
+      }
+    }
+    frontier = next;
+  }
+  return boost;
 }
 
 /* ────────────────────────────── proposing ──────────────────────────────── */
@@ -399,13 +538,67 @@ export function serializeProposal(meta, body) {
   return `${lines.join('\n')}${String(body).replace(/\s+$/, '')}\n`;
 }
 
+/** Keeps every distinct source/anchor when a page is updated rather than dropping the old ones. */
+function mergeSources(a, b) {
+  const out = [];
+  const seen = new Set();
+  for (const source of [...a, ...b]) {
+    const key = `${source.type}\u0000${source.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(source);
+  }
+  return out.slice(0, 24);
+}
+
+function mergeAnchors(a, b) {
+  const out = [];
+  const seen = new Set();
+  for (const anchor of [...a, ...b]) {
+    const key = `${anchor.file}\u0000${anchor.symbol ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(anchor);
+  }
+  return out.slice(0, 24);
+}
+
+/** Writes a current page the app's own parser reads back; `labels` is the graph's grouping key. */
+export function serializePage(meta, body) {
+  const lines = ['---', yamlLine('id', meta.id), yamlLine('title', meta.title), `kind: ${meta.kind}`, 'status: current', `scope: ${meta.scope}`];
+  if (meta.branch) lines.push(yamlLine('branch', meta.branch));
+  if (meta.confidence) lines.push(`confidence: ${meta.confidence}`);
+  if (meta.claim) lines.push(yamlLine('claim', meta.claim));
+  if (meta.keywords.length) lines.push(`keywords: [${meta.keywords.map((k) => quoteValue(k)).join(', ')}]`);
+  if (meta.labels.length) lines.push(`labels: [${meta.labels.map((l) => quoteValue(l)).join(', ')}]`);
+  if (meta.sources.length) {
+    lines.push('sources:');
+    for (const s of meta.sources) {
+      lines.push(`  - type: ${s.type}`, `    ref: ${quoteValue(s.ref)}`);
+      if (s.note) lines.push(`    note: ${quoteValue(s.note)}`);
+    }
+  }
+  if (meta.anchors.length) {
+    lines.push('anchors:');
+    for (const a of meta.anchors) {
+      lines.push(`  - file: ${quoteValue(a.file)}`);
+      if (a.symbol) lines.push(`    symbol: ${quoteValue(a.symbol)}`);
+    }
+  }
+  if (meta.related?.length) lines.push(`related: [${meta.related.map((v) => quoteValue(v)).join(', ')}]`);
+  if (meta.supersedes?.length) lines.push(`supersedes: [${meta.supersedes.map((v) => quoteValue(v)).join(', ')}]`);
+  if (meta.contradicts?.length) lines.push(`contradicts: [${meta.contradicts.map((v) => quoteValue(v)).join(', ')}]`);
+  lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.updatedAt}`, `updated_by: ${quoteValue(meta.updatedBy)}`, '---', '');
+  return `${lines.join('\n')}${String(body).replace(/\s+$/, '')}\n`;
+}
+
 /* ──────────────────────────────── tools ────────────────────────────────── */
 
 const TOOLS = [
   {
     name: 'knowledge_search',
     description:
-      'Search this project\'s curated knowledge wiki (architecture intent, decisions, conventions, gotchas, testing philosophy). Returns ranked page summaries with an id you can pass to knowledge_read. Use before assuming how this project is meant to work, and before changing an invariant.',
+      'Search this project\'s curated knowledge wiki (architecture intent, decisions, conventions, gotchas, testing philosophy). Returns ranked page summaries with an id you can pass to knowledge_read. Pages carry labels and retrieval walks their relation graph, so a page linked only by a label or anchor can surface even without matching every query term. Use before assuming how this project is meant to work, and before changing an invariant.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -424,13 +617,13 @@ const TOOLS = [
   },
   {
     name: 'knowledge_related',
-    description: 'Pages related to one page or anchor path, in either direction.',
+    description: 'Pages related to one page or anchor path, in either direction, with the edge that connects them (related, supersedes, contradicts, anchor, label or link).',
     inputSchema: { type: 'object', properties: { page: { type: 'string', description: 'Page id.' }, path: { type: 'string', description: 'Repo-relative file path an anchor names.' } }, additionalProperties: false }
   },
   {
     name: 'knowledge_propose',
     description:
-      'Propose durable project knowledge discovered while working (a convention, gotcha, decision or invariant). This does not edit the wiki: it files a proposal a human reviews. Only propose claims that stay true beyond the current task and are evidenced by files, a command output or a commit.',
+      'Record durable project knowledge discovered while working (a convention, gotcha, decision or invariant) in the project wiki. This writes immediately: nothing is queued for human review, so record only claims that stay true beyond the current task and are evidenced by files, a command output or a commit. A claim tombstoned in _rejected.json is refused.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -440,6 +633,7 @@ const TOOLS = [
         kind: { type: 'string', enum: KINDS },
         page_id: { type: 'string', description: 'Existing page id this updates, when there is one.' },
         keywords: { type: 'array', items: { type: 'string' } },
+        labels: { type: 'array', items: { type: 'string' }, description: 'Short normalized tags that group related pages, e.g. "pty" or "auth".' },
         sources: { type: 'array', items: { type: 'object', properties: { type: { type: 'string', enum: SOURCE_TYPES }, ref: { type: 'string' }, note: { type: 'string' } }, required: ['type', 'ref'] } },
         anchors: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, symbol: { type: 'string' } }, required: ['file'] } }
       },
@@ -449,7 +643,7 @@ const TOOLS = [
   },
   {
     name: 'knowledge_status',
-    description: 'How much curated knowledge this project has, what is awaiting review, and where the wiki lives.',
+    description: 'How much curated knowledge this project has, its labels and relation graph, and where the wiki lives.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
   },
   {
@@ -518,8 +712,10 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
     if (name === 'knowledge_search') {
       const query = typeof args.query === 'string' ? args.query : '';
       if (!query.trim()) return errorResult('knowledge_search needs a query.');
-      const results = searchPages(pages, query, { limit: Number(args.limit) || 12, includeHistorical: args.include_historical === true });
-      return textResult({ project: root, count: results.length, results: results.map(summaryOf) });
+      const graph = buildGraph(pages);
+      const degrees = new Map(graph.nodes.map((n) => [n.id, n.degree]));
+      const results = searchPages(pages, query, { limit: Number(args.limit) || 12, includeHistorical: args.include_historical === true, graph });
+      return textResult({ project: root, count: results.length, results: results.map((r) => summaryOf(r, degrees)) });
     }
     if (name === 'knowledge_read') {
       const id = typeof args.page === 'string' ? args.page : '';
@@ -535,6 +731,7 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
         ...(page.branch ? { branch: page.branch } : {}),
         ...(page.claim ? { claim: page.claim } : {}),
         keywords: page.keywords,
+        labels: page.labels,
         ...(page.updatedAt ? { updatedAt: page.updatedAt } : {}),
         ...(page.updatedBy ? { updatedBy: page.updatedBy } : {}),
         ...(page.evidenceCount !== undefined ? { evidenceCount: page.evidenceCount } : {}),
@@ -550,8 +747,21 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const matching = pathArg ? pages.filter((p) => p.anchors.some((a) => a.file.replace(/\\/g, '/') === pathArg) || p.sources.some((s) => s.ref.replace(/\\/g, '/') === pathArg)) : [];
       const base = explicit ?? matching[0];
       if (!base) return errorResult(`No page or anchor matched ${pathArg || '(no page given)'}.`);
-      const related = [...new Set([...relatedOf(pages, base), ...matching.filter((p) => p.id !== base.id)])];
-      return textResult({ page: base.id, related: related.map((p) => summaryOf({ page: p })) });
+      // Edges, not just the `related` field: a shared label or anchor connects two pages too.
+      const best = new Map();
+      for (const edge of buildGraph(pages).edges) {
+        if (edge.from !== base.id && edge.to !== base.id) continue;
+        const other = edge.from === base.id ? edge.to : edge.from;
+        if (other === base.id) continue;
+        const current = best.get(other);
+        if (!current || edge.weight > current.weight) best.set(other, edge);
+      }
+      const byId = new Map(pages.map((p) => [p.id, p]));
+      const related = [...best.entries()]
+        .filter(([id]) => byId.has(id))
+        .sort((a, b) => b[1].weight - a[1].weight)
+        .map(([id, edge]) => ({ id, title: byId.get(id).title, edge: edge.type }));
+      return textResult({ page: base.id, related });
     }
     if (name === 'knowledge_propose') {
       const fs = await import('node:fs/promises');
@@ -560,46 +770,72 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const claim = typeof args.claim === 'string' ? args.claim.trim() : '';
       const body = typeof args.body === 'string' ? args.body.trim() : '';
       if (!title || !claim || !body) return errorResult('knowledge_propose needs a title, a claim and a body.');
-      const kind = KINDS.includes(args.kind) ? args.kind : 'concept';
-      const targetPageId = typeof args.page_id === 'string' && args.page_id.trim() ? args.page_id.trim() : `${kind}/${slugify(title)}`;
-      const id = `${slugify(title).slice(0, 40)}-${claimKey(claim)}`;
-      const existing = pages.find((p) => p.id === targetPageId);
+      const requestedId = typeof args.page_id === 'string' && args.page_id.trim() ? args.page_id.trim() : '';
+      const claimHash = claimKey(claim);
+      // A rejected claim is tombstoned in the wiki root; refiling it changes nothing.
+      let rejected = null;
+      try {
+        const parsed = JSON.parse(await fs.readFile(path.join(root, '_rejected.json'), 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rejected = parsed;
+      } catch {
+        rejected = null;
+      }
+      if (rejected && rejected[claimHash]) {
+        return textResult({ id: '', targetPageId: '', status: 'rejected', saved: false, rejected: true, note: 'This claim was rejected before and is tombstoned in _rejected.json; nothing was written.' });
+      }
+      const byId = requestedId ? pages.find((p) => p.id === requestedId) : undefined;
+      // Updating the page the claim already lives on avoids a second file for the same statement.
+      const existing = byId ?? pages.find((p) => p.claim && claimKey(p.claim) === claimHash);
+      const kind = KINDS.includes(args.kind) ? args.kind : existing ? existing.kind : 'concept';
+      const targetPageId = requestedId && isValidPageId(requestedId) ? requestedId : existing ? existing.id : `${kind}/${slugify(title)}`;
+      if (!isValidPageId(targetPageId)) return errorResult(`"${targetPageId}" is not a usable page id.`);
+      const now = new Date().toISOString();
       const meta = {
-        id,
+        id: targetPageId,
         title,
         kind,
         scope: existing ? existing.scope : branchRoot ? 'branch' : 'repo',
-        ...(existing ? {} : branchRoot ? { branch } : {}),
+        ...(existing || !branchRoot || !branch ? {} : { branch }),
         claim,
-        targetPageId,
         keywords: list(args.keywords, 12),
-        sources: sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] }),
-        anchors: anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] }),
-        createdAt: new Date().toISOString(),
-        origin: `agent:mcp`
+        labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
+        sources: mergeSources(existing?.sources ?? [], sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] })),
+        anchors: mergeAnchors(existing?.anchors ?? [], anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] })),
+        related: existing?.related ?? [],
+        supersedes: existing?.supersedes ?? [],
+        contradicts: existing?.contradicts ?? [],
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        updatedBy: 'agent:mcp'
       };
-      const dir = path.join(root, '_proposals');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, `${id}.md`), serializeProposal(meta, body), 'utf8');
-      return textResult({ id, targetPageId, status: 'proposed', note: 'Recorded as a proposal; a human reviews it in the Knowledge panel. Nothing was changed in the wiki.' });
+      const file = path.join(root, `${targetPageId}.md`);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, serializePage(meta, body), 'utf8');
+      return textResult({ id: targetPageId, targetPageId, status: 'current', saved: true, note: 'Recorded in the project wiki automatically.' });
     }
     if (name === 'knowledge_status') {
       const fs = await import('node:fs/promises');
       const path = await import('node:path');
-      let proposalCount = 0;
+      // Legacy proposal files may still be on disk; nothing writes there any more.
+      let awaitingReview = 0;
       try {
-        proposalCount = (await fs.readdir(path.join(root, '_proposals'))).filter((f) => f.endsWith('.md')).length;
+        awaitingReview = (await fs.readdir(path.join(root, '_proposals'))).filter((f) => f.endsWith('.md')).length;
       } catch {
-        proposalCount = 0;
+        awaitingReview = 0;
       }
+      const graph = buildGraph(pages);
+      const labels = new Set();
+      for (const page of pages) for (const label of page.labels) labels.add(label);
       const servableCount = pages.filter(servable).length;
       return textResult({
         wikiDir: root,
         branchWikiDir: branchRoot ?? null,
         pages: pages.length,
         servable: servableCount,
-        awaitingReview: proposalCount,
-        toolHint: servableCount ? 'Use knowledge_search before changing an invariant.' : 'No accepted pages yet; proposals are queued for review.'
+        labels: labels.size,
+        graph: { nodes: graph.nodes.length, edges: graph.edges.length },
+        awaitingReview,
+        toolHint: servableCount ? 'Use knowledge_search before changing an invariant.' : 'No pages yet; knowledge_propose records durable findings in the wiki automatically.'
       });
     }
     if (name === 'session_history_search') {
@@ -688,7 +924,7 @@ export async function runMemoryServer({ input, output, root, branchRoot = null, 
         protocolVersion: params?.protocolVersion ?? '2024-11-05',
         capabilities: { tools: {} },
         serverInfo: { name: 'vocs-memory', version: '1.0.0' },
-        instructions: 'Curated project knowledge: what this project means, why it is built this way, what must stay true. Search it before changing invariants; propose durable findings with knowledge_propose.'
+        instructions: 'Curated project knowledge: what this project means, why it is built this way, what must stay true. Search it before changing invariants; record durable findings with knowledge_propose, which writes to the wiki automatically.'
       });
       return;
     }

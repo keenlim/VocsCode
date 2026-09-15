@@ -18,16 +18,20 @@ import path from 'node:path';
 import {
   KNOWLEDGE_BRANCHES_DIR,
   KNOWLEDGE_DIR,
+  KNOWLEDGE_GRAPH_FILE,
   KNOWLEDGE_OBSERVATIONS_DIR,
   KNOWLEDGE_PROPOSALS_DIR,
+  KNOWLEDGE_SCAN_FILE,
   branchSlug,
   claimKey,
   isKnowledgeId,
   isSameClaim,
+  normalizeLabels,
   pathForProposal,
   parseKnowledgeDocument,
   serializeKnowledgeDocument,
   type KnowledgeEpisode,
+  type KnowledgeGraph,
   type KnowledgeKind,
   type KnowledgePage,
   type KnowledgePageMeta,
@@ -106,6 +110,28 @@ export class KnowledgeStore {
 
   async hasWiki(scope: KnowledgeScope): Promise<boolean> {
     return exists(this.repoDir(scope));
+  }
+
+  /** A file's cheap identity, used to skip documents whose content has not changed since last scan. */
+  async readScan(scope: KnowledgeScope): Promise<Record<string, { mtimeMs: number; size: number }>> {
+    return readJson<Record<string, { mtimeMs: number; size: number }>>(path.join(this.repoDir(scope), KNOWLEDGE_SCAN_FILE), {});
+  }
+
+  async writeScan(scope: KnowledgeScope, ledger: Record<string, { mtimeMs: number; size: number }>): Promise<void> {
+    await this.ensureIgnored(scope);
+    await ensureDir(this.repoDir(scope));
+    await writeFileAtomic(path.join(this.repoDir(scope), KNOWLEDGE_SCAN_FILE), JSON.stringify(ledger, null, 2));
+  }
+
+  /** The last derived graph, or null when it has not been built yet. */
+  async readGraph(scope: KnowledgeScope): Promise<KnowledgeGraph | null> {
+    return readJson<KnowledgeGraph | null>(path.join(this.repoDir(scope), KNOWLEDGE_GRAPH_FILE), null);
+  }
+
+  async writeGraph(scope: KnowledgeScope, graph: KnowledgeGraph): Promise<void> {
+    await this.ensureIgnored(scope);
+    await ensureDir(this.repoDir(scope));
+    await writeFileAtomic(path.join(this.repoDir(scope), KNOWLEDGE_GRAPH_FILE), JSON.stringify(graph));
   }
 
   /** Repo pages, then branch pages overriding same-id entries: the merged view a session sees. */
@@ -415,6 +441,7 @@ export function proposalMeta(input: {
   scope: KnowledgePageScope;
   branch?: string;
   keywords?: string[];
+  labels?: string[];
   sources?: KnowledgeSource[];
   anchors?: KnowledgePageMeta['anchors'];
   related?: string[];
@@ -433,6 +460,7 @@ export function proposalMeta(input: {
     status: input.status ?? existing?.status ?? 'proposed',
     scope: input.scope,
     keywords: [...new Set([...(input.keywords ?? []), ...(existing?.keywords ?? [])])].slice(0, 24),
+    labels: normalizeLabels([...(input.labels ?? []), ...(existing?.labels ?? [])]),
     sources: dedupeSources([...(input.sources ?? []), ...(existing?.sources ?? [])]),
     anchors: dedupeAnchors([...(input.anchors ?? []), ...(existing?.anchors ?? [])]),
     related: [...new Set([...(input.related ?? []), ...(existing?.related ?? [])])],

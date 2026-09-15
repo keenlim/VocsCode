@@ -205,7 +205,11 @@ async function main(): Promise<void> {
     gitnexusProxyPath: runtime.resource('mcp', 'gitnexus-scope.mjs'),
     memoryServerPath: runtime.resource('mcp', 'vocs-memory.mjs'),
     memoryUserData: userData,
-    knowledgeDigest: (scope) => knowledge.digest(scope),
+    knowledgeDigest: (scope) => {
+      // Opening a session on a project with no wiki is the passive trigger for the first scan.
+      void knowledge.ensureSeeded(scope);
+      return knowledge.digest(scope);
+    },
     pushEvent: (env: SessionEventEnvelope) => {
       pushAll(PUSH_CHANNELS.sessionEvent, env);
       remoteMirror?.notify(env.sessionId);

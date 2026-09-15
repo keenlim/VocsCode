@@ -13,7 +13,7 @@ import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAge
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
@@ -710,7 +710,16 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (r.ok) deps.log('info', `[${sessionId}] PR opened${head ? ` for ${head}` : ''}: ${r.url ?? ''}`.trim());
     else deps.log('warn', `[${sessionId}] PR creation failed: ${(r.output ?? 'unknown error').trim().slice(0, 600)}`);
     if (r.ok) sessions.refreshGitState(sessionId);
-    if (r.ok) deps.knowledge?.recordEpisode(knowledgeScopeOf(sessionId), { kind: 'pr', sessionId, summary: `PR into ${base}${head ? ` from ${head}` : ''}`, detail: r.url, at: new Date().toISOString() });
+    if (r.ok) {
+      // PR reflection: the commits and a bounded patch are reflected over the whole wiki, then
+      // ingested automatically. Gathering evidence is best-effort; the PR itself already succeeded.
+      const evidence = await gitRangeEvidence(cwdOf(sessionId), base, head).catch(() => ({ commits: [], diff: '' }));
+      const detail = [r.url, evidence.commits.length ? `Commits:\n${evidence.commits.join('\n')}` : '', evidence.diff ? `Diff:\n${evidence.diff}` : '']
+        .filter(Boolean)
+        .join('\n\n')
+        .slice(0, 14_000);
+      void deps.knowledge?.reflectPr(knowledgeScopeOf(sessionId), { kind: 'pr', sessionId, summary: `PR into ${base}${head ? ` from ${head}` : ''}`, detail, at: new Date().toISOString() });
+    }
     return r;
   });
   handle('git:merge', async ({ sessionId, base, head }) => {
@@ -832,7 +841,7 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   handle('knowledge:generate', ({ sessionId, mode }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');
-    if (mode !== 'bootstrap' && mode !== 'distill') throw new Error('Unknown generation mode');
+    if (mode !== 'bootstrap' && mode !== 'distill' && mode !== 'reflect') throw new Error('Unknown generation mode');
     return k.generate(knowledgeScopeOf(sessionId), mode);
   });
   handle('knowledge:publish', ({ sessionId, ids }) => {
@@ -840,6 +849,19 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     const list = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string' && !!x).slice(0, 50) : [];
     return k.publish(knowledgeScopeOf(sessionId), list);
+  });
+  handle('knowledge:graph', ({ sessionId }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    return k.graph(knowledgeScopeOf(sessionId));
+  });
+  handle('knowledge:delete', async ({ sessionId, id }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    if (typeof id !== 'string' || !id) throw new Error('A page id is required');
+    const scope = knowledgeScopeOf(sessionId);
+    await k.remove(scope, id);
+    return k.view(scope);
   });
 
   handle('terminal:list', () => terminals.list());

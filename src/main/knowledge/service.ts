@@ -14,14 +14,15 @@ import type { AppSettings } from '../../shared/types';
 import {
   KNOWLEDGE_PUBLISH_DIR,
   authorityOf,
-  claimKey,
-  isSameClaim,
+  buildKnowledgeGraph,
+  expandKnowledgeQuery,
+  graphNeighbours,
   isServable,
-  knowledgeSlug,
   pathForProposal,
   renderKnowledgeDigest,
   serializeKnowledgeDocument,
   type KnowledgeEpisode,
+  type KnowledgeGraph,
   type KnowledgeJobState,
   type KnowledgePage,
   type KnowledgePageDetail,
@@ -69,6 +70,8 @@ export class KnowledgeService {
   readonly store: KnowledgeStore;
   private readonly deps: KnowledgeServiceDeps;
   private readonly jobs = new Map<string, Promise<KnowledgeJobResult>>();
+  /** Projects whose one passive bootstrap attempt has already been made this app run. */
+  private readonly seedAttempts = new Set<string>();
   /** Last job outcome per project; the panel shows it so a failure cannot vanish into a toast. */
   private readonly lastJobs = new Map<string, KnowledgeJobState>();
 
@@ -111,8 +114,9 @@ export class KnowledgeService {
     return {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
-      // A deprecated or superseded page is history, not a pending decision.
-      needsReview: pages.filter((p) => p.meta.status !== 'deprecated' && p.meta.status !== 'superseded' && (!p.meta.review || p.meta.review.state !== 'reviewed')).length,
+      // A deprecated or superseded page is history, not a pending decision. With ingestion
+      // automated, only pages still in a pre-current state are pending at all.
+      needsReview: pages.filter((p) => p.meta.status === 'draft' || p.meta.status === 'proposed').length,
       proposals: proposals.length,
       stale,
       indexed: false,
@@ -123,6 +127,10 @@ export class KnowledgeService {
   }
 
   async view(scope: KnowledgeScope): Promise<KnowledgeView> {
+    // Opening the panel is a passive trigger, and anything left in the old review queue is accepted
+    // on sight: ingestion is automatic now.
+    void this.ensureSeeded(scope);
+    await this.autoAcceptLegacy(scope);
     const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.store.proposals(scope), this.store.rejectedClaims(scope)]);
     const summaries = pages.map((p) => this.summarize(p)).sort(byKindThenUpdated);
     const status = await this.status(scope);
@@ -151,6 +159,8 @@ export class KnowledgeService {
     for (const other of all) {
       if (other.meta.related.includes(id) || linksTo(other.body, id)) relatedIds.add(other.meta.id);
     }
+    // Shared labels and anchors are relations too, not just the authored `related` list.
+    for (const edge of graphNeighbours(buildKnowledgeGraph(all), id)) relatedIds.add(edge.from === id ? edge.to : edge.from);
     const related = all.filter((p) => relatedIds.has(p.meta.id) && p.meta.id !== id).map((p) => this.summarize(p));
     const { stale, reasons } = await this.store.staleness(scope, page);
     const anchors = this.deps.anchors ? await this.deps.anchors.resolve(scope, page.meta.anchors) : page.meta.anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'Anchor resolution is unavailable.' }));
@@ -187,6 +197,18 @@ export class KnowledgeService {
       if (meta.status === 'uncertain') score -= 1;
       out.push({ ...this.summarize(page, snippetFor(page.body, terms)), score });
     }
+    // Graph expansion: a page one or two hops from a strong match surfaces even when it shares no
+    // query terms — the point of maintaining relations rather than searching pages in isolation.
+    if (out.length) {
+      const byId = new Map(pages.map((p) => [p.meta.id, p]));
+      const seeds = [...out].sort((a, b) => b.score - a.score).slice(0, 8).map((r) => r.id);
+      for (const [id, boost] of expandKnowledgeQuery(buildKnowledgeGraph(pages), seeds, 2, 0.5)) {
+        if (out.some((r) => r.id === id)) continue;
+        const page = byId.get(id);
+        if (!page || (!opts.includeHistorical && !isServable(page.meta))) continue;
+        out.push({ ...this.summarize(page), score: boost * 4 + Math.max(0, 4 - authorityOf(page.meta)) });
+      }
+    }
     return out.sort((a, b) => b.score - a.score).slice(0, Math.min(opts.limit ?? 12, 40));
   }
 
@@ -203,18 +225,15 @@ export class KnowledgeService {
   /* ------------------------------------------------------------------ */
 
   /**
-   * Records a candidate page. Nothing is edited: a new claim becomes a proposal for review, and the
-   * only automatic promotion is a claim independently seen in two sessions, which becomes a
-   * *proposed* page (still not current, still never published).
+   * Records durable knowledge. Ingestion is fully automated: the claim becomes a `current` page
+   * immediately, ranked below anything human-reviewed by the authority ladder. The only refusals
+   * are a claim that was explicitly rejected before (tombstoned) and a missing title/claim.
    */
   async propose(scope: KnowledgeScope, input: KnowledgeProposalInput, origin: string, sessionId?: string): Promise<KnowledgeProposeResult> {
     const claim = input.claim.trim();
     const title = input.title.trim();
     if (!title || !claim) throw new Error('A proposal needs a title and a one-line claim');
     if (await this.store.isRejected(scope, claim)) {
-      const existing = await this.store.proposals(scope);
-      const duplicate = existing.find((p) => isSameClaim(p.meta.claim, claim));
-      if (duplicate) await this.store.removeProposal(scope, duplicate.meta.id);
       return { id: '', evidenceCount: 0, rejected: true, promoted: false };
     }
     const evidenceCount = await this.store.recordEvidence(scope, claim, sessionId);
@@ -229,31 +248,22 @@ export class KnowledgeService {
       scope: pageScope,
       branch: pageScope === 'branch' ? scope.branch : undefined,
       keywords: input.keywords,
+      labels: input.labels,
       sources: input.sources,
       anchors: input.anchors,
       related: input.related,
       supersedes: input.supersedes,
       contradicts: input.contradicts,
       confidence: input.confidence,
-      targetPageId: targetId,
       base: existingPage?.meta
     });
-    // Repeated independent sightings promote to a proposed *page*; a single sighting waits in the
-    // proposal queue. Neither state is treated as current truth.
-    if (!existingPage && evidenceCount >= 2 && origin !== 'human') {
-      const page = await this.store.write(scope, { ...meta, status: 'proposed', updatedBy: origin }, input.body);
-      await this.store.removeProposal(scope, this.proposalFileId(title, claim));
-      this.deps.log('info', `knowledge: promoted repeated claim to a proposed page (${page.meta.id}, ${evidenceCount} sessions)`);
-      return { id: page.meta.id, evidenceCount, rejected: false, promoted: true };
+    delete meta.targetPageId;
+    const page = await this.store.write(scope, { ...meta, status: 'current', updatedBy: origin }, input.body);
+    for (const superseded of page.meta.supersedes) {
+      await this.store.patch(scope, superseded, { status: 'superseded', supersededBy: page.meta.id });
     }
-    const proposalId = this.proposalFileId(title, claim);
-    await this.store.writeProposal(scope, {
-      id: proposalId,
-      meta: { ...meta, id: proposalId, status: 'proposed', targetPageId: targetId, updatedBy: origin },
-      body: input.body
-    });
-    this.deps.log('info', `knowledge: proposal recorded (${proposalId} → ${targetId}, evidence ${evidenceCount}, origin ${origin})`);
-    return { id: proposalId, evidenceCount, rejected: false, promoted: false };
+    this.deps.log('info', `knowledge: ingested ${page.meta.id} (evidence ${evidenceCount}, origin ${origin})`);
+    return { id: page.meta.id, evidenceCount, rejected: false, promoted: true };
   }
 
   /** Accept (human review) or reject one proposal. Accepting marks the page current and reviewed. */
@@ -375,10 +385,14 @@ export class KnowledgeService {
   /* Episodes and jobs                                                  */
   /* ------------------------------------------------------------------ */
 
-  /** Records an L3 outcome at a git boundary (commit / PR / merge) for later distillation. */
+  /**
+   * Records an L3 outcome at a git boundary (commit / PR / merge) for later distillation.
+   *
+   * Distillation writes through the service so its dedupe, evidence and rejection rules apply.
+   */
   async recordEpisode(scope: KnowledgeScope, episode: KnowledgeEpisode): Promise<void> {
     // A project that never opted into the wiki gets no files written for it: episodes exist to
-    // feed distillation, and distillation needs a wiki to write proposals into.
+    // feed distillation, and distillation needs a wiki to write into.
     if (!(await this.store.hasWiki(scope))) return;
     try {
       await this.store.appendEpisode(scope, episode);
@@ -390,8 +404,96 @@ export class KnowledgeService {
     }
   }
 
+  /**
+   * Passive seed: the first time a project with no pages is opened, draft the wiki from its own
+   * docs. Attempted once per project per app run; a project with too little documentation simply
+   * gets no wiki until it has some.
+   */
+  async ensureSeeded(scope: KnowledgeScope): Promise<void> {
+    if (!this.deps.synth?.completer) return;
+    if (this.seedAttempts.has(scope.projectRoot) || this.jobs.has(scope.projectRoot) || this.lastJobs.has(scope.projectRoot)) return;
+    let pages = 0;
+    try {
+      pages = (await this.store.load(scope)).length;
+    } catch {
+      return;
+    }
+    if (pages) return;
+    this.seedAttempts.add(scope.projectRoot);
+    void this.generate(scope, 'bootstrap').catch((e) => this.deps.log('debug', `knowledge: passive seed skipped: ${errorMessage(e)}`));
+  }
+
+  /** The relation graph for this project, rebuilt from the markdown and cached best-effort. */
+  async graph(scope: KnowledgeScope): Promise<KnowledgeGraph> {
+    const graph = buildKnowledgeGraph(await this.store.load(scope));
+    try {
+      await this.store.writeGraph(scope, graph);
+    } catch (e) {
+      this.deps.log('debug', `knowledge: could not cache the relation graph: ${errorMessage(e)}`);
+    }
+    return graph;
+  }
+
+  /** Deletes one page without tombstoning its claim; a rejected claim is what stays refused. */
+  async remove(scope: KnowledgeScope, id: string): Promise<boolean> {
+    return this.store.deletePage(scope, id);
+  }
+
+  /**
+   * PR reflection: the PR's commits and a bounded diff are reflected over the whole wiki, then
+   * ingested automatically. The episode is written first so the evidence survives a failed model
+   * call; the reflection itself is a background job.
+   */
+  async reflectPr(scope: KnowledgeScope, episode: KnowledgeEpisode): Promise<void> {
+    if (!(await this.store.hasWiki(scope))) return;
+    try {
+      await this.store.appendEpisode(scope, episode);
+    } catch (e) {
+      this.deps.log('warn', `knowledge: could not record PR episode: ${errorMessage(e)}`);
+    }
+    if (this.settings().autoDistill && this.deps.synth?.completer) {
+      void this.generate(scope, 'reflect').catch((e) => this.deps.log('warn', `knowledge: PR reflection failed: ${errorMessage(e)}`));
+    }
+  }
+
+  /** Accepts any candidate left over from the old review queue, so nothing ever waits for a human. */
+  private async autoAcceptLegacy(scope: KnowledgeScope): Promise<void> {
+    for (const proposal of await this.store.proposals(scope)) {
+      try {
+        const targetId = proposal.meta.targetPageId ?? proposal.meta.id;
+        const existing = await this.store.read(scope, targetId);
+        const meta: KnowledgePageMeta = {
+          ...proposal.meta,
+          ...(existing?.meta ?? {}),
+          id: targetId,
+          status: 'current',
+          scope: existing?.meta.scope ?? proposal.meta.scope,
+          updatedBy: 'auto:accept'
+        };
+        delete meta.targetPageId;
+        delete meta.review;
+        await this.store.write(scope, meta, proposal.body);
+        await this.store.removeProposal(scope, proposal.meta.id);
+      } catch (e) {
+        this.deps.log('debug', `knowledge: could not auto-accept ${proposal.meta.id}: ${errorMessage(e)}`);
+      }
+    }
+    for (const page of await this.store.load(scope)) {
+      // Only the legacy queue is promoted; `uncertain` is a deliberate state a page keeps.
+      if (page.meta.status !== 'draft' && page.meta.status !== 'proposed') continue;
+      try {
+        const meta: KnowledgePageMeta = { ...page.meta, status: 'current', updatedBy: 'auto:accept' };
+        delete meta.targetPageId;
+        delete meta.review;
+        await this.store.write(scope, meta, page.body);
+      } catch (e) {
+        this.deps.log('debug', `knowledge: could not auto-accept ${page.meta.id}: ${errorMessage(e)}`);
+      }
+    }
+  }
+
   /** One job per project; the panel polls status and sees `generating`. */
-  async generate(scope: KnowledgeScope, mode: 'bootstrap' | 'distill'): Promise<KnowledgeJobResult> {
+  async generate(scope: KnowledgeScope, mode: 'bootstrap' | 'distill' | 'reflect'): Promise<KnowledgeJobResult> {
     if (!this.deps.synth?.completer) return { ok: false, error: 'No background model is configured (Settings → General → Utility model).' };
     const running = this.jobs.get(scope.projectRoot);
     if (running) return running;
@@ -407,7 +509,7 @@ export class KnowledgeService {
     };
     const model = this.deps.synth.completer.label() ?? undefined;
     this.setJob(scope, { mode, state: 'running', at: new Date().toISOString(), ...(model ? { model } : {}) });
-    const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps))
+    const job = (mode === 'bootstrap' ? bootstrapKnowledge(scope, deps) : distillKnowledge(scope, deps, { mode: mode === 'reflect' ? 'reflect' : 'distill' }))
       .catch((e): KnowledgeJobResult => ({ ok: false, error: errorMessage(e) }))
       .then((result): KnowledgeJobResult => {
         this.setJob(scope, {
@@ -446,10 +548,6 @@ export class KnowledgeService {
     return existing?.meta.scope ?? 'repo';
   }
 
-  private proposalFileId(title: string, claim: string): string {
-    return `${knowledgeSlug(title).slice(0, 40)}-${claimKey(claim)}`;
-  }
-
   private summarize(page: KnowledgePage, snippet?: string): KnowledgePageSummary {
     const meta = page.meta;
     return {
@@ -463,6 +561,7 @@ export class KnowledgeService {
       ...(meta.claim ? { claim: meta.claim } : {}),
       ...(meta.targetPageId ? { targetPageId: meta.targetPageId } : {}),
       keywords: meta.keywords,
+      labels: meta.labels,
       ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
       ...(meta.updatedBy ? { updatedBy: meta.updatedBy } : {}),
       ...(meta.confidence ? { confidence: meta.confidence } : {}),
