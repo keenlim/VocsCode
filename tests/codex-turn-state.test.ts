@@ -118,4 +118,27 @@ describe('codex token usage accounting', () => {
     // Cached tokens are a subset of the input count: 100k uncached + 900k cache reads, not 1.9M prompt tokens.
     expect(usage?.totals).toMatchObject({ inputTokens: 100_000, outputTokens: 5_000, cacheReadTokens: 900_000, cacheWriteTokens: 0, reasoningTokens: 1_000 });
   });
+
+  it('prices each sample at the rate of the model that produced it', async () => {
+    const { adapter, events, notifications } = fixture();
+    const notify = (inputTokens: number, outputTokens: number) =>
+      notifications.get('thread/tokenUsage/updated')!({
+        tokenUsage: {
+          total: { inputTokens, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens, reasoningOutputTokens: 0, totalTokens: inputTokens + outputTokens },
+          last: { totalTokens: inputTokens + outputTokens },
+          modelContextWindow: null
+        }
+      });
+    const spend = () => [...events].reverse().find((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage')?.totals.costUsd;
+
+    await adapter.setModel({ provider: 'openai', model: 'gpt-5.6-luna' });
+    notify(100, 100);
+    expect(spend()).toBeCloseTo((100 * 0.2 + 100 * 1.2) / 1_000_000, 10);
+
+    // Sol's rates are 25× Luna's on both counters. The 200 tokens already billed at Luna's rates
+    // must keep their price when the model changes mid-session; only the new 200 are Sol's.
+    await adapter.setModel({ provider: 'openai', model: 'gpt-5.6-sol' });
+    notify(300, 300);
+    expect(spend()).toBeCloseTo((100 * 0.2 + 100 * 1.2 + 200 * 5 + 200 * 30) / 1_000_000, 10);
+  });
 });

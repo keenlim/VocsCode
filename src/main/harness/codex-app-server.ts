@@ -312,7 +312,7 @@ export class CodexAppServerAdapter implements HarnessAdapter {
     rpc.onNotification('thread/tokenUsage/updated', (p) => {
       const n = p as { tokenUsage: { total: { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number; reasoningOutputTokens: number; totalTokens: number }; last: { totalTokens: number }; modelContextWindow: number | null } };
       const t = n.tokenUsage.total;
-      const current = this.usage.snapshot();
+      const before = this.usage.snapshot();
       // Codex counts cached input inside its input tokens (OpenAI convention); store the uncached
       // remainder so cache reads are not counted twice in rates and cost estimates.
       const cumulative = {
@@ -321,11 +321,25 @@ export class CodexAppServerAdapter implements HarnessAdapter {
         cacheReadTokens: t.cachedInputTokens,
         cacheWriteTokens: t.cacheWriteInputTokens,
         reasoningTokens: t.reasoningOutputTokens,
-        contextWindow: n.tokenUsage.modelContextWindow ?? current.contextWindow,
-        contextTokens: n.tokenUsage.last?.totalTokens ?? current.contextTokens
+        contextWindow: n.tokenUsage.modelContextWindow ?? before.contextWindow,
+        contextTokens: n.tokenUsage.last?.totalTokens ?? before.contextTokens
       };
-      const pricing = findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models);
-      this.usage.setCumulative({ ...cumulative, costUsd: estimateCostUsd(pricing, { ...current, ...cumulative }) });
+      this.usage.setCumulative(cumulative);
+      // Codex reports these counters but no price, and a rate belongs to the model that produced
+      // each sample: the increment this sample added is priced at the current model's rates, while
+      // pricing the running totals would re-bill everything a mid-session model switch already
+      // counted at the previous model's rate. How much was added is the tracker's own epoch handling
+      // to decide — a reset counter contributes nothing rather than a negative.
+      const after = this.usage.snapshot();
+      const added = {
+        inputTokens: Math.max(0, after.inputTokens - before.inputTokens),
+        outputTokens: Math.max(0, after.outputTokens - before.outputTokens),
+        cacheReadTokens: Math.max(0, after.cacheReadTokens - before.cacheReadTokens),
+        cacheWriteTokens: Math.max(0, after.cacheWriteTokens - before.cacheWriteTokens)
+      };
+      // Spend is additive and never reconciled: Codex reports no cost to reconcile it against, and
+      // money spent at an earlier model's rate stays spent.
+      this.usage.addUsage({ costUsd: estimateCostUsd(findPricing(this.modelProvider ?? 'openai', this.model ?? '', this.models), added) });
       this.ctx.emit({ type: 'usage', totals: this.usage.snapshot() });
     });
     rpc.onNotification('error', (p) => {
