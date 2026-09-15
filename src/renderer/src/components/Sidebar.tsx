@@ -40,9 +40,19 @@ function pinRank(s: SessionMeta): number {
   return s.pinned ? (s.pinnedAt ?? s.createdAt) : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * What a row's recency is measured from: the user's own last message here. Agent activity keeps
+ * `updatedAt` moving, so ordering by that let a long turn in the background pull a session the user
+ * was not working in over the one they were. Rows written before the stamp existed (or never sent a
+ * prompt) fall back to `updatedAt`, so the upgrade does not reshuffle every folder at once.
+ */
+function recencyAt(s: SessionMeta): number {
+  return s.lastUserMessageAt ?? s.updatedAt;
+}
+
 /** Canonical display order for one folder's session list. */
 export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
-  return [...list].sort((a, b) => pinRank(a) - pinRank(b) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+  return [...list].sort((a, b) => pinRank(a) - pinRank(b) || recencyAt(b) - recencyAt(a) || a.id.localeCompare(b.id));
 }
 
 /** One folder in sidebar display order, with its non-archived session ids in row order. */
