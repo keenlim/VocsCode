@@ -5,6 +5,7 @@ import { EMPTY_AGENT_STATE } from '../../shared/agent';
 import type { AppSettings, HarnessAvailability, HarnessId, ImageAttachment, ModelInfo, SessionConfig, SessionEventEnvelope, SessionMeta, TranscriptItem, UpdateState } from '../../shared/types';
 import type { TerminalInfo } from '../../shared/terminal';
 import { invoke, on } from './api';
+import { recencyAt, sortSessionRows } from './sessionOrder';
 
 export type PanelTab = 'changes' | 'files' | 'branches' | 'goal' | 'usage' | 'terminal';
 /** The panel's lower half: live session services rather than workspace views. */
@@ -197,6 +198,26 @@ function bootErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error) return error;
   return 'An unexpected error occurred while loading Vocs Code.';
+}
+
+/**
+ * Which session takes over once `activeId` leaves the visible list. Follows the sidebar: the row
+ * directly below it in its own folder, or — when it was that folder's last row — the one above it.
+ * The rows are ordered as the user was looking at them, active session included, so "below" means
+ * the row that sat under the one that left rather than whatever ends up adjacent without it.
+ *
+ * Only a folder with nothing else left to show falls back to the most recent session anywhere, and
+ * only a list with no active session at all leaves nothing to select.
+ */
+function replacementFor(previous: SessionMeta[], next: SessionMeta[], activeId: string): SessionMeta | undefined {
+  const visible = next.filter((x) => !x.archived);
+  const root = previous.find((x) => x.id === activeId)?.config.projectRoot;
+  const rows = sortSessionRows(previous.filter((x) => !x.archived && x.config.projectRoot === root));
+  const at = rows.findIndex((x) => x.id === activeId);
+  const neighbour = at === -1 ? undefined : rows[at + 1] ?? rows[at - 1];
+  const picked = neighbour && visible.find((x) => x.id === neighbour.id);
+  if (picked) return picked;
+  return visible.sort((a, b) => recencyAt(b) - recencyAt(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0];
 }
 
 function dropPendingDeltas(sessionId: string, itemId?: string): void {
@@ -500,7 +521,8 @@ export const useStore = create<State>((set, get) => ({
       }
     }
     let replacement: SessionMeta | undefined;
-    let removedTitle: string | undefined;
+    let departedTitle: string | undefined;
+    let departedArchived = false;
     set((s) => {
       const removed = new Set<string>();
       for (const id of Object.keys(s.transcripts)) if (!ids.has(id)) removed.add(id);
@@ -509,12 +531,17 @@ export const useStore = create<State>((set, get) => ({
       for (const id of Object.keys(s.activeTerminal)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.models)) if (!ids.has(id)) removed.add(id);
       for (const id of Object.keys(s.drafts)) if (!ids.has(id)) removed.add(id);
-      const activeRemoved = !!s.activeId && !ids.has(s.activeId);
-      if (activeRemoved) {
-        removedTitle = s.sessions.find((x) => x.id === s.activeId)?.title ?? s.activeId ?? 'active session';
-        replacement = [...sessions]
-          .filter((x) => !x.archived)
-          .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))[0];
+      const activeId = s.activeId;
+      const before = activeId ? s.sessions.find((x) => x.id === activeId) : undefined;
+      const after = activeId ? sessions.find((x) => x.id === activeId) : undefined;
+      // The active session left the visible list: deleted outright, or archived by this same push.
+      // Only the transition counts — clicking an archived row in the Archived view selects an
+      // already-archived session, and the next unrelated push must not throw that selection away.
+      const activeRemoved = !!activeId && (!after || (!before?.archived && !!after.archived));
+      if (activeRemoved && activeId) {
+        departedTitle = before?.title ?? activeId;
+        departedArchived = !!after?.archived;
+        replacement = replacementFor(s.sessions, sessions, activeId);
       }
       if (removed.size === 0 && !activeRemoved) return { sessions };
       const transcripts = { ...s.transcripts };
@@ -542,14 +569,15 @@ export const useStore = create<State>((set, get) => ({
         activeId: activeRemoved ? replacement?.id ?? null : s.activeId
       };
     });
-    if (removedTitle) {
+    if (departedTitle) {
+      const what = departedArchived ? 'archived' : 'removed';
       if (replacement) {
-        get().toast(`Session "${removedTitle}" was removed; switched to "${replacement.title}".`, 'info');
+        get().toast(`Session "${departedTitle}" was ${what}; switched to "${replacement.title}".`, 'info');
         // This is reconciliation from the main process, not user navigation: loading directly
         // avoids adding a duplicate entry to the back/forward stack.
         void get().loadTranscript(replacement.id).catch((error) => get().toast(error instanceof Error ? error.message : String(error), 'error'));
       } else {
-        get().toast(`Session "${removedTitle}" was removed; no active sessions remain.`, 'info');
+        get().toast(`Session "${departedTitle}" was ${what}; no active sessions remain.`, 'info');
       }
     }
   },
