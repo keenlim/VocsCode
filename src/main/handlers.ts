@@ -10,7 +10,7 @@ import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
-import { isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
+import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
@@ -556,6 +556,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const root = projectRootOf(id);
     if (!root) return { ok: false, error: 'Session not found' };
     return setClaudeAgentModel(root, name, model ?? undefined);
+  });
+  handle('claude-agents:create', async ({ id, name, description, prompt }) => {
+    const root = projectRootOf(id);
+    if (!root) return { ok: false, error: 'Session not found' };
+    // The engine names its own types while it is live; the module covers the built-ins it cannot.
+    return createClaudeAgent(root, { name, description, prompt }, (await sessions.subagentTypes(id)).map((type) => type.name));
   });
   handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {

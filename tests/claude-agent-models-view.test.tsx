@@ -132,6 +132,79 @@ describe('Claude agent model rows', () => {
   });
 });
 
+describe('creating a definition from the panel', () => {
+  it('writes a new definition and reloads the list', async () => {
+    invoke.mockImplementation((channel: string) =>
+      channel === 'claude-agents:list' ? Promise.resolve(info({ types: [], files: [] })) : Promise.resolve({ ok: true, path: 'G:/repo/.claude/agents/reviewer.md' })
+    );
+    await act(async () => {
+      render(<ClaudeAgentModels session={session()} />);
+    });
+    await settle();
+    expect(document.body.textContent).toContain('This project defines no Claude agents');
+
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="claude-agent-new"]')!);
+    });
+    await act(async () => {
+      fireEvent.change(document.querySelector('[data-testid="claude-agent-new-name"]')!, { target: { value: ' reviewer ' } });
+      fireEvent.change(document.querySelector('[data-testid="claude-agent-new-description"]')!, { target: { value: 'Reviews a diff' } });
+      fireEvent.change(document.querySelector('[data-testid="claude-agent-new-prompt"]')!, { target: { value: 'You review diffs.' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-testid="claude-agent-new-save"]')!);
+    });
+    await settle();
+
+    expect(invoke).toHaveBeenCalledWith('claude-agents:create', { id: 's1', name: 'reviewer', description: 'Reviews a diff', prompt: 'You review diffs.' });
+    // The editor closes and the list is read back, so the file on disk is the panel's source of truth.
+    expect(document.querySelector('[data-testid="claude-agent-new-name"]')).toBeNull();
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'claude-agents:list').length).toBe(2);
+  });
+
+  it('will not offer to write a name a built-in or an existing definition owns', async () => {
+    invoke.mockResolvedValue(
+      info({
+        types: [{ name: 'Explore', description: 'Searches the repo', model: 'inherit' }],
+        files: [{ name: 'reviewer', description: 'Reviews a diff', path: 'G:/repo/.claude/agents/reviewer.md' }]
+      })
+    );
+    await act(async () => {
+      render(<ClaudeAgentModels session={session()} />);
+    });
+    await settle();
+    const open = async () => {
+      await act(async () => {
+        fireEvent.click(document.querySelector('[data-testid="claude-agent-new"]')!);
+      });
+    };
+    const rename = async (value: string) => {
+      await act(async () => {
+        fireEvent.change(document.querySelector('[data-testid="claude-agent-new-name"]')!, { target: { value } });
+        fireEvent.change(document.querySelector('[data-testid="claude-agent-new-description"]')!, { target: { value: 'Something new' } });
+      });
+    };
+    const saveButton = () => document.querySelector('[data-testid="claude-agent-new-save"]') as HTMLButtonElement;
+
+    // `Explore` is a built-in the engine lists: a definition would replace it, not extend it.
+    await open();
+    await rename('Explore');
+    expect(document.querySelector('[data-testid="claude-agent-new-builtin"]')!.textContent).toContain('replaces it');
+    expect(saveButton().disabled).toBe(true);
+
+    // A name the project already defines is an overwrite, not a creation.
+    await rename('reviewer');
+    expect(document.querySelector('[data-testid="claude-agent-new-taken"]')!.textContent).toContain('already defines reviewer');
+    expect(saveButton().disabled).toBe(true);
+
+    // A genuinely new name is the one thing this form exists for, and it saves.
+    await rename('doc-writer');
+    expect(document.querySelector('[data-testid="claude-agent-new-builtin"]')).toBeNull();
+    expect(document.querySelector('[data-testid="claude-agent-new-taken"]')).toBeNull();
+    expect(saveButton().disabled).toBe(false);
+  });
+});
+
 describe('the panel’s views', () => {
   it('offers Models to Claude and Agents to pi, and neither to a harness with no such files', async () => {
     invoke.mockImplementation((channel: string) => (channel === 'subagents:list' ? Promise.resolve([]) : Promise.resolve(null)));

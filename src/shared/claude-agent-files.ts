@@ -9,8 +9,29 @@
  * the only way to pin the model one of them runs on: the built-ins declare `model: inherit`, and
  * `CLAUDE_CODE_SUBAGENT_MODEL` is read *after* frontmatter, so the environment variable cannot move
  * them. Editing here is deliberately narrow — the app sets a definition's `model` and leaves every
- * other byte of a hand-written file exactly as its author left it.
+ * other byte of a hand-written file exactly as its author left it; it creates only a definition for
+ * a name no built-in and no existing file claims, so it can replace neither.
  */
+
+/**
+ * Claude Code's own delegation targets. A project definition with one of these names does not extend
+ * the built-in, it *replaces* it — instructions and all. The engine only lists its built-ins while a
+ * session is live, so the create path needs the names here to refuse one either way.
+ */
+export const CLAUDE_BUILTIN_AGENT_TYPES = ['Explore', 'Plan', 'general-purpose'] as const;
+
+/** Whether a name is a built-in type, and so must be authored by hand rather than by the app. */
+export function isClaudeBuiltinAgentType(name: string): boolean {
+  const wanted = name.trim().toLowerCase();
+  return CLAUDE_BUILTIN_AGENT_TYPES.some((type) => type.toLowerCase() === wanted);
+}
+
+/** The fields the app writes for a definition it creates. */
+export interface ClaudeAgentDraft {
+  name: string;
+  description: string;
+  prompt: string;
+}
 
 /** The frontmatter keys this app reads. Anything else in the file is preserved verbatim on write. */
 export interface ClaudeAgentFields {
@@ -76,6 +97,18 @@ export function parseClaudeAgentFile(text: string): ParsedClaudeAgentFile | null
     },
     prompt: text.slice(match.index + match[0].length).replace(/^[\r\n]+/, '').trim()
   };
+}
+
+/**
+ * Render a new definition: the two frontmatter fields the app owns, then the body that is the
+ * agent's system prompt. No `model:` line, so it inherits the session model until the panel pins one.
+ */
+export function serializeClaudeAgentFile(fields: ClaudeAgentFields, prompt: string): string {
+  const lines = ['---', `name: ${quote(fields.name)}`, `description: ${quote(fields.description)}`];
+  if (fields.model?.trim()) lines.push(`model: ${quote(fields.model.trim())}`);
+  lines.push('---', '');
+  const body = prompt.trim();
+  return `${lines.join('\n')}${body ? `\n${body}\n` : '\n'}`;
 }
 
 /**

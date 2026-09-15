@@ -118,7 +118,8 @@ field merging):
 
 For a **Claude** session only #3 and #5 are in play, and Claude Code resolves them itself. Of those,
 the app reads back just #3 — the project's own definitions, in `src/main/claude-agents.ts` — to offer
-the model rows above; it never writes a new one, and never touches the global set.
+the model rows above; it creates a new definition there for a name no built-in and no existing file
+claims, and never touches the global set.
 
 Frontmatter: `name`, `description`, `tools`, optional `model`, `prompt_mode` (`append` | `replace`),
 `mcp: false`. **Model defaults to the session model**; a pinned model is respected, which is why the
@@ -233,11 +234,18 @@ happens: every type the engine reports is listed with the model it will run on.
 What it can change is a definition the project already supplies at
 `<projectRoot>/.claude/agents/<Name>.md`. Those rows carry a **model** select — *Same as session*
 clears the pin — and saving rewrites that one frontmatter line, leaving the rest of the file
-byte-identical. A type with no definition gets no control, because writing one would not *adjust* a
-built-in but **replace** it, instructions and all (verified against the bundled CLI: a
-frontmatter-only `Explore.md` left the agent describing itself as a general-purpose agent). That
-decision belongs to whoever writes the file; a definition created by hand or by asking the agent is
-editable here the moment it exists.
+byte-identical. A type with no definition gets no control, because pinning one would require writing
+it first.
+
+The view also creates a definition: **New** asks for a name, a description and the instructions, and
+writes `<Name>.md` with no `model:` line, so it inherits the session model until the new row's select
+pins one. Creation is deliberately narrow — a name a built-in or an existing definition already has
+is refused, in the form and over IPC, because a definition does not *adjust* one of those but
+**replace** it, instructions and all (verified against the bundled CLI: a frontmatter-only
+`Explore.md` left the agent describing itself as a general-purpose agent). Replacing a built-in
+remains a decision whoever writes the file makes by hand, and the app cannot upload one: the engine's
+built-in types are refused even when the session is idle and cannot list them (`Explore`, `Plan`,
+`general-purpose` in `src/shared/claude-agent-files.ts`).
 
 The one thing to know about a pin: while any definition pins a model, the adapter stops forcing the
 session model, so the built-ins without a definition go back to Claude Code's own default — an
@@ -251,7 +259,7 @@ the forcing.
   that run.
 
 **IPC**: `subagents:list`, `subagents:get`, `subagents:stop`, `subagents:steer`,
-`claude-agents:list`, `claude-agents:setModel`.
+`claude-agents:list`, `claude-agents:setModel`, `claude-agents:create`.
 
 ## Storage and wire contract
 
