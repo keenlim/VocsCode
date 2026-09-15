@@ -7,7 +7,7 @@ import { errorMessage, shortId, truncate } from '../util/async';
 import { toCodex } from '../mcp/effective';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { CODEX_STATIC_MODELS, estimateCostUsd, findPricing } from '../models/static-models';
+import { CODEX_STATIC_MODELS, estimateCostUsd, findPricing, modelsForProvider } from '../models/static-models';
 
 function sandboxFor(mode: PermissionMode): SandboxMode {
   switch (mode) {
@@ -148,7 +148,8 @@ export class CodexExecAdapter implements HarnessAdapter {
    * and resolve from the bundled catalogs.
    */
   private pricing(): ModelInfo['pricing'] | undefined {
-    return findPricing(this.modelProvider ?? 'openai', this.model ?? '');
+    const models = modelsForProvider(this.ctx.settings().providers, this.modelProvider);
+    return findPricing(this.modelProvider ?? 'openai', this.model ?? '', models);
   }
 
   private async streamTurn(thread: Thread, parts: CodexInput[], startedAt: number): Promise<void> {

@@ -15,7 +15,7 @@ import { estimateCostUsd, findPricing } from '../models/static-models';
 import { isValidRunId } from '../subagents';
 import { RunStore } from '../subagent-runs';
 import { emptyRunTotals, type SubagentItem, type SubagentRunMeta, type SubagentRunMode, type SubagentRunStatus, type SubagentRunTotals } from '../../shared/subagents';
-import type { SessionEvent } from '../../shared/types';
+import type { ModelInfo, SessionEvent } from '../../shared/types';
 
 /** Tool names that spawn a Claude Code subagent. */
 export const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
@@ -109,6 +109,8 @@ export interface ClaudeSubagentRunsOptions {
   cwd: string;
   /** Read lazily: the adapter resolves which endpoint backs the session during `start()`. */
   providerId: () => string | undefined;
+  /** The endpoint's own cached catalog, so a call on a model only the gateway knows prices correctly. */
+  models: () => ModelInfo[];
   emit: (event: SessionEvent) => void;
   log: (level: 'debug' | 'warn', message: string) => void;
 }
@@ -136,6 +138,7 @@ export class ClaudeSubagentRuns {
   private readonly store: RunStore | null;
   private readonly cwd: string;
   private readonly provider: () => string | undefined;
+  private readonly models: () => ModelInfo[];
   private readonly emit: (event: SessionEvent) => void;
   private readonly log: (level: 'debug' | 'warn', message: string) => void;
   private seq = 0;
@@ -143,6 +146,7 @@ export class ClaudeSubagentRuns {
   constructor(options: ClaudeSubagentRunsOptions) {
     this.cwd = options.cwd;
     this.provider = options.providerId;
+    this.models = options.models;
     this.emit = options.emit;
     this.log = options.log;
     this.store = options.dir ? new RunStore(options.dir, (message) => this.log('warn', message)) : null;
@@ -375,7 +379,7 @@ export class ClaudeSubagentRuns {
     if (!call) return;
     const model = call.model ?? state.model;
     const provider = this.endpoint;
-    const costUsd = estimateCostUsd(findPricing(provider, model ?? ''), call);
+    const costUsd = estimateCostUsd(findPricing(provider, model ?? '', this.models()), call);
     state.calls += 1;
     state.totals.turns = state.calls;
     state.totals.inputTokens += call.inputTokens;

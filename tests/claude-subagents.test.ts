@@ -45,7 +45,7 @@ async function stubCtx(): Promise<Stub> {
   const ctx = {
     sessionId: 's1',
     session: () => meta,
-    settings: () => ({ claude: { settingSources: [], useProviderKey: false }, pi: { extraArgs: [] } }) as never,
+    settings: () => ({ claude: { settingSources: [], useProviderKey: false }, pi: { extraArgs: [] }, providers: [] }) as never,
     runtime: { resolve: () => undefined } as never,
     sessionDir: dir,
     permissionMode: () => 'ask' as const,

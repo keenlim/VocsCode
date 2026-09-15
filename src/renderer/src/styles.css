@@ -3427,6 +3427,12 @@ body.resizing {
   color: var(--fg-muted);
   margin-top: 2px;
 }
+.usage-hero-note {
+  font-size: 11px;
+  color: var(--fg-muted);
+  margin-top: 5px;
+  opacity: 0.85;
+}
 .usage-kpis {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));

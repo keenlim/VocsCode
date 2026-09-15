@@ -23,9 +23,24 @@ import { ClaudeAdapter } from '../src/main/harness/claude';
 
 const ANTHROPIC: ProviderConfig = { id: 'anthropic', kind: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com', hasApiKey: false, models: [], enabled: true };
 const OPENCODE_GO: ProviderConfig = { id: 'opencode-go', kind: 'opencode-go', name: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go/v1', hasApiKey: false, models: [], enabled: true };
+/** OpenRouter names GLM by vendor, and this row exists in no bundled catalog — only in the provider's own. */
+const OPENROUTER: ProviderConfig = {
+  id: 'openrouter',
+  kind: 'openrouter',
+  name: 'OpenRouter',
+  baseUrl: 'https://openrouter.ai/api/v1',
+  hasApiKey: false,
+  enabled: true,
+  models: [{ id: 'z-ai/glm-5.3-flash', provider: 'openrouter', displayName: 'GLM 5.3 Flash', contextWindow: 1_000_000, pricing: { input: 0.075, output: 0.25, cacheRead: 0.015 } }]
+};
 
 const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 };
 const DEEPSEEK: ModelRef = { provider: 'opencode-go', model: 'deepseek-v4.1-flash' };
+const GLM: ModelRef = { provider: 'openrouter', model: 'z-ai/glm-5.3-flash' };
+/** What Claude Code charges for a model it has no row for: $5/$25/$0.50 per Mtok. */
+const GLM_CLI_USD = (1_000_000 * 5 + 200_000 * 25 + 20_000_000 * 0.5) / 1_000_000;
+/** What the endpoint's own rates make the same tokens worth. */
+const GLM_LIVE_USD = (1_000_000 * 0.075 + 200_000 * 0.25 + 20_000_000 * 0.015) / 1_000_000;
 /** Wall-clock fixtures start here; 0 is the adapter's "no turn start observed" sentinel. */
 const T0 = 1_752_600_000_000;
 
@@ -33,7 +48,7 @@ function settings(providers: ProviderConfig[]): AppSettings {
   return { claude: { runtime: 'auto', useProviderKey: false, settingSources: [] }, providers } as unknown as AppSettings;
 }
 
-function stubCtx(s: AppSettings, model: ModelRef | undefined, events: SessionEvent[]): HarnessContext {
+function stubCtx(s: AppSettings, model: ModelRef | undefined, events: SessionEvent[], overrides: Partial<SessionMeta> = {}): HarnessContext {
   const meta: SessionMeta = {
     id: 's1',
     title: 't',
@@ -43,7 +58,8 @@ function stubCtx(s: AppSettings, model: ModelRef | undefined, events: SessionEve
     cwd: '.',
     status: 'idle',
     harnessRef: {},
-    usage: { ...ZERO_USAGE }
+    ...overrides,
+    usage: { ...ZERO_USAGE, ...overrides.usage }
   };
   return {
     sessionId: 's1',
@@ -129,6 +145,26 @@ describe('Claude session spend accounting', () => {
     expect(turn?.kind === 'turn' && turn.costUsd).toBeCloseTo(CATALOG_COST, 4);
   });
 
+  it('prices a gateway-only model from the endpoint catalog that knows it', async () => {
+    // The model's id carries the vendor, so nothing in the bundled catalogs resolves it and the CLI
+    // falls back to its own default rate — $20 here where the endpoint charges $0.425. The row is in
+    // the provider's cached models, which is the only place it has ever existed.
+    const events: SessionEvent[] = [];
+    const adapter = await startedAdapter([ANTHROPIC, OPENROUTER], GLM, events);
+    feed(adapter, turnStarted);
+    feed(adapter, {
+      type: 'result',
+      subtype: 'success',
+      duration_ms: 60_000,
+      usage: { input_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      modelUsage: { 'z-ai/glm-5.3-flash': { inputTokens: 1_000_000, outputTokens: 200_000, cacheReadInputTokens: 20_000_000, cacheCreationInputTokens: 0, costUSD: GLM_CLI_USD, contextWindow: 1_000_000, costBasis: 'unknown' } }
+    });
+
+    const turn = turnItem(events);
+    expect(turn?.kind === 'turn' ? turn.costUsd : undefined).toBeCloseTo(GLM_LIVE_USD, 9);
+    expect(lastUsage(events)?.totals.costUsd).toBeCloseTo(GLM_LIVE_USD, 9);
+  });
+
   it('keeps the spend the CLI priced itself, on its own list or a managed rate', async () => {
     const events: SessionEvent[] = [];
     const adapter = await startedAdapter([ANTHROPIC, OPENCODE_GO], DEEPSEEK, events);
@@ -208,5 +244,97 @@ describe('Claude turn duration accounting', () => {
 
     const turns = events.filter((e): e is Extract<SessionEvent, { type: 'item.upsert' }> => e.type === 'item.upsert' && e.item.kind === 'turn');
     expect(turns.map((t) => (t.item.kind === 'turn' ? t.item.durationMs : 0))).toEqual([60_000, 12_000]);
+  });
+});
+
+describe('Claude process lifecycle accounting', () => {
+  /** One CLI process's cumulative counters for the session's model, priced by the CLI's own default
+   *  rate because it has no row for it — the catalog's rate is what the totals end up carrying. */
+  function result(inputTokens: number, outputTokens: number): Record<string, unknown> {
+    return {
+      type: 'result',
+      subtype: 'success',
+      duration_ms: 1_000,
+      modelUsage: {
+        'deepseek-v4.1-flash': {
+          inputTokens,
+          outputTokens,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          costUSD: (inputTokens * 5 + outputTokens * 25) / 1_000_000,
+          contextWindow: 1_000_000,
+          costBasis: 'unknown'
+        }
+      }
+    };
+  }
+
+  /** An adapter over a session that has already recorded work, the way a resume finds it. */
+  function newAdapter(events: SessionEvent[], meta: Partial<SessionMeta> = {}): ClaudeAdapter {
+    queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, setModel: vi.fn(), close: vi.fn(), interrupt: vi.fn() });
+    return new ClaudeAdapter(stubCtx(settings([ANTHROPIC, OPENCODE_GO]), DEEPSEEK, events, meta));
+  }
+
+  const turnRows = (events: SessionEvent[]): Extract<SessionEvent, { type: 'item.upsert' }>[] =>
+    events.filter((e): e is Extract<SessionEvent, { type: 'item.upsert' }> => e.type === 'item.upsert' && e.item.kind === 'turn');
+
+  it('counts the first turn of a resumed process, whose counters restart at zero', async () => {
+    const before: SessionEvent[] = [];
+    const first = newAdapter(before);
+    await first.start();
+    feed(first, turnStarted);
+    feed(first, result(1_000_000, 1_000));
+    // $0.15 in / $0.60 out per Mtok: the catalog's rate for that process's counters.
+    const recorded = lastUsage(before)!.totals;
+    expect(recorded.costUsd).toBeCloseTo(0.1506, 9);
+
+    // The resume: a new CLI process, whose first result reports only what that process spent, so
+    // every counter arrives below what the session already holds. `meta.usage` is what the store
+    // would have written for the session after the first process.
+    const after: SessionEvent[] = [];
+    const second = newAdapter(after, { usage: recorded });
+    await second.start();
+    feed(second, turnStarted);
+    feed(second, result(100_000, 100));
+
+    const turn = turnItem(after);
+    expect(turn?.kind === 'turn' ? turn.costUsd : undefined).toBeCloseTo(0.01506, 9);
+    expect(turn?.kind === 'turn' ? turn.usage?.inputTokens : undefined).toBe(100_000);
+    expect(lastUsage(after)?.totals).toMatchObject({ inputTokens: 1_100_000, outputTokens: 1_100 });
+    expect(lastUsage(after)?.totals.costUsd).toBeCloseTo(0.16566, 9);
+  });
+
+  it('closes a turn the process ended in the middle of, so its usage lands in the ledger too', async () => {
+    const events: SessionEvent[] = [];
+    const adapter = new ClaudeAdapter(stubCtx(settings([ANTHROPIC, OPENCODE_GO]), DEEPSEEK, events));
+    feed(adapter, turnStarted);
+    // The response streams its counters and then the process goes away: no `result` is ever coming.
+    feed(adapter, { type: 'stream_event', event: { type: 'message_start', message: { model: 'deepseek-v4.1-flash', usage: { input_tokens: 1_000, output_tokens: 10 } } } });
+    feed(adapter, { type: 'stream_event', event: { type: 'message_delta', usage: { output_tokens: 40 } } });
+
+    await adapter.dispose();
+
+    const turn = turnItem(events);
+    expect(turn?.kind === 'turn' && turn.status).toBe('interrupted');
+    // Tokens included: left open they belong to no row, and the headline spend reads higher than
+    // the turns under it until the next turn silently absorbs them.
+    expect(turn?.kind === 'turn' ? turn.usage : undefined).toEqual({ inputTokens: 1_000, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(lastUsage(events)?.totals).toMatchObject({ inputTokens: 1_000, outputTokens: 40, turns: 1 });
+  });
+
+  it('emits no second turn for work a `result` already closed', async () => {
+    const events: SessionEvent[] = [];
+    const adapter = newAdapter(events);
+    await adapter.start();
+    feed(adapter, turnStarted);
+    feed(adapter, result(1_000_000, 1_000));
+    expect(turnRows(events)).toHaveLength(1);
+
+    await adapter.dispose();
+
+    // Closing a turn that already ended would charge the session twice for the same work.
+    expect(turnRows(events)).toHaveLength(1);
+    expect(lastUsage(events)?.totals).toMatchObject({ turns: 1 });
+    expect(lastUsage(events)?.totals.costUsd).toBeCloseTo(0.1506, 9);
   });
 });

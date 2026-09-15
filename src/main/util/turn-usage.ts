@@ -15,6 +15,9 @@ export class TurnUsageTracker {
   /** Per-request samples added since the last cumulative snapshot, awaiting reconciliation. */
   private pendingAdditions: SourceTotals = {};
   private turnBase: UsageTotals | null = null;
+  /** Fields whose first cumulative sample of a declared process epoch is still awaited; null when
+   *  the harness has not declared one. See `beginProcess`. */
+  private processFields: Set<UsageField> | null = null;
 
   constructor(initial: UsageTotals) {
     this.totals = { ...initial };
@@ -27,6 +30,22 @@ export class TurnUsageTracker {
   /** Starts a turn baseline. Calling this while a turn is active resets that baseline. */
   beginTurn(): void {
     this.turnBase = this.snapshot();
+  }
+
+  /**
+   * Declares that the harness counters a process is about to start belong to that process alone, so
+   * its first cumulative sample of each field is added to the session rather than compared with it.
+   *
+   * A harness that restarts its counters at zero — Claude Code does, every resume — sends a first
+   * sample far below the totals already recorded, and the comparison below cannot tell that apart
+   * from a stale one, so it drops the whole first turn's cost. Tokens survive it because the streamed
+   * per-request samples carry them; cost has no stream sample, so the loss was permanent.
+   *
+   * Opt-in per adapter on purpose: a harness whose counters span processes reports a first sample
+   * that already includes the earlier spend, and adding it would count that spend twice.
+   */
+  beginProcess(): void {
+    this.processFields = new Set();
   }
 
   /** Adds a per-request usage sample to the cumulative totals. */
@@ -49,7 +68,11 @@ export class TurnUsageTracker {
     for (const field of USAGE_FIELDS) {
       const value = usage[field];
       if (typeof value !== 'number' || !Number.isFinite(value)) continue;
-      const previous = this.sourceTotals[field];
+      const epoch = this.processFields;
+      const first = epoch !== null && !epoch.has(field);
+      // A declared process epoch makes this field's first sample its own starting point: everything
+      // the harness had already counted came from the earlier process, so the sample is added whole.
+      const previous = first ? 0 : this.sourceTotals[field];
       const pending = this.pendingAdditions[field] ?? 0;
       if (previous === undefined) {
         // The app total may include an earlier provider process. Do not subtract it when the
@@ -67,6 +90,7 @@ export class TurnUsageTracker {
       // A decrease is a reset (or an out-of-order sample): keep totals monotonic and rebase.
       this.sourceTotals[field] = value;
       this.pendingAdditions[field] = 0;
+      if (first) epoch.add(field);
     }
     if (typeof usage.contextTokens === 'number' && Number.isFinite(usage.contextTokens)) this.totals.contextTokens = usage.contextTokens;
     if (typeof usage.contextWindow === 'number' && Number.isFinite(usage.contextWindow)) this.totals.contextWindow = usage.contextWindow;

@@ -27,7 +27,9 @@ import { SettingsStore } from './settings';
 import { SessionStore } from './store';
 import { TerminalManager } from './terminal';
 import { UpdateService } from './updater';
-import { pricedModelOf, repricingOf, turnUsageTotals } from './util/usage-repair';
+import { modelsForProvider } from './models/static-models';
+import { inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals, type ForkInheritance } from './util/usage-repair';
+import { errorMessage } from './util/async';
 import { electronUpdaterFacade } from './updater-electron';
 import { RemoteHost } from './remote/host';
 import { RemoteAudit } from './remote/audit';
@@ -127,7 +129,8 @@ async function main(): Promise<void> {
   const store = new SessionStore(userData, logTo);
   await store.load();
   const analytics = new AnalyticsStore(userData, { log: logTo });
-  await analytics.load(store.list(), (id) => store.readTranscript(id));
+  const providers = settings.get().providers;
+  await analytics.load(store.list(), (id) => store.readTranscript(id), providers);
 
   // Spend the Claude adapter recorded at the CLI's fallback rates before it priced third-party
   // models from the app catalog is corrected here, once and before anything reads it: `load` has
@@ -142,7 +145,7 @@ async function main(): Promise<void> {
       const meta = store.get(id);
       const ref = meta ? pricedModelOf(meta) : undefined;
       if (!ref) continue;
-      rows += await store.repriceTurns(id, (turn) => repricingOf(ref, turnUsageTotals(turn))?.to);
+      rows += await store.repriceTurns(id, (turn) => repricingOf(ref, turnUsageTotals(turn), modelsForProvider(providers, ref.provider))?.to);
     }
     await store.persist();
     logTo('info', `usage: repriced ${analytics.repricedSessions.length} claude session(s) recorded at the CLI's fallback rates (${rows} turn row(s))`);
@@ -392,6 +395,13 @@ async function main(): Promise<void> {
 
   log('info', `ready in ${Math.round(process.uptime() * 1000)}ms: ${store.list().length} session(s), ${terminals.list().length} terminal tab(s)`);
 
+  // History written before a fork stopped inheriting its source's spend is corrected here rather
+  // than in `analytics.load` with the other repairs: this one is the only one that has to read
+  // every transcript, and making the window wait on hundreds of megabytes of JSON would be a
+  // startup the user can see. It runs once — see `settleForkSweep` — and a session's numbers only
+  // ever move down, because the correction takes back what its own rows do not account for.
+  if (analytics.forkSweepPending) void reconcileForkInheritance(analytics, store, logTo);
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(settings, appRoot);
   });
@@ -546,6 +556,55 @@ const TITLEBAR_HEIGHT = 36;
 
 /** The active theme id, so the native caption can follow themes the OS knows nothing about. */
 let currentTheme: ThemeId = 'system';
+
+/**
+ * The one-time sweep for spend a fork inherited from the session it was forked from: it reads every
+ * transcript once, takes the inherited share off each session's totals and every rollup built from
+ * them, and hands the copied turn rows back by zeroing their cost.
+ *
+ * Sequential on purpose. A transcript can run to tens of megabytes and the parse is synchronous, so
+ * the loop yields between sessions instead of freezing the main process for the whole pass. It only
+ * ever moves a number down, and it never runs again — the file version settles once every session
+ * has been read, so an interrupted pass retries on the next boot rather than leaving the sessions it
+ * never reached charged for someone else's work.
+ */
+async function reconcileForkInheritance(analytics: AnalyticsStore, store: SessionStore, log: Logger): Promise<void> {
+  const started = Date.now();
+  const metas = store.list();
+  const inheritances = new Map<string, ForkInheritance>();
+  let failed = 0;
+  for (const meta of metas) {
+    try {
+      const found = inheritedUsageOf(meta, await store.readTranscript(meta.id));
+      if (found) inheritances.set(meta.id, found);
+    } catch (e) {
+      // A transcript that could not be read is one this pass cannot judge. Leaving the version at 2
+      // keeps the sweep owed, which costs another read next boot; settling anyway would quietly
+      // leave that session's numbers as they were.
+      failed++;
+      log('warn', `usage: fork sweep could not read ${meta.id}: ${errorMessage(e)}`);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (!inheritances.size) {
+    if (!failed) await analytics.settleForkSweep();
+    return;
+  }
+  const { ids, usd } = analytics.reconcileForks(metas, inheritances);
+  let rows = 0;
+  for (const [id, found] of inheritances) {
+    if (!found.carriedIds.length) continue;
+    const carried = new Set(found.carriedIds);
+    rows += await store.repriceTurns(id, (turn) => (carried.has(turn.id) ? 0 : undefined));
+  }
+  await store.persist();
+  if (!failed) await analytics.settleForkSweep();
+  log(
+    'info',
+    `usage: fork sweep took ${usd.toFixed(2)} USD and ${rows} turn row(s) back from ${ids.length} session(s) out of ${metas.length} read in ${Date.now() - started}ms` +
+      (failed ? `; ${failed} transcript(s) unreadable, so it will run again` : '')
+  );
+}
 
 /** Caption colors for the frameless title bar, matching the renderer's --bg-elev / --fg tokens. */
 function chrome(): { color: string; symbolColor: string; height: number } {
