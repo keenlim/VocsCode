@@ -189,6 +189,7 @@ describe('live harness smoke', () => {
     await adapter.send({ text: PROMPT });
     await waitTurn(170_000);
     expect(assistantText(items)).toMatch(/PONG/i);
+    expect([...items.values()].some((i) => i.kind === 'turn' && i.status === 'completed')).toBe(true);
   });
 
   it.runIf(want('cursor'))('cursor SDK answers a prompt', async (t) => {
