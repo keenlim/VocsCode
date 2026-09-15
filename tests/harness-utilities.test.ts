@@ -63,6 +63,23 @@ describe('TurnUsageTracker', () => {
     expect(tracker.finishTurn().usage).toMatchObject({ inputTokens: 5, outputTokens: 5 });
   });
 
+  it('keeps streamed samples pending when a turn ends before its cumulative snapshot', () => {
+    const tracker = new TurnUsageTracker(emptyUsage());
+    tracker.beginTurn();
+    tracker.setCumulative({ inputTokens: 100 });
+    expect(tracker.finishTurn().usage?.inputTokens).toBe(100);
+
+    // A turn the provider never confirmed: its streamed samples are the only record of it until a
+    // later snapshot covers them, so closing the turn must not mark them reconciled.
+    tracker.beginTurn();
+    tracker.addUsage({ inputTokens: 40 });
+    expect(tracker.finishTurn().usage?.inputTokens).toBe(40);
+
+    tracker.beginTurn();
+    tracker.setCumulative({ inputTokens: 150 });
+    expect(tracker.snapshot()).toMatchObject({ inputTokens: 150, turns: 2 });
+  });
+
   it('reconciles streamed per-request samples with the final cumulative counter', () => {
     const tracker = new TurnUsageTracker(emptyUsage());
     tracker.beginTurn();
