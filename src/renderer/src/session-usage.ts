@@ -73,6 +73,11 @@ export interface SessionUsageStats {
     longestMs: number;
     costUsd: number;
   };
+  /**
+   * What the transcript holds from the session this one was forked from. Reported, never counted:
+   * those turns, tool calls and dollars belong to the source's own record.
+   */
+  carried: { turns: number };
   tools: {
     total: number;
     done: number;
@@ -109,9 +114,21 @@ function toolDetail(item: ToolItem): string {
 /** Recent errors first; the panel only ever shows a window of them. */
 const MAX_ERRORS = 40;
 
+/**
+ * Whether a transcript row came from the session this one was forked from. `fork` copies the
+ * source's rows into the new session, so a row older than the session's own creation is the
+ * source's history — already counted by the session that produced it. Counting it here as well is
+ * what made a fork report its parent's turns, tool calls and spend a second time; the copied row is
+ * still shown in the transcript, it just does not belong to this session's numbers.
+ */
+function inherited(item: TranscriptItem, session: SessionMeta): boolean {
+  return item.ts < session.createdAt;
+}
+
 export function sessionUsageStats(session: SessionMeta, items: readonly TranscriptItem[]): SessionUsageStats {
   const stats: SessionUsageStats = {
     turns: { total: 0, completed: 0, interrupted: 0, failed: 0, timed: 0, totalMs: 0, longestMs: 0, costUsd: 0 },
+    carried: { turns: 0 },
     tools: { total: 0, done: 0, errors: 0, declined: 0, running: 0, totalMs: 0, timed: 0, byName: [], byHint: [] },
     files: { touched: 0, add: 0, update: 0, delete: 0, rename: 0 },
     approvals: { total: 0, allowed: 0, denied: 0 },
@@ -126,6 +143,10 @@ export function sessionUsageStats(session: SessionMeta, items: readonly Transcri
   let toolsThisTurn = 0;
 
   for (const item of items) {
+    if (inherited(item, session)) {
+      if (item.kind === 'turn') stats.carried.turns++;
+      continue;
+    }
     switch (item.kind) {
       case 'user':
         stats.messages.user++;

@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import type { SessionMeta, TranscriptItem } from '../src/shared/types';
-import { expectQuietWindow, isolatedEnv, seedSettings } from './e2e-ui';
+import { expectQuietWindow, isolatedEnv, openAnalytics, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -226,5 +226,129 @@ describe.runIf(enabled)('electron e2e: usage repair', () => {
     await again.click('.panel-tab:has-text("Usage")');
     await again.getByTestId('usage-panel').waitFor({ timeout: 30_000 });
     expect(await again.locator('.usage-hero-value').innerText()).toBe('$0.94');
+  }, 240_000);
+});
+
+/**
+ * The fork ledger: a session counts the money it spent itself.
+ *
+ * The fixture is the shape history actually holds — a session forked before the fix, carrying its
+ * source's totals and its source's turn rows, with nothing on disk saying which is which. The
+ * dollars are therefore on two sessions at once, and the analytics hero, which sums the sessions,
+ * reads $40.50 instead of $20.50. The boot sweep takes them back from the fork once; the source
+ * keeps its own, and the launch after proves the sweep does not run a second time.
+ */
+describe.runIf(enabled)('electron e2e: fork spend', () => {
+  const SID_SRC = 's_fork_src';
+  const SID_FORK = 's_fork_resumed';
+  const SRC_COST = 20;
+  const FORK_OWN_COST = 0.5;
+  const FORK_TS = T + 100_000;
+  let forkApp: ElectronApplication | null = null;
+
+  afterAll(async () => {
+    await forkApp?.close().catch(() => undefined);
+  });
+
+  const usage = (costUsd: number, inputTokens: number, outputTokens: number, turns: number): SessionMeta['usage'] => ({
+    inputTokens,
+    outputTokens,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    costUsd,
+    turns
+  });
+
+  async function seed(userData: string, project: string): Promise<void> {
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const shape = (id: string, title: string, createdAt: number, u: SessionMeta['usage']): SessionMeta => ({
+      id,
+      title,
+      createdAt,
+      updatedAt: createdAt,
+      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      usage: u
+    });
+    const sessions = [shape(SID_SRC, 'Source session', T, usage(SRC_COST, 1_000_000, 1_000, 1)), shape(SID_FORK, 'Fork of source', FORK_TS, usage(SRC_COST + FORK_OWN_COST, 1_100_000, 1_500, 2))];
+    // No analytics.json: the boot path seeds the day from the sessions themselves, exactly as a
+    // profile that predates the fix did, which is what puts the source's dollars on the books twice.
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify(sessions));
+    await fs.mkdir(path.join(userData, 'sessions', SID_SRC), { recursive: true });
+    await fs.mkdir(path.join(userData, 'sessions', SID_FORK), { recursive: true });
+    const rows: Record<string, TranscriptItem[]> = {
+      [SID_SRC]: [{ id: 'src_turn', kind: 'turn', ts: T + 4, status: 'completed', durationMs: 1_000, costUsd: SRC_COST, usage: { inputTokens: 1_000_000, outputTokens: 1_000, cacheReadTokens: 0, cacheWriteTokens: 0 } }],
+      // The fork's transcript is the source's turn plus the one turn the fork ran itself. Nothing
+      // marks the first as copied; being older than the session is the only thing that says so.
+      [SID_FORK]: [
+        { id: 'src_turn', kind: 'turn', ts: T + 4, status: 'completed', durationMs: 1_000, costUsd: SRC_COST, usage: { inputTokens: 1_000_000, outputTokens: 1_000, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        { id: 'fork_turn', kind: 'turn', ts: FORK_TS + 1, status: 'completed', durationMs: 1_000, costUsd: FORK_OWN_COST, usage: { inputTokens: 100_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+      ]
+    };
+    for (const [id, items] of Object.entries(rows)) await fs.writeFile(path.join(userData, 'sessions', id, 'transcript.jsonl'), items.map((i) => JSON.stringify(i)).join('\n') + '\n');
+  }
+
+  async function launch(userData: string): Promise<Page> {
+    const packaged = process.env.HARNESS_E2E_EXE;
+    forkApp = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const win: Page = await forkApp.firstWindow();
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(forkApp);
+    return win;
+  }
+
+  /** The all-time spend the dashboard leads with, which is the sum over every session. */
+  async function dashboardSpend(win: Page): Promise<string> {
+    await openAnalytics(win);
+    await win.getByRole('tab', { name: 'Spend' }).click();
+    return win.locator('.hero-value').innerText();
+  }
+
+  /** The right panel's figure for one session, addressed by its sidebar row. */
+  async function sessionSpend(win: Page, id: string): Promise<string> {
+    await win.locator(`[data-session-id="${id}"]`).click();
+    await win.click('.panel-tab:has-text("Usage")');
+    const panel = win.getByTestId('usage-panel');
+    await panel.waitFor({ timeout: 30_000 });
+    return win.locator('.usage-hero-value').innerText();
+  }
+
+  it("takes the source's dollars off a fork once, and leaves the source alone", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-usage-fork-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await seed(userData, project);
+
+    const win = await launch(userData);
+    // $20 spent once, not twice: the sweep runs in the background, so poll rather than race it.
+    await expect.poll(() => dashboardSpend(win), { timeout: 30_000 }).toBe('$20.50');
+
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'usage-05-fork-dashboard.png') });
+    await forkApp!.close();
+    forkApp = null;
+
+    // The second launch reads what the sweep wrote: the fork's own spend, and a turn row the reader
+    // can still see in the transcript but that no longer carries anyone's money.
+    const again = await launch(userData);
+    expect(await sessionSpend(again, SID_FORK)).toBe('$0.50');
+    expect(await again.locator('.usage-hero-note').innerText()).toBe('1 turn carried from the forked session');
+    expect(await again.locator('.uturn-row').count()).toBe(1);
+    expect(await again.locator('.uturn-row-val').first().innerText()).toBe('$0.50');
+    // The source session is untouched: the dollars moved off the copy, they were not deleted.
+    expect(await sessionSpend(again, SID_SRC)).toBe('$20.00');
+    // And the sweep is idempotent — a third state would mean it took the fork's own money too.
+    expect(await dashboardSpend(again)).toBe('$20.50');
+    await again.screenshot({ path: path.join(shots, 'usage-06-fork-session.png') });
   }, 240_000);
 });

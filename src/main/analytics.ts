@@ -9,6 +9,7 @@ import type {
   ModelRateRow,
   ModelRef,
   ModelToolRow,
+  ProviderConfig,
   SessionMeta,
   SubagentCompletion,
   SubagentCost,
@@ -28,14 +29,22 @@ import { addCounters, addFileUsage, addSlice, addToolUsage, COUNTER_FIELDS, empt
 import type { ExecutionRecord } from '../shared/analytics/records';
 import { reliabilityReport, type ReliabilityReport } from '../shared/analytics/reliability';
 import { ExecutionLog, type ExecutionContext, type ExecutionQuery } from './analytics-executions';
-import { pricedModelOf, repricingOf } from './util/usage-repair';
+import { modelsForProvider } from './models/static-models';
+import { LEDGER_FIELDS, pricedModelOf, repricingOf, type ForkInheritance, type LedgerField } from './util/usage-repair';
 import { readJson, writeJson } from './util/fs';
 
 export { emptyFileUsage, emptyToolUsage };
 export { EXECUTION_RETENTION } from './analytics-executions';
 
 interface AnalyticsFile {
-  version: 2;
+  /**
+   * 1 → the codex cached-input double count; 2 → the Claude fallback-rate repricing; 3 → fork
+   * inheritance taken back. The fork sweep is the only one that reads every transcript, so it is
+   * the only gate that has to hold across a restart: the file says 2 until the sweep finishes,
+   * which is what makes an interrupted sweep retry on the next boot instead of leaving the rest of
+   * history uncorrected.
+   */
+  version: 2 | 3;
   /** UTC day -> aggregated usage. */
   days: Record<string, UsageDay>;
   /** Last recorded cumulative totals per session, for delta computation. */
@@ -338,7 +347,7 @@ export function migrateCodexCachedInput(data: AnalyticsFile, sessions: SessionMe
  * one day) have the dollars split evenly between those days — the session total is exact either
  * way, only the day it is charted under is approximate.
  */
-export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: SessionMeta[]): { ids: string[]; usd: number } {
+export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: SessionMeta[], providers: ProviderConfig[] = []): { ids: string[]; usd: number } {
   const ids: string[] = [];
   let usd = 0;
   const cut = (slice: { costUsd: number } | undefined, by: number): void => {
@@ -347,7 +356,7 @@ export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: Sessio
   for (const meta of sessions) {
     if (meta.config.harness !== 'claude') continue;
     const ref = pricedModelOf(meta);
-    const repricing = repricingOf(ref, meta.usage);
+    const repricing = repricingOf(ref, meta.usage, modelsForProvider(providers, ref?.provider));
     if (!ref || !repricing) continue;
     const delta = repricing.from - repricing.to;
     const snapshot = data.sessions[meta.id];
@@ -356,13 +365,7 @@ export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: Sessio
     if (snapshot) snapshot.usage.costUsd = repricing.to;
     if (recorded) recorded.costUsd = repricing.to;
     const modelKey = `${ref.provider}/${ref.model}`;
-    // Days already carrying this session are where its usage was attributed. A session the store
-    // has no record of is not on any day yet — the backfill below adds it, already repriced, so
-    // there is nothing to take back; one whose day slices predate dimension tracking sits entirely
-    // on its last active day, which is where the backfill would have put it.
-    const carriers = Object.keys(data.days).filter((key) => data.days[key].by?.harness?.claude?.sessions.includes(meta.id));
-    const lastDay = dayKey(meta.updatedAt);
-    const targets = carriers.length ? carriers : (recorded || snapshot) && data.days[lastDay] ? [lastDay] : [];
+    const targets = carrierDaysOf(data, meta);
     const shares = apportion(delta, targets.map(() => 1), false);
     targets.forEach((key, i) => {
       const day = data.days[key];
@@ -376,6 +379,82 @@ export function migrateClaudeFallbackSpend(data: AnalyticsFile, sessions: Sessio
     });
     ids.push(meta.id);
     usd += delta;
+  }
+  return { ids, usd };
+}
+
+/**
+ * The day buckets a session's usage was attributed to: every day that already names it, or — for a
+ * session the store has a record of but no day slice names — its last active day, which is where
+ * the backfill would have put it. Empty when the session is on no day at all, so a correction with
+ * nothing to take back leaves the day totals alone.
+ */
+function carrierDaysOf(data: AnalyticsFile, meta: SessionMeta): string[] {
+  const carriers = Object.keys(data.days).filter((key) => data.days[key].by?.harness?.[meta.config.harness]?.sessions.includes(meta.id));
+  if (carriers.length) return carriers;
+  const lastDay = dayKey(meta.updatedAt);
+  return (data.recorded[meta.id] || data.sessions[meta.id]) && data.days[lastDay] ? [lastDay] : [];
+}
+
+/** Takes `part` off every counter of a slice, floored at zero: slices mirror the day above them. */
+function takeCounters(slice: Partial<Record<LedgerField, number>> | undefined, part: Partial<Record<LedgerField, number>>): void {
+  if (!slice) return;
+  for (const field of LEDGER_FIELDS) slice[field] = Math.max(0, (slice[field] ?? 0) - (part[field] ?? 0));
+}
+
+/**
+ * One-time correction for the spend, tokens and turns a fork inherited from the session it was
+ * forked from — see `util/usage-repair` for how the split is drawn and why `createdAt` is the cut.
+ *
+ * Every copy of the figure moves together, for the same reason the two repairs above move theirs:
+ * the session meta (which the adapter seeds its next cumulative sample from), the analytics
+ * snapshot the dashboard's rows are built from, `recorded`, and the day slices the usage was
+ * attributed to, so the day, harness, model, harness × model and project breakdowns all lose the
+ * inherited share rather than only the top line. The amount removed from a day is its counter
+ * delta, taken off each field in turn; a session spanning several days has it split evenly between
+ * them, so the session total is exact either way and only the day it is charted under is
+ * approximate.
+ *
+ * `inheritances` is keyed by session id and holds what `inheritedUsageOf` read off each transcript.
+ * Only sessions whose totals actually move are returned; a fork whose harness already reset its
+ * counters has nothing taken from it, its copied rows are still handed over by the caller.
+ */
+export function reconcileForkInheritedSpend(data: AnalyticsFile, sessions: SessionMeta[], inheritances: Map<string, ForkInheritance>): { ids: string[]; usd: number } {
+  const ids: string[] = [];
+  let usd = 0;
+  for (const meta of sessions) {
+    const found = inheritances.get(meta.id);
+    if (!found) continue;
+    const before = { ...meta.usage };
+    for (const field of LEDGER_FIELDS) meta.usage[field] = Math.max(0, (meta.usage[field] ?? 0) - (found.inherited[field] ?? 0));
+    // The part taken back, field by field: `usageDelta` is the same clamp the day write uses, read
+    // the other way round (how much the totals dropped, never how much they grew).
+    const drop = usageDelta(meta.usage, before);
+    const snapshot = data.sessions[meta.id];
+    const recorded = data.recorded[meta.id];
+    if (snapshot) takeCounters(snapshot.usage, drop);
+    if (recorded) takeCounters(recorded, drop);
+    const targets = carrierDaysOf(data, meta);
+    const share = targets.length ? 1 / targets.length : 0;
+    targets.forEach((key) => {
+      const day = data.days[key];
+      const part: Partial<UsageCounters> = {};
+      for (const field of LEDGER_FIELDS) part[field] = (drop[field] ?? 0) * share;
+      takeCounters(day, part);
+      const by = day.by;
+      if (!by) return;
+      takeCounters(by.harness?.[meta.config.harness], part);
+      takeCounters(by.project?.[meta.config.projectRoot], part);
+      const ref = pricedModelOf(meta);
+      if (!ref) return;
+      const modelKey = `${ref.provider}/${ref.model}`;
+      takeCounters(by.model?.[modelKey], part);
+      takeCounters(by.harnessModel?.[harnessModelKey(meta.config.harness, modelKey)], part);
+    });
+    const moved = LEDGER_FIELDS.some((field) => (drop[field] ?? 0) > 0);
+    if (!moved) continue;
+    ids.push(meta.id);
+    usd += drop.costUsd ?? 0;
   }
   return { ids, usd };
 }
@@ -535,6 +614,12 @@ export class AnalyticsStore {
   private backfill: Promise<void> = Promise.resolve();
   /** Sessions whose spend the load-time repair repriced; their transcript turn rows follow. */
   repricedSessions: string[] = [];
+  /**
+   * True while stored history predates fork-inheritance accounting. The sweep it asks for is the
+   * one repair that has to read every transcript, so it runs after the window is up rather than in
+   * `load`; see `settleForkSweep` for why the file version only moves once it is done.
+   */
+  forkSweepPending = false;
   private reliabilityCache?: { key: string; report: ReliabilityReport };
 
   constructor(userData: string, private readonly deps: AnalyticsDeps) {
@@ -546,11 +631,15 @@ export class AnalyticsStore {
    * Loads the store and backfills sessions that predate it: usage totals are attributed to each
    * session's last active day, and per-tool/per-file stats are rebuilt from its transcript.
    */
-  async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
+  async load(existing: SessionMeta[], readTranscript?: (id: string) => Promise<TranscriptItem[]>, providers: ProviderConfig[] = []): Promise<void> {
     const stored = await readJson<Partial<AnalyticsFile> | undefined>(this.file, undefined, { log: this.deps.log });
-    const fromV1 = (stored?.version ?? 1) < 2;
+    const storedVersion = stored?.version ?? 1;
+    const fromV1 = storedVersion < 2;
+    // Stays at 2 until the sweep reports back, so a run interrupted partway retries rather than
+    // leaving the sessions it never reached charged for someone else's work.
+    this.forkSweepPending = storedVersion < 3;
     this.data = {
-      version: 2,
+      version: this.forkSweepPending ? 2 : 3,
       days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
       recorded: stored?.recorded && typeof stored.recorded === 'object' ? stored.recorded : {},
       sessions: stored?.sessions && typeof stored.sessions === 'object' ? stored.sessions : {},
@@ -577,7 +666,7 @@ export class AnalyticsStore {
       const fixed = migrateCodexCachedInput(this.data, existing);
       if (fixed) this.deps.log('info', `analytics: removed the cached-input double-count from ${fixed} codex day(s) recorded before the fix`);
     }
-    const repriced = migrateClaudeFallbackSpend(this.data, existing);
+    const repriced = migrateClaudeFallbackSpend(this.data, existing, providers);
     this.repricedSessions = repriced.ids;
     if (repriced.ids.length) {
       this.deps.log('info', `analytics: repriced ${repriced.ids.length} claude session(s) recorded at the CLI's fallback rates, removing $${repriced.usd.toFixed(2)}`);
@@ -623,6 +712,31 @@ export class AnalyticsStore {
   /** Resolves once historical transcripts have been replayed into the execution log (tests, shutdown). */
   whenBackfilled(): Promise<void> {
     return this.backfill;
+  }
+
+  /**
+   * Applies the fork-inheritance correction the sweep read off each transcript, moving the session
+   * totals and every rollup built from them. The caller rewrites the transcript rows afterwards —
+   * they are the store's to write, not this file's.
+   */
+  reconcileForks(sessions: SessionMeta[], inheritances: Map<string, ForkInheritance>): { ids: string[]; usd: number } {
+    const result = reconcileForkInheritedSpend(this.data, sessions, inheritances);
+    if (result.ids.length) this.scheduleWrite();
+    return result;
+  }
+
+  /**
+   * Marks the fork-inheritance sweep finished, and only then moves the file to version 3. The
+   * sweep is the one repair that reads every transcript, so the marker is what keeps it from
+   * happening again — and writing it only at the end is what makes a run that dies partway retry
+   * on the next boot, rather than leaving the sessions it never reached charged for work their
+   * fork source did.
+   */
+  async settleForkSweep(): Promise<void> {
+    if (!this.forkSweepPending) return;
+    this.forkSweepPending = false;
+    this.data.version = 3;
+    await this.flush();
   }
 
   /**

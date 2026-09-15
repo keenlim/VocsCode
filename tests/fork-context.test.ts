@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { defaultSettings, type SettingsStore } from '../src/main/settings';
 import { SessionManager } from '../src/main/session-manager';
 import { renderForkContext } from '../src/main/fork-context';
+import { emptyUsage } from '../src/main/models/static-models';
+import { sessionUsageStats } from '../src/renderer/src/session-usage';
 import type { AnalyticsStore } from '../src/main/analytics';
 import type { RuntimeResolver } from '../src/main/runtime';
 import type { SessionStore } from '../src/main/store';
@@ -132,5 +134,64 @@ describe('cross-harness fork context', () => {
     await manager.send(fork!.id, { text: 'continue' });
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toBe('continue');
+  });
+});
+
+/** A source session that really spent money: $23.86 over two completed turns. */
+const SPENT = { inputTokens: 1_100_000, outputTokens: 1_500, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 23.86, turns: 2 };
+const spentTranscript: TranscriptItem[] = [
+  { id: 'u_1', kind: 'user', ts: 10, text: 'fix the login bug' },
+  { id: 'turn_1', kind: 'turn', ts: 20, status: 'completed', durationMs: 1_000, costUsd: 20, usage: { inputTokens: 1_000_000, outputTokens: 1_000, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+  { id: 'turn_2', kind: 'turn', ts: 30, status: 'completed', durationMs: 2_000, costUsd: 3.86, usage: { inputTokens: 100_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 } }
+];
+
+// A fork carries the conversation, not the ledger. Inheriting the source's totals charges the same
+// dollars to two sessions, and the dashboard then adds them up twice — which is where the largest
+// remaining error on it came from.
+describe('fork spend', () => {
+  async function forked(harness?: SessionMeta['config']['harness']) {
+    const { manager, store } = makeManager({ ...source('claude'), updatedAt: 30, usage: { ...SPENT } }, spentTranscript.map((i) => ({ ...i })));
+    const fork = (await manager.fork('s_src', harness))!;
+    const items = await store.readTranscript(fork.id);
+    return { fork, items, carried: items.filter((i): i is Extract<TranscriptItem, { kind: 'turn' }> => i.kind === 'turn') };
+  }
+
+  const shapes: [string, SessionMeta['config']['harness'] | undefined][] = [
+    ['a same-harness fork', undefined],
+    ['a fork into another harness', 'pi']
+  ];
+
+  for (const [shape, harness] of shapes) {
+    it(`hands ${shape} the conversation without the spend`, async () => {
+      const { fork, items, carried } = await forked(harness);
+
+      // The ledger starts at zero: the source's totals describe work this session did not do.
+      expect(fork.usage).toEqual(emptyUsage());
+      expect(fork.forkedFrom).toBe('s_src');
+
+      // The rows are all there — same ids, same tokens: the fork can see the conversation. Worth
+      // nothing, and marked so a reader can tell them from a turn that genuinely cost nothing.
+      expect(carried.map((t) => [t.id, t.costUsd, t.carried])).toEqual([
+        ['turn_1', 0, true],
+        ['turn_2', 0, true]
+      ]);
+      expect(carried.map((t) => t.usage?.inputTokens)).toEqual([1_000_000, 100_000]);
+
+      // What the Usage panel reports for it: nothing spent here, and the inherited turns named.
+      const stats = sessionUsageStats(fork, items);
+      expect(stats.turns.total).toBe(0);
+      expect(stats.turns.costUsd).toBe(0);
+      expect(stats.carried.turns).toBe(2);
+    });
+  }
+
+  it('counts a turn the fork ran itself, on top of carried rows worth nothing', async () => {
+    const { fork, items } = await forked();
+    items.push({ id: 'turn_3', kind: 'turn', ts: fork.createdAt + 1, status: 'completed', durationMs: 500, costUsd: 0.42, usage: { inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+
+    const stats = sessionUsageStats(fork, items);
+    expect(stats.turns.costUsd).toBeCloseTo(0.42, 9);
+    expect(stats.turns.total).toBe(1);
+    expect(stats.carried.turns).toBe(2);
   });
 });

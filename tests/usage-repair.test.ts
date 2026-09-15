@@ -12,9 +12,9 @@ import path from 'node:path';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
-import { attribute, dayKey, emptyDay, migrateClaudeFallbackSpend, usageDelta } from '../src/main/analytics';
+import { attribute, dayKey, emptyDay, migrateClaudeFallbackSpend, reconcileForkInheritedSpend, usageDelta } from '../src/main/analytics';
 import { SessionStore } from '../src/main/store';
-import { cliFallbackCostUsd, pricedModelOf, repricingOf, turnUsageTotals } from '../src/main/util/usage-repair';
+import { cliFallbackCostUsd, inheritedUsageOf, pricedModelOf, repricingOf, turnUsageTotals } from '../src/main/util/usage-repair';
 import type { ModelRef, SessionMeta, TranscriptItem, UsageDay, UsageTotals } from '../src/shared/types';
 
 const dirs: string[] = [];
@@ -200,6 +200,117 @@ describe('migrateClaudeFallbackSpend', () => {
     expect(session.usage.costUsd).toBeCloseTo(DEEPSEEK_CATALOG_USD, 9);
     expect(day.costUsd).toBe(5);
     expect(day.turns).toBe(3);
+  });
+});
+
+/**
+ * The one-time correction for forks written while `fork` copied its source's totals into the new
+ * session. Nothing on disk marks a copied row, so `createdAt` is the cut: a row older than the
+ * session is its fork source's, and the source is the session that already counted it.
+ */
+const FORK_CREATED = 2_000;
+
+function forkTurn(id: string, ts: number, costUsd: number, inputTokens: number, outputTokens: number): TranscriptItem {
+  return { id, kind: 'turn', ts, status: 'completed', durationMs: 1_000, costUsd, usage: { inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+}
+
+/** Two rows the fork carried and one it ran itself: $20.50 recorded, $20.00 of it the source's. */
+const forkRows: TranscriptItem[] = [forkTurn('turn_carried_1', 1_000, 16, 1_000_000, 1_000), forkTurn('turn_carried_2', 1_100, 4, 100_000, 500), forkTurn('turn_own', FORK_CREATED + 1, 0.5, 10_000, 0)];
+
+function forkMeta(usageTotals: UsageTotals = usage({ inputTokens: 1_110_000, outputTokens: 1_500, costUsd: 20.5, turns: 3 })): SessionMeta {
+  return meta('s_fork', DEEPSEEK, usageTotals, { createdAt: FORK_CREATED });
+}
+
+describe('inheritedUsageOf', () => {
+  it("splits a fork's totals into what it spent and what its source did", () => {
+    expect(inheritedUsageOf(forkMeta(), forkRows)).toEqual({
+      inherited: { inputTokens: 1_100_000, outputTokens: 1_500, costUsd: 20, turns: 2 },
+      carriedIds: ['turn_carried_1', 'turn_carried_2']
+    });
+  });
+
+  it('takes back no more than the totals still hold', () => {
+    // The session's counter is what it can give back: a fork whose totals were already corrected
+    // down cannot be charged for the whole of what its rows once said.
+    const part = inheritedUsageOf(forkMeta(usage({ inputTokens: 10_000, outputTokens: 0, costUsd: 5.5, turns: 1 })), forkRows);
+    expect(part?.inherited).toEqual({ costUsd: 5 });
+  });
+
+  it('hands over the rows of a fork whose counters already start at zero', () => {
+    // A harness that restarts its counters on resume reports only the fork's own spend, so there is
+    // nothing to take off the totals — but the copied rows are still the source's and worth nothing.
+    const reset = inheritedUsageOf(forkMeta(usage({ inputTokens: 10_000, outputTokens: 0, costUsd: 0.5, turns: 1 })), forkRows);
+    expect(reset).toEqual({ inherited: {}, carriedIds: ['turn_carried_1', 'turn_carried_2'] });
+  });
+
+  it('leaves a session that carried nothing alone', () => {
+    expect(inheritedUsageOf(forkMeta(), [forkRows[2]!])).toBeUndefined();
+    // A session whose rows are all its own is not a fork, whatever its totals look like.
+    expect(inheritedUsageOf(meta('s_own', DEEPSEEK, usage({ costUsd: 3, turns: 1 }), { createdAt: 1 }), [forkTurn('turn_1', 2, 3, 1_000, 10)])).toBeUndefined();
+  });
+
+  it('has nothing left to do once the rows have been handed over', () => {
+    const session = forkMeta();
+    reconcileForkInheritedSpend(fileWith(session, DEEPSEEK), [session], new Map([[session.id, inheritedUsageOf(session, forkRows)!]]));
+    // The carried rows are worth nothing now, so the session has nothing to give back on a re-run.
+    expect(inheritedUsageOf(session, [forkTurn('turn_carried_1', 1_000, 0, 1_000_000, 1_000), forkTurn('turn_carried_2', 1_100, 0, 100_000, 500), forkRows[2]!])).toBeUndefined();
+  });
+});
+
+describe('reconcileForkInheritedSpend', () => {
+  it('takes the inherited dollars off the session, its record and the day it is on', () => {
+    const session = forkMeta();
+    const data = fileWith(session, DEEPSEEK);
+    const day = data.days[dayKey(session.updatedAt)];
+    const key = `${DEEPSEEK.provider}/${DEEPSEEK.model}`;
+
+    const result = reconcileForkInheritedSpend(data, [session], new Map([[session.id, inheritedUsageOf(session, forkRows)!]]));
+
+    expect(result).toEqual({ ids: ['s_fork'], usd: 20 });
+    // What the Usage panel reports for the fork, and what its next turn is measured against.
+    expect(session.usage.costUsd).toBe(0.5);
+    expect(session.usage.inputTokens).toBe(10_000);
+    expect(session.usage.turns).toBe(1);
+    expect(data.recorded.s_fork.costUsd).toBe(0.5);
+    expect(data.sessions.s_fork.usage.costUsd).toBe(0.5);
+    expect(data.sessions.s_fork.usage.turns).toBe(1);
+    // And every breakdown the dashboard draws the day from, so the drop is not a phantom.
+    expect(day.costUsd).toBe(0.5);
+    expect(day.turns).toBe(1);
+    expect(day.by?.harness.claude.costUsd).toBe(0.5);
+    expect(day.by?.model[key].costUsd).toBe(0.5);
+    expect(day.by?.harnessModel[`claude|${key}`].costUsd).toBe(0.5);
+    expect(day.by?.project['/repo'].costUsd).toBe(0.5);
+  });
+
+  it('is a no-op the second time, so it can run on every load', () => {
+    const session = forkMeta();
+    const data = fileWith(session, DEEPSEEK);
+    const day = data.days[dayKey(session.updatedAt)];
+    reconcileForkInheritedSpend(data, [session], new Map([[session.id, inheritedUsageOf(session, forkRows)!]]));
+    const after = { costUsd: day.costUsd, inputTokens: day.inputTokens, turns: day.turns };
+
+    expect(reconcileForkInheritedSpend(data, [session], new Map([[session.id, inheritedUsageOf(session, forkRows)!]]))).toEqual({ ids: [], usd: 0 });
+    expect({ costUsd: day.costUsd, inputTokens: day.inputTokens, turns: day.turns }).toEqual(after);
+    expect(session.usage.costUsd).toBe(0.5);
+  });
+
+  it('never raises a total, however far behind the ledger the counter has fallen', () => {
+    // A fork that both inherited and lost ledger money: its counter reads $2.88 over one turn where
+    // its own row alone records $10.48. Putting the difference back would be a guess about turns the
+    // app never itemized, so nothing is added — but the row it carried is still handed over, because
+    // it is what says the session's own history starts at zero.
+    const residue = meta('s_fork', DEEPSEEK, usage({ inputTokens: 1_000, outputTokens: 0, costUsd: 2.88, turns: 1 }), { createdAt: FORK_CREATED });
+    const rows = [forkTurn('turn_carried', 1_000, 16, 1_000_000, 1_000), forkTurn('turn_own', FORK_CREATED + 1, 10.48, 20_000_000, 0)];
+    const data = fileWith(residue, DEEPSEEK);
+    const day = data.days[dayKey(residue.updatedAt)];
+
+    const found = inheritedUsageOf(residue, rows);
+    expect(found).toEqual({ inherited: {}, carriedIds: ['turn_carried'] });
+    expect(reconcileForkInheritedSpend(data, [residue], new Map([[residue.id, found!]]))).toEqual({ ids: [], usd: 0 });
+    expect(residue.usage.costUsd).toBe(2.88);
+    expect(residue.usage.turns).toBe(1);
+    expect(day.costUsd).toBe(2.88);
   });
 });
 

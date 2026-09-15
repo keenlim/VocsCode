@@ -88,6 +88,11 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
             {turnCount} turn{turnCount === 1 ? '' : 's'} · {stats.tools.total} tool call{stats.tools.total === 1 ? '' : 's'}
             {stats.turns.totalMs > 0 ? ` · ${fmtDuration(stats.turns.totalMs)} working` : ''}
           </div>
+          {stats.carried.turns > 0 && (
+            <div className="usage-hero-note" title="This session was forked; the transcript it inherited is shown in full but belongs to the session it came from, so its turns, tools and spend are not counted here.">
+              {stats.carried.turns} turn{stats.carried.turns === 1 ? '' : 's'} carried from the forked session
+            </div>
+          )}
         </div>
         {costSpark.length > 1 && <Sparkline values={costSpark} width={104} height={34} />}
       </div>
