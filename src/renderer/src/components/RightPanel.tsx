@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { FsEntry, SessionMeta, TranscriptItem } from '../../../shared/types';
+import type { FsEntry, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
-import { fmtCost, fmtDuration, fmtRate, fmtTokens, speedOfTurns } from '../format';
 import { installMarkdownHandlers, renderMarkdown } from '../markdown';
 import { useStore, type FileReveal, type PanelBottomTab, type PanelTab } from '../store';
 import { BranchesTab } from './BranchesTab';
@@ -12,6 +11,7 @@ import { GitSetup } from './GitSetup';
 import { McpTab } from './McpTab';
 import { KnowledgeTab } from './KnowledgeTab';
 import { Resizer, SplitResizer } from './Resizer';
+import { SessionUsage } from './SessionUsage';
 import { SubagentsTab } from './SubagentsTab';
 import { TerminalPanel } from './TerminalPanel';
 import { Badge, Button, Field, Icon, Spinner, Toggle } from './ui';
@@ -70,7 +70,7 @@ export function RightPanel({ session }: { session: SessionMeta }) {
           {tab === 'files' && <FilesTab session={session} />}
           {tab === 'branches' && <BranchesTab session={session} />}
           {tab === 'goal' && <GoalTab session={session} />}
-          {tab === 'usage' && <UsageTab session={session} />}
+          {tab === 'usage' && <UsageTabPanel session={session} />}
           {tab === 'terminal' && <TerminalPanel session={session} />}
         </div>
       </div>
@@ -421,68 +421,8 @@ function GoalTab({ session }: { session: SessionMeta }) {
   );
 }
 
-function UsageTab({ session }: { session: SessionMeta }) {
+/** Subscribes the Usage dashboard to the live transcript; the dashboard itself stays a pure view. */
+function UsageTabPanel({ session }: { session: SessionMeta }) {
   const items = useStore((s) => s.transcripts[session.id] ?? EMPTY);
-  const turns = useMemo(() => items.filter((i): i is Extract<TranscriptItem, { kind: 'turn' }> => i.kind === 'turn'), [items]);
-  const u = session.usage;
-  const ctxPct = u.contextWindow && u.contextTokens ? Math.min(100, (u.contextTokens / u.contextWindow) * 100) : null;
-  const maxCost = Math.max(0.0001, ...turns.map((t) => t.costUsd ?? 0));
-  const speed = useMemo(() => speedOfTurns(turns), [turns]);
-  const rate = fmtRate(speed.tokens, speed.ms);
-  return (
-    <div className="usage pad">
-      <div className="stat-grid">
-        <Stat label="Cost" value={fmtCost(u.costUsd)} />
-        <Stat label="Turns" value={String(u.turns)} />
-        {rate && <Stat label="Output speed" value={rate} title="Output tokens per second of turn wall time, averaged over completed turns (includes tool execution)" />}
-        <Stat label="Input" value={fmtTokens(u.inputTokens)} />
-        <Stat label="Output" value={fmtTokens(u.outputTokens)} />
-        <Stat label="Cache read" value={fmtTokens(u.cacheReadTokens)} />
-        <Stat label="Cache write" value={fmtTokens(u.cacheWriteTokens)} />
-        {u.reasoningTokens > 0 && <Stat label="Reasoning" value={fmtTokens(u.reasoningTokens)} />}
-      </div>
-      {ctxPct !== null && (
-        <div className="ctx-usage">
-          <div className="row">
-            <span>Context window</span>
-            <span className="spacer" />
-            <span className="muted small">{fmtTokens(u.contextTokens)} / {fmtTokens(u.contextWindow)} ({ctxPct.toFixed(0)}%)</span>
-          </div>
-          <div className="bar">
-            <span style={{ width: `${ctxPct}%` }} className={ctxPct > 85 ? 'hot' : ''} />
-          </div>
-        </div>
-      )}
-      {session.config.maxBudgetUsd && (
-        <div className="callout">
-          Budget cap ${session.config.maxBudgetUsd.toFixed(2)} · {((u.costUsd / session.config.maxBudgetUsd) * 100).toFixed(0)}% used
-        </div>
-      )}
-      <h4>Per turn</h4>
-      {turns.length === 0 && <div className="muted small">No completed turns yet.</div>}
-      <div className="turn-bars">
-        {turns.slice(-40).map((t) => (
-          <div key={t.id} className="turn-bar-row" title={`${fmtDuration(t.durationMs)} · ${fmtCost(t.costUsd)} · ${fmtTokens(t.usage?.inputTokens)} in / ${fmtTokens(t.usage?.outputTokens)} out${t.status === 'completed' && fmtRate(t.usage?.outputTokens, t.durationMs) ? ` · ${fmtRate(t.usage?.outputTokens, t.durationMs)}` : ''}`}>
-            <span className={`turn-bar-status st-${t.status}`} />
-            <span className="turn-bar">
-              <span style={{ width: `${Math.max(2, ((t.costUsd ?? 0) / maxCost) * 100)}%` }} />
-            </span>
-            <span className="muted small mono">
-              {fmtCost(t.costUsd)} · {fmtDuration(t.durationMs)}
-              {t.status === 'completed' && fmtRate(t.usage?.outputTokens, t.durationMs) ? ` · ${fmtRate(t.usage?.outputTokens, t.durationMs)}` : ''}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
-  return (
-    <div className="stat" title={title}>
-      <div className="stat-value">{value}</div>
-      <div className="stat-label">{label}</div>
-    </div>
-  );
+  return <SessionUsage session={session} items={items} />;
 }

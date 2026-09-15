@@ -116,9 +116,11 @@ async function runScenario(win: Page): Promise<void> {
   await win.click('.panel-tab:has-text("Changes")');
   await win.waitForSelector('.changes', { timeout: 10_000 });
   await win.click('.panel-tab:has-text("Usage")');
-  await win.waitForSelector('.stat-grid');
-  const costText = await win.locator('.stat').first().innerText();
-  expect(costText).toMatch(/\$/);
+  await win.waitForSelector('[data-testid="usage-panel"]');
+  expect(await win.locator('.usage-hero-value').innerText()).toMatch(/\$/);
+  // The live turn produced one column in the activity chart and one row in its table twin.
+  expect(await win.locator('.uturn').count()).toBeGreaterThanOrEqual(1);
+  expect(await win.locator('.uturn-row').count()).toBeGreaterThanOrEqual(1);
   await win.screenshot({ path: path.join(shots, `e2e-04-${harness}-usage.png`) });
 
   // Session persisted in the sidebar; transcript contains the reply exactly once (no delta duplication).
