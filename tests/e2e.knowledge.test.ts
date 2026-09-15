@@ -155,6 +155,18 @@ describe.runIf(enabled)('project knowledge panel', () => {
     const builtin = win.getByTestId('builtin-vocs-memory');
     await builtin.waitFor({ timeout: 10_000 });
     expect(await builtin.innerText()).toContain('on');
+
+    // The AGENTS.md snippet stays collapsed until asked for, and copies to the real clipboard.
+    expect(await win.getByTestId('memory-guide-text').count()).toBe(0);
+    await win.getByTestId('memory-guide-toggle').click();
+    const guide = win.getByTestId('memory-guide-text');
+    await guide.waitFor({ timeout: 10_000 });
+    const guideText = await guide.innerText();
+    expect(guideText).toContain('Memory — you have three layers');
+    expect(guideText).toContain('session_history_search');
+    await win.getByTestId('memory-guide-copy').click();
+    await expect.poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 10_000 }).toContain('**L3 — session history.**');
+
     await win.getByTestId('panel-bottom-knowledge').click();
 
     // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
