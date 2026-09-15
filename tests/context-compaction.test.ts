@@ -36,6 +36,9 @@ const settleMicrotasks = async () => {
   await Promise.resolve();
 };
 
+/** A configured window is pushed through an awaited adapter call, so it needs a full task turn. */
+const settleAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 describe('automatic compaction thresholds', () => {
   it('normalizes every preset and rejects malformed persisted values', () => {
     for (const preset of AUTO_COMPACTION_PRESETS) {
@@ -158,6 +161,87 @@ describe('automatic compaction thresholds', () => {
     fixture.emit({ type: 'status', status: 'idle' });
     await settleMicrotasks();
     expect(fixture.compact).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('engines that compact themselves', () => {
+  const nativeEngine = () => ({ setAutoCompactionWindow: vi.fn(async () => undefined) });
+
+  it('hands over the window instead of requesting compaction at an idle boundary', async () => {
+    const engine = nativeEngine();
+    const fixture = compactionFixture('75%', async () => undefined, engine);
+
+    fixture.emit({ type: 'usage', totals: usage(800_000, 1_000_000) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledWith(750_000);
+    expect(fixture.compact).not.toHaveBeenCalled();
+    const notes = fixture.transcript.filter((item) => item.kind === 'info').map((item) => (item.kind === 'info' ? item.text : ''));
+    expect(notes.join('\n')).not.toContain('Automatic context compaction requested');
+  });
+
+  it('waits for a reported context window before handing over a percentage', async () => {
+    const engine = nativeEngine();
+    const fixture = compactionFixture('75%', async () => undefined, engine);
+
+    fixture.emit({ type: 'usage', totals: usage(0) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).not.toHaveBeenCalled();
+
+    fixture.emit({ type: 'usage', totals: usage(10, 200_000) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledWith(150_000);
+  });
+
+  it('does not repeat the window the engine already has', async () => {
+    const engine = nativeEngine();
+    const fixture = compactionFixture('100k', async () => undefined, engine);
+
+    fixture.emit({ type: 'usage', totals: usage(120_000, 200_000) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it('tries again when the engine rejects the window', async () => {
+    const engine = {
+      setAutoCompactionWindow: vi.fn(async (): Promise<void> => {
+        throw new Error('unsupported');
+      }),
+    };
+    const fixture = compactionFixture('100k', async () => undefined, engine);
+
+    fixture.emit({ type: 'usage', totals: usage(120_000, 200_000) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledTimes(1);
+    expect(fixture.active.autoCompactionWindow).toBeUndefined();
+
+    engine.setAutoCompactionWindow.mockResolvedValueOnce(undefined);
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledTimes(2);
+    expect(fixture.active.autoCompactionWindow).toBe(100_000);
+  });
+
+  it('gives the engine back its own default when the threshold is cleared', async () => {
+    const engine = nativeEngine();
+    const fixture = compactionFixture('100k', async () => undefined, engine);
+
+    fixture.emit({ type: 'usage', totals: usage(120_000, 200_000) });
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).toHaveBeenCalledWith(100_000);
+
+    fixture.settings.autoCompactionThreshold = undefined;
+    fixture.emit({ type: 'status', status: 'idle' });
+    await settleAsync();
+    expect(engine.setAutoCompactionWindow).toHaveBeenLastCalledWith(undefined);
   });
 });
 
@@ -285,6 +369,7 @@ describe('model context metadata', () => {
 function compactionFixture(
   threshold: AppSettings['autoCompactionThreshold'],
   compactImpl: () => Promise<boolean | void> = async () => undefined,
+  adapterOverrides: Partial<HarnessAdapter> = {},
 ) {
   const settings = { ...defaultSettings(), autoCompactionThreshold: threshold };
   const session: SessionMeta = {
@@ -313,6 +398,7 @@ function compactionFixture(
     setPermissionMode: vi.fn(async () => undefined),
     compact,
     dispose: vi.fn(async () => undefined),
+    ...adapterOverrides,
   };
   const store = {
     list: () => [session],
@@ -346,8 +432,10 @@ function compactionFixture(
     autoCompactionRetryAt: 0,
     autoCompactionRetryTimer: null,
     compactionInFlight: null,
+    autoCompactionWindow: undefined,
+    goalContinuationTimer: null,
   };
   (manager as unknown as { active: Map<string, typeof active> }).active.set(session.id, active);
   const emit = (event: SessionEvent) => (manager as unknown as { emit: (id: string, value: SessionEvent) => void }).emit(session.id, event);
-  return { active, compact, emit, manager, send, session, transcript };
+  return { active, compact, emit, manager, send, session, settings, transcript };
 }

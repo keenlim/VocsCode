@@ -133,6 +133,8 @@ export class ClaudeAdapter implements HarnessAdapter {
   private started = false;
   private modelsEmitted = false;
   private compactionWaiter: Deferred<void> | null = null;
+  /** Token window the app wants the CLI to compact at; undefined until configured, null for the CLI's own default. */
+  private autoCompactionWindow: number | null | undefined;
 
   constructor(private readonly ctx: HarnessContext) {
     this.usage = new TurnUsageTracker(ctx.session().usage);
@@ -219,6 +221,10 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
     this.q = query({ prompt: this.input, options });
+    // The app can configure a window before the process exists; hand it over as soon as it does.
+    if (this.autoCompactionWindow !== undefined) {
+      void this.applyAutoCompactionWindow().catch((e) => this.ctx.log('warn', `claude auto-compaction window rejected: ${errorMessage(e)}`));
+    }
     this.pump = this.consume(this.q).catch((e) => {
       this.compactionWaiter?.reject(e instanceof Error ? e : new Error(errorMessage(e)));
       this.ctx.emit({ type: 'error', message: `Claude harness stopped: ${errorMessage(e)}`, fatal: true });
@@ -454,7 +460,12 @@ export class ClaudeAdapter implements HarnessAdapter {
               });
           }
         } else if (msg.subtype === 'compact_boundary') {
-          if (msg.compact_metadata.trigger === 'manual') this.compactionWaiter?.resolve();
+          const { trigger, pre_tokens, post_tokens } = msg.compact_metadata;
+          // A manual boundary answers the request this app is waiting on and is reported by the
+          // completion message. The CLI's own boundary has no app-side caller, so without a note
+          // the context would shrink with nothing in the transcript to explain it.
+          if (trigger === 'manual') this.compactionWaiter?.resolve();
+          else this.info(`Claude compacted the conversation context (${pre_tokens}${post_tokens ? ` → ${post_tokens}` : ''} tokens).`);
         } else if ((msg as { subtype?: string }).subtype === 'status') {
           const m = msg as { compact_result?: 'success' | 'failed'; compact_error?: string };
           if (m.compact_result) {
@@ -680,6 +691,29 @@ export class ClaudeAdapter implements HarnessAdapter {
     await this.q?.setPermissionMode(toSdkMode(mode));
     // Per-tool session grants do not survive a mode change.
     this.sessionAllowed.clear();
+  }
+
+  /**
+   * Claude compacts itself once told the window: the CLI reduces context from inside the turn it
+   * is running, so nothing is interrupted and no extra turn is spent on a summary.
+   */
+  async setAutoCompactionWindow(tokens: number | undefined): Promise<void> {
+    this.autoCompactionWindow = tokens ?? null;
+    await this.applyAutoCompactionWindow();
+  }
+
+  private async applyAutoCompactionWindow(): Promise<void> {
+    const window = this.autoCompactionWindow;
+    const q = this.q;
+    if (window === undefined || !q) return;
+    // null clears the flag layer, which drops the CLI back to its own default rather than to zero.
+    await q.applyFlagSettings(window === null ? { autoCompactEnabled: null, autoCompactWindow: null } : { autoCompactEnabled: true, autoCompactWindow: window });
+    // Read back what the CLI resolved: a window it silently ignores would look like a fix that works.
+    const reported = await q.getContextUsage({ detail: 'summary' }).catch((e) => {
+      this.ctx.log('debug', `context usage unavailable after setting the auto-compaction window: ${errorMessage(e)}`);
+      return null;
+    });
+    this.ctx.log('info', `claude auto-compaction window=${window ?? 'harness default'} (enabled=${reported?.isAutoCompactEnabled ?? '?'} threshold=${reported?.autoCompactThreshold ?? '?'} context=${reported?.totalTokens ?? '?'}/${reported?.rawMaxTokens ?? '?'})`);
   }
 
   async compact(): Promise<void> {

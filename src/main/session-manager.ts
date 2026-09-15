@@ -21,7 +21,7 @@ import type {
   TranscriptItem,
   UserInput
 } from '../shared/types';
-import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
+import { autoCompactionThresholdLabel, autoCompactionTokenThreshold, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
 import { createAdapter } from './harness/registry';
@@ -83,10 +83,17 @@ interface ActiveSession {
   autoCompactionRetryAt: number;
   autoCompactionRetryTimer: NodeJS.Timeout | null;
   compactionInFlight: Promise<boolean | void> | null;
+  /** Window last handed to an engine that compacts itself; undefined means it still has its own. */
+  autoCompactionWindow: number | undefined;
+  /** Pending or waiting goal auto-continuation, so a newer turn can replace it instead of racing it. */
+  goalContinuationTimer: NodeJS.Timeout | null;
 }
 
 const GOAL_COMPLETE_TOKEN = 'GOAL_COMPLETE';
 const AUTO_COMPACTION_RETRY_MS = 30_000;
+/** A goal continuation lands on the first free moment; a compaction can hold the session for minutes. */
+const GOAL_CONTINUATION_RETRY_MS = 5_000;
+const GOAL_CONTINUATION_MAX_ATTEMPTS = 60;
 /** Handoff text written into a cross-harness fork's session dir, consumed by its first message. */
 const FORK_CONTEXT_FILE = 'fork-context.md';
 
@@ -610,7 +617,9 @@ export class SessionManager {
       autoCompactionLatched: false,
       autoCompactionRetryAt: 0,
       autoCompactionRetryTimer: null,
-      compactionInFlight: null
+      compactionInFlight: null,
+      autoCompactionWindow: undefined,
+      goalContinuationTimer: null
     };
     this.active.set(id, active);
     meta.status = 'starting';
@@ -786,6 +795,7 @@ export class SessionManager {
     this.deps.log('info', `[${id}] stopping ${active.adapter.id}${active.adapter.busy ? ' (turn in progress)' : ''}`);
     this.cancelApprovals(id, active, 'Session stopped');
     if (active.autoCompactionRetryTimer) clearTimeout(active.autoCompactionRetryTimer);
+    if (active.goalContinuationTimer) clearTimeout(active.goalContinuationTimer);
     this.active.delete(id);
     await this.flushLive(id, active);
     try {
@@ -898,8 +908,35 @@ export class SessionManager {
 
   /** Wait until adapter queue bookkeeping has settled, then compact once at a safe idle boundary. */
   private scheduleAutoCompaction(id: string): void {
-    if (!this.settings().autoCompactionThreshold) return;
+    const active = this.active.get(id);
+    // An engine that compacts itself still needs the window kept in step with the setting, and it
+    // has to be told when the user clears the setting, so this cannot be gated on a threshold alone.
+    if (!active) return;
+    if (!this.settings().autoCompactionThreshold && !active.adapter.setAutoCompactionWindow) return;
     queueMicrotask(() => void this.maybeAutoCompact(id));
+  }
+
+  /**
+   * Hand the token window to an engine that compacts itself, and keep the engine's own default when
+   * the user has not chosen a threshold. A threshold whose percentage cannot be resolved yet (no
+   * reported context window) is not pushed as a clear, which would disable the engine's default.
+   * The window is recorded before the call and rolled back if the engine rejects it, so usage
+   * reports arriving while it is in flight cannot queue the same setting up twice.
+   */
+  private async syncNativeAutoCompaction(id: string, active: ActiveSession, tokens: number | undefined): Promise<void> {
+    const pushed = active.autoCompactionWindow;
+    if (tokens === undefined && pushed === undefined) return;
+    if (tokens === pushed) return;
+    active.autoCompactionWindow = tokens;
+    try {
+      await active.adapter.setAutoCompactionWindow?.(tokens);
+      this.deps.log('info', `[${id}] auto-compaction window ${pushed ?? 'harness default'} → ${tokens ?? 'harness default'}`);
+    } catch (e) {
+      // Unremembered, so the next usage report tries again rather than settling for a window the
+      // engine never took.
+      active.autoCompactionWindow = pushed;
+      this.deps.log('warn', `[${id}] auto-compaction window rejected: ${errorMessage(e)}`);
+    }
   }
 
   private scheduleAutoCompactionRetry(id: string, active: ActiveSession): void {
@@ -922,11 +959,27 @@ export class SessionManager {
     const active = this.active.get(id);
     const meta = this.get(id);
     const threshold = this.settings().autoCompactionThreshold;
-    if (!active || !meta || !threshold) return;
+    // A cleared threshold is not a no-op: an engine that was handed a window has to be told.
+    if (!active || !meta) return;
     if (active.autoCompactionThreshold !== threshold) {
       active.autoCompactionThreshold = threshold;
       active.autoCompactionLatched = false;
       this.clearAutoCompactionRetry(active);
+    }
+    // Engines that compact themselves are configured, not asked. Requesting compaction from here
+    // would also be the wrong moment for them: this runs at an idle boundary, and an idle engine has
+    // nothing to compact, while the CLI reduces context from inside the turn that needs it.
+    if (active.adapter.setAutoCompactionWindow) {
+      const window = threshold ? autoCompactionTokenThreshold(threshold, meta.usage) : undefined;
+      // A percentage whose context window is still unknown is not a clear: wait for the number.
+      if (threshold && window === undefined) return;
+      await this.syncNativeAutoCompaction(id, active, window);
+      return;
+    }
+    if (!threshold) {
+      active.autoCompactionLatched = false;
+      this.clearAutoCompactionRetry(active);
+      return;
     }
     if (!hasReachedAutoCompactionThreshold(threshold, meta.usage)) {
       active.autoCompactionLatched = false;
@@ -1126,7 +1179,8 @@ export class SessionManager {
           }
           this.schedulePersist(meta);
           this.pushSessions();
-          if (meta.status === 'idle') this.scheduleAutoCompaction(meta.id);
+          // An engine that compacts itself needs its window before the turn grows, not after it ends.
+          if (meta.status === 'idle' || active?.adapter.setAutoCompactionWindow) this.scheduleAutoCompaction(meta.id);
         }
         break;
       case 'subagent':
@@ -1221,11 +1275,42 @@ export class SessionManager {
     this.deps.log('info', `[${meta.id}] goal continuation ${goal.iterations}/${goal.maxIterations} scheduled`);
     this.schedulePersist(meta);
     const prompt = `Goal check-in ${goal.iterations}/${goal.maxIterations}. The active goal is:\n\n${goal.objective}\n\nReview what has been done so far, verify against real evidence, and continue working toward the goal. If it is now fully achieved, end your reply with the exact token ${GOAL_COMPLETE_TOKEN} on its own line after a brief completion audit. Otherwise keep going without asking for permission to continue.`;
-    setTimeout(() => {
-      const m = this.get(meta.id);
-      if (!m || m.goal?.status !== 'active' || m.status === 'running' || m.status === 'awaiting') return;
-      void this.send(meta.id, { text: prompt }).catch((e) => this.deps.log('warn', `[${meta.id}] goal continue failed: ${errorMessage(e)}`));
-    }, 1500);
+    this.scheduleGoalContinuation(meta.id, prompt);
+  }
+
+  /**
+   * Deliver a goal's auto-continuation on the first free moment. A compaction started by the turn
+   * that just ended holds the session for minutes; dropping the continuation there ended autonomous
+   * runs silently, so a busy session is waited out instead. Each attempt re-reads the session, and
+   * a newer turn's continuation replaces this one rather than racing it.
+   */
+  private scheduleGoalContinuation(id: string, prompt: string, attempt = 0): void {
+    const active = this.active.get(id);
+    if (!active) return;
+    if (attempt === 0 && active.goalContinuationTimer) {
+      clearTimeout(active.goalContinuationTimer);
+      active.goalContinuationTimer = null;
+    }
+    const timer = setTimeout(() => {
+      active.goalContinuationTimer = null;
+      if (this.active.get(id) !== active) return;
+      const meta = this.get(id);
+      if (!meta || meta.goal?.status !== 'active') return;
+      // An awaiting session has a turn in flight behind that approval; that turn's own end
+      // schedules the next continuation, so only a session still working needs waiting out.
+      if (meta.status === 'awaiting') return;
+      if (meta.status === 'running') {
+        if (attempt + 1 >= GOAL_CONTINUATION_MAX_ATTEMPTS) {
+          this.deps.log('warn', `[${id}] goal continuation gave up after ${attempt + 1} attempts with the session busy`);
+          return;
+        }
+        this.scheduleGoalContinuation(id, prompt, attempt + 1);
+        return;
+      }
+      void this.send(id, { text: prompt }).catch((e) => this.deps.log('warn', `[${id}] goal continue failed: ${errorMessage(e)}`));
+    }, attempt === 0 ? 1500 : GOAL_CONTINUATION_RETRY_MS);
+    timer.unref?.();
+    active.goalContinuationTimer = timer;
   }
 
   async goal(id: string, action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', opts: { objective?: string; autoContinue?: boolean; maxIterations?: number }): Promise<SessionMeta> {
