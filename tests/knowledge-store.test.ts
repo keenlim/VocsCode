@@ -93,6 +93,25 @@ describe('knowledge store scoping', () => {
     await expect(fs.stat(path.join(cwd, '.vocs-code'))).rejects.toThrow();
   });
 
+  it('reports a delete only when a file was actually removed', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const cwd = path.join(projectRoot, '.vocs-code', 'worktrees', 'feature');
+    await fs.mkdir(cwd, { recursive: true });
+    const repoScope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const branchScope: KnowledgeScope = { projectRoot, cwd, branch: 'vocscode/feature' };
+    const store = new KnowledgeStore();
+    await store.write(repoScope, pageMeta({ scope: 'repo' }), 'repo body');
+
+    // The branch dir holds nothing, and `fs.rm(force: true)` resolves for a missing path: without a
+    // real existence check the branch slice would claim the delete and this page would survive.
+    expect(await store.deletePage(branchScope, 'conventions/harness-lifecycle')).toBe(true);
+    expect(await store.read(repoScope, 'conventions/harness-lifecycle')).toBeNull();
+    expect(await store.load(branchScope)).toHaveLength(0);
+
+    // Nothing left to remove in either scope, so a second delete must not report success.
+    expect(await store.deletePage(branchScope, 'conventions/harness-lifecycle')).toBe(false);
+  });
+
   it('reports a page stale when a cited file disappears or changes', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const store = new KnowledgeStore();
@@ -159,6 +178,38 @@ describe('knowledge service ingestion', () => {
     expect(await svc.store.read(scope, 'concept/bad-idea')).toBeNull();
   });
 
+  it('refuses to tombstone a claim whose page survived the delete', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings, store });
+    await store.write(scope, pageMeta({ claim: 'A claim that will not go away.' }), 'body');
+    // A store whose unlink succeeds without removing anything — what `fs.rm(force)` did.
+    Object.assign(store, { deletePage: async () => false });
+
+    await expect(svc.review(scope, 'conventions/harness-lifecycle', 'reject', { by: 'human' })).rejects.toThrow(/not tombstoned/);
+    // The page is still served, so remembering the claim as removed would be a lie the tools act on.
+    expect(await store.rejectedClaims(scope)).toEqual([]);
+    expect(await store.read(scope, 'conventions/harness-lifecycle')).not.toBeNull();
+  });
+
+  it('leaves an uncertain page alone when everything pending is accepted at once', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings, store });
+    await store.write(scope, pageMeta({ id: 'conventions/doubtful', title: 'Doubtful', status: 'uncertain', claim: 'A doubted claim.' }), 'body');
+    await store.write(scope, pageMeta({ id: 'conventions/queued', title: 'Queued', status: 'proposed', claim: 'A queued claim.' }), 'body');
+    await store.write(scope, pageMeta({ id: 'conventions/old', title: 'Old', status: 'superseded', claim: 'An old claim.' }), 'body');
+
+    const result = await svc.acceptAll(scope, { by: 'human' });
+    expect(result.accepted).toBe(1);
+    // `uncertain` is a recorded judgement about a claim, not an undecided one.
+    expect((await store.read(scope, 'conventions/doubtful'))?.meta.status).toBe('uncertain');
+    expect((await store.read(scope, 'conventions/old'))?.meta.status).toBe('superseded');
+    expect((await store.read(scope, 'conventions/queued'))?.meta.status).toBe('current');
+  });
+
   it('supersedes the pages a claim names as soon as it is ingested', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
@@ -215,6 +266,76 @@ describe('knowledge search and digest', () => {
     expect(episodes).toHaveLength(1);
     expect(episodes[0].summary).toBe('Add PTY guard');
   });
+
+  it('reads the newest episode first, not the oldest row of the day file', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    await svc.store.write(scope, pageMeta(), 'body text');
+    // Rows are appended oldest-first inside a day file; the reader must not hand `[0]` to callers.
+    await svc.recordEpisode(scope, { kind: 'commit', sessionId: 's1', at: '2026-09-14T09:00:00.000Z', summary: 'Yesterday' });
+    await svc.recordEpisode(scope, { kind: 'commit', sessionId: 's2', at: '2026-09-15T09:00:00.000Z', summary: 'This morning' });
+    await svc.recordEpisode(scope, { kind: 'commit', sessionId: 's3', at: '2026-09-15T18:00:00.000Z', summary: 'This evening' });
+
+    const episodes = await svc.store.readEpisodes(scope, 2);
+    expect(episodes.map((e) => e.summary)).toEqual(['This evening', 'This morning']);
+    expect(await svc.store.readEpisodes(scope)).toHaveLength(3);
+  });
+
+  it('attributes distillation to the newest episode, not the first row of the day', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const asked: string[] = [];
+    const svc = new KnowledgeService({
+      log: () => undefined,
+      settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings,
+      transcript: async (sessionId) => {
+        asked.push(sessionId);
+        return [`session ${sessionId}`];
+      },
+      synth: { completer: { label: () => 'test/model', complete: async () => JSON.stringify({ proposals: [] }) } }
+    });
+    await svc.store.write(scope, pageMeta(), 'body');
+    await svc.recordEpisode(scope, { kind: 'commit', sessionId: 's_old', at: '2026-09-15T08:00:00.000Z', summary: 'Older work' });
+    await svc.recordEpisode(scope, { kind: 'commit', sessionId: 's_new', at: '2026-09-15T17:00:00.000Z', summary: 'Newest work' });
+
+    expect((await svc.generate(scope, 'distill')).ok).toBe(true);
+    expect(asked).toContain('s_new');
+    expect(asked).not.toContain('s_old');
+  });
+
+  it('starts an empty wiki for a project whose docs cannot bootstrap one', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const svc = service();
+    expect((await svc.view(scope)).status.hasWiki).toBe(false);
+    expect(await svc.store.hasWiki(scope)).toBe(false);
+
+    const created = await svc.createWiki(scope);
+    expect(created.status.hasWiki).toBe(true);
+    expect(created.pages).toHaveLength(0);
+    expect((await fs.stat(path.join(projectRoot, '.vocs-code', 'wiki'))).isDirectory()).toBe(true);
+    // The directory is what turns the project's memory on for the tools and the panel.
+    expect(await svc.store.hasWiki(scope)).toBe(true);
+  });
+
+  it('publishes into the session checkout rather than the main project', async () => {
+    const projectRoot = tmpDir('vocs-kb-');
+    const cwd = tmpDir('vocs-kb-wt-');
+    const scope: KnowledgeScope = { projectRoot, cwd };
+    const store = new KnowledgeStore();
+    const svc = new KnowledgeService({ log: () => undefined, settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings, store });
+    await store.write(scope, pageMeta(), 'body text');
+
+    const result = await svc.publish(scope, ['conventions/harness-lifecycle']);
+    expect(result.ok).toBe(true);
+    expect(result.dir).toBe(path.join(cwd, 'docs', 'wiki'));
+    expect(result.written).toEqual(['docs/wiki/conventions/harness-lifecycle.md']);
+    expect(await fs.readFile(path.join(cwd, 'docs', 'wiki', 'conventions', 'harness-lifecycle.md'), 'utf8')).toContain('Harness lifecycle');
+    // The main checkout is untouched: a worktree's work publishes with that worktree.
+    await expect(fs.stat(path.join(projectRoot, 'docs'))).rejects.toThrow();
+  });
+
 
   it('keeps the last job outcome on the view so a failure is not just a toast', async () => {
     const projectRoot = tmpDir('vocs-kb-');

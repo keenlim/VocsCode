@@ -6,7 +6,8 @@
  * The app talks to the one shared GitNexus server directly (not through the session scope proxy),
  * so it passes the repo name explicitly, exactly as the proxy does for a harness. A project that is
  * not indexed, a server that is not running, and a call that fails all resolve to `unavailable`
- * rather than an error: the panel must render a page whose anchors cannot be checked.
+ * rather than an error: the panel must render a page whose anchors cannot be checked. One
+ * wall-clock budget bounds the whole call, so a slow or wedged server cannot hold the panel.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -28,6 +29,10 @@ export interface GitnexusAnchorDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** How long a resolution stays fresh. Default 5 minutes. */
   ttlMs?: number;
+  /** Wall-clock ceiling for one `resolve()` call, covering the connect. Default 15 seconds. */
+  budgetMs?: number;
+  /** How many `context` calls may be in flight at once. Default 4. */
+  concurrency?: number;
   now?: () => number;
 }
 
@@ -35,6 +40,33 @@ interface ContextReply {
   status?: string;
   error?: string;
   symbol?: { uid?: string; name?: string; filePath?: string; startLine?: number; endLine?: number };
+}
+
+const DEFAULT_BUDGET_MS = 15_000;
+/** One symbol lookup may never outlive the whole budget, but there is no point asking for less. */
+const CALL_TIMEOUT_MS = 10_000;
+const DEFAULT_CONCURRENCY = 4;
+const TIMED_OUT = 'Anchor resolution ran out of time.';
+
+/**
+ * Resolves `work`, or the fallback once `ms` have passed. The loser is left running — a GitNexus
+ * start cannot be cancelled — but its rejection is already handled by the race, and nothing it does
+ * afterwards touches this resolver's cache.
+ */
+async function withinBudget<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  if (ms <= 0) return fallback;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const anchorKey = (a: KnowledgeAnchor): string => `${a.file}\u0000${a.symbol ?? ''}`;
@@ -68,14 +100,21 @@ export function createGitnexusAnchorResolver(deps: GitnexusAnchorDeps): AnchorRe
   return {
     async resolve(scope, anchors) {
       if (!anchors.length) return [];
+      const clock = deps.now ?? Date.now;
+      // One budget covers the whole call — including the connect, which is the slowest failure —
+      // because the panel waits on this synchronously: a page naming a dozen symbols must not hold
+      // the detail view for minutes when GitNexus is wedged.
+      const deadline = clock() + (deps.budgetMs ?? DEFAULT_BUDGET_MS);
+      const left = () => deadline - clock();
+      const spent = () => left() <= 0;
       // Ask the registry first: an unindexed project must not start the GitNexus server at all (on a
       // machine without the binary that is a slow npx attempt the panel would visibly wait on).
-      const repo = await deps.repoName(scope);
-      if (!repo) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'This project is not indexed by GitNexus.' }));
-      const url = await deps.url();
-      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'GitNexus is not running.' }));
+      const repo = await withinBudget(deps.repoName(scope), left(), null);
+      if (!repo) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: spent() ? TIMED_OUT : 'This project is not indexed by GitNexus.' }));
+      const url = await withinBudget(deps.url(), left(), null);
+      if (!url) return anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: spent() ? TIMED_OUT : 'GitNexus is not running.' }));
 
-      const now = (deps.now ?? Date.now)();
+      const now = clock();
       const ttl = deps.ttlMs ?? 300_000;
       const resolved = new Map<string, KnowledgeAnchorResolution>();
       const pending: KnowledgeAnchor[] = [];
@@ -88,21 +127,36 @@ export function createGitnexusAnchorResolver(deps: GitnexusAnchorDeps): AnchorRe
 
       if (pending.length) {
         let client: ConnectedMcpServer | null = null;
+        const queue = [...pending];
         try {
-          client = await connectServer({ id: 'gitnexus', transport: 'http', url });
-          for (const anchor of pending) {
-            const result = await client.call('context', { repo, name: anchor.symbol, file: anchor.file }, { timeoutMs: 10_000 });
-            const value = parseContextReply(result.output, anchor);
-            resolved.set(anchorKey(anchor), value);
-            cache.set(cacheKey(repo, anchor), { at: now, value });
-          }
+          client = await connectServer({ id: 'gitnexus', transport: 'http', url }, { timeoutMs: Math.max(left(), 1) });
+          // Bounded parallelism: a few workers share the queue, each call capped by what is left of
+          // the budget. `allSettled` keeps one failed call from returning while other workers are
+          // still awaiting a client that `finally` closes — which leaks unhandled rejections and
+          // writes into the cache after the caller has the answer.
+          const workers = Math.min(deps.concurrency ?? DEFAULT_CONCURRENCY, queue.length);
+          const calls = Array.from({ length: workers }, async () => {
+            for (let anchor = queue.shift(); anchor; anchor = queue.shift()) {
+              if (spent()) return;
+              try {
+                const result = await client!.call('context', { repo, name: anchor.symbol, file: anchor.file }, { timeoutMs: Math.min(CALL_TIMEOUT_MS, Math.max(left(), 1)) });
+                const value = parseContextReply(result.output, anchor);
+                resolved.set(anchorKey(anchor), value);
+                cache.set(cacheKey(repo, anchor), { at: now, value });
+              } catch (e) {
+                deps.log('debug', `knowledge: anchor lookup failed for ${anchor.file}#${anchor.symbol}: ${errorMessage(e)}`);
+              }
+            }
+          });
+          await Promise.allSettled(calls);
         } catch (e) {
           deps.log('warn', `knowledge: anchor resolution failed: ${errorMessage(e)}`);
-          for (const anchor of pending) {
-            if (!resolved.has(anchorKey(anchor))) resolved.set(anchorKey(anchor), { ...anchor, status: 'unavailable', note: 'GitNexus did not answer.' });
-          }
         } finally {
           await client?.close();
+        }
+        const note = spent() ? TIMED_OUT : 'GitNexus did not answer.';
+        for (const anchor of pending) {
+          if (!resolved.has(anchorKey(anchor))) resolved.set(anchorKey(anchor), { ...anchor, status: 'unavailable', note });
         }
       }
 

@@ -22,12 +22,12 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 | Scored + graph-aware retrieval, digest, ingestion, authority, jobs facade | `src/main/knowledge/service.ts` |
 | Bootstrap, distillation and PR-reflection prompts (utility model) | `src/main/knowledge/synth.ts`, `knowledge/llm.ts` |
 | Shared schema, frontmatter codec, digest renderer | `src/shared/knowledge.ts` |
-| `vocs-memory` stdio MCP server (5 tools) | `resources/mcp/vocs-memory.mjs` |
+| `vocs-memory` stdio MCP server (6 tools) | `resources/mcp/vocs-memory.mjs` |
 | Built-in server registration + per-repo switches | `src/main/mcp/memory.ts`, `src/main/mcp/index.ts` |
 | Knowledge panel (browse · search · reject/delete · publish) | `src/renderer/src/components/KnowledgeTab.tsx` |
 | Live anchor resolution | `src/main/knowledge/anchors.ts` — each page anchor is checked against GitNexus when the detail view opens |
 | Session history recall (L3) | `session_history_search` in `resources/mcp/vocs-memory.mjs`, scoped to the project and redacted |
-| Session priming | `SessionManager.create` → `appendSystemPrompt` |
+| Session priming | `SessionManager.create` → `SessionMeta.knowledgeDigest` (system prompt, else first-turn preamble) |
 | Git boundaries → episodes → distillation / reflection | `src/main/handlers.ts` (`git:commit`, `git:pr`, `git:merge`) |
 
 ## Architecture
@@ -44,7 +44,7 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 ┌────────────────────────▼───┐   ┌──────▼──────────┐  ┌──▼─────────────────────┐
 │ vocs-memory (stdio MCP)    │   │  Knowledge panel │  │ bootstrap: repo docs → │
 │ search · read · related ·  │   │  browse · search │  │ pages (scan ledger)    │
-│ propose · status           │   │  reject/delete · │  │ distill: episodes →    │
+│ history · propose · status │   │  reject/delete · │  │ distill: episodes →    │
 └────────────────────────────┘   │  publish         │  │ pages                  │
                                  └──────────────────┘  │ reflect: PR commits +  │
                                                        │ bounded diff → pages   │
@@ -73,10 +73,13 @@ Five seams:
    MCP capability is `inject` or `client`. Cursor does not get it (inherit-only, file export); pi
    subagent children do, over the parent's connections, unless their agent definition sets
    `mcp: false` — which the shipped Explore and Plan templates do. A project with no wiki gets no server at all.
-2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session's
-   `appendSystemPrompt` gains a bounded `<digest>` naming the most useful pages. It never contains
-   page bodies, never outranks AGENTS.md, and reaches pi subagent children for free (they inherit
-   the parent system prompt).
+2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session gains a bounded
+   `<digest>` naming the most useful pages. It never contains page bodies and never outranks
+   AGENTS.md. A harness with a system prompt (pi, Claude, native) gets it through
+   `appendSystemPrompt`; the four that have none (Codex app-server, Codex exec, Cursor, ACP) get it
+   as a once-per-session preamble on the first turn instead — the same mechanism a cross-harness
+   fork uses, so the transcript still records only what the user typed. pi subagent children get it
+   for free, inheriting the parent system prompt.
 3. **App surface.** The Knowledge panel and Vesta read the same service, so the panel, the tools and
    the jobs can never disagree about what the wiki says.
 4. **Jobs.** One background completion at a time per project, on the `utilityModel`. A job ingests
@@ -245,7 +248,7 @@ turns into noise.
 
 ## Retrieval
 
-Five tools, all pull-based and cheap enough to call without thinking:
+Six tools, all pull-based and cheap enough to call without thinking:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |

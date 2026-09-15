@@ -18,6 +18,7 @@ import type {
   UsageBucket,
   UsageCounters,
   UsageDay,
+  UsageDayDimensions,
   UsageSessionRecord,
   UsageSpeed,
   UsageTotals
@@ -144,7 +145,7 @@ function attributionOf(meta: SessionMeta): Attribution {
   return { id: meta.id, harness: meta.config.harness, provider: meta.activeModel?.provider, model: meta.activeModel?.model, projectRoot: meta.config.projectRoot };
 }
 
-/** Adds `delta` to the day's harness, model and project slices for the session that produced it. */
+/** Adds `delta` to the day's harness, model, harness × model and project slices for the session that produced it. */
 export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageCounters>): void {
   const by = (day.by ??= emptyDimensions());
   addSlice(by.harness, who.harness, who.harness, delta, who.id);
@@ -152,7 +153,9 @@ export function attribute(day: UsageDay, who: Attribution, delta: Partial<UsageC
   // tracking has none, so it keeps the bare id rather than showing a leading slash.
   if (who.model) {
     const key = `${who.provider ?? ''}/${who.model}`;
-    addSlice(by.model, key, modelKeyLabel(key), delta, who.id);
+    const label = modelKeyLabel(key);
+    addSlice(by.model, key, label, delta, who.id);
+    addSlice(by.harnessModel, harnessModelKey(who.harness, key), label, delta, who.id);
   }
   addSlice(by.project, who.projectRoot, who.projectRoot, delta, who.id);
 }
@@ -211,6 +214,25 @@ export function estimateDaySlices(day: UsageDay, sessions: UsageSessionRecord[])
   day.by = { ...emptyDimensions(), estimated: true };
   active.forEach((s, i) => attribute(day, { id: s.id, harness: s.harness, provider: s.provider, model: s.model, projectRoot: s.projectRoot }, shares[i]));
   return true;
+}
+
+/**
+ * The one model every one of `sessions` was filed under within the day, or undefined when they
+ * disagree or one of them is in no model slice at all. Day slices record the model that was active
+ * at the time, so this is evidence about the day itself rather than about the sessions' last model.
+ */
+function dayModelCovering(by: UsageDayDimensions, sessions: string[]): string | undefined {
+  if (sessions.length === 0) return undefined;
+  const owners = new Set(sessions);
+  let found: string | undefined;
+  for (const [modelKey, slice] of Object.entries(by.model)) {
+    if (!slice.sessions.some((id) => owners.has(id))) continue;
+    if (found !== undefined && found !== modelKey) return undefined;
+    found = modelKey;
+  }
+  if (found === undefined) return undefined;
+  const covering = new Set(by.model[found].sessions);
+  return sessions.every((id) => covering.has(id)) ? found : undefined;
 }
 
 function snapshotSession(meta: SessionMeta, prev?: UsageSessionRecord): UsageSessionRecord {
@@ -357,6 +379,11 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     const key = `${s.provider ?? ''}/${s.model}`;
     return { key, label: modelKeyLabel(key) };
   });
+  const byHarnessModel = rollup((s) => {
+    if (!s.model) return null;
+    const key = `${s.provider ?? ''}/${s.model}`;
+    return { key: harnessModelKey(s.harness, key), label: modelKeyLabel(key) };
+  });
   const byProject = rollup((s) => ({ key: s.projectRoot, label: s.projectRoot }));
   // Effective rates per model: blended $/M tokens across input, output and cache, and $/call where
   // one call is one model turn. Rates stay undefined while the denominator was never measured.
@@ -406,6 +433,7 @@ export function summarize(sessions: UsageSessionRecord[], dayMap: Record<string,
     previous,
     byHarness,
     byModel,
+    byHarnessModel,
     byProject,
     modelRates,
     toolTotals,
@@ -476,7 +504,7 @@ export class AnalyticsStore {
     for (const day of Object.values(this.data.days)) {
       for (const f of COUNTER_FIELDS) if (typeof day[f] !== 'number') day[f] = 0;
       if (day.by !== undefined && (typeof day.by !== 'object' || day.by === null)) delete day.by;
-      if (day.by) for (const dim of ['harness', 'model', 'project', 'tool', 'modelTool', 'harnessModelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
+      if (day.by) for (const dim of ['harness', 'model', 'harnessModel', 'project', 'tool', 'modelTool', 'harnessModelTool', 'file'] as const) if (typeof day.by[dim] !== 'object' || day.by[dim] === null) day.by[dim] = {};
       if (day.by?.harnessTool !== undefined && (typeof day.by.harnessTool !== 'object' || day.by.harnessTool === null)) delete day.by.harnessTool;
     }
     // One-time repair before anything reads the numbers: version-1 stores were written entirely by
@@ -487,6 +515,8 @@ export class AnalyticsStore {
     }
     const estimated = this.estimateLegacyDays();
     if (estimated) this.deps.log('info', `analytics: estimated per-model slices for ${estimated} day(s) recorded before slice tracking`);
+    const recovered = this.recoverHarnessModelDays();
+    if (recovered) this.deps.log('info', `analytics: recovered the harness × model split for ${recovered} day(s) recorded before that dimension existed`);
     let backfilled = 0;
     for (const meta of existing) {
       if (this.data.recorded[meta.id]) {
@@ -625,6 +655,32 @@ export class AnalyticsStore {
     return estimated.length;
   }
 
+  /**
+   * Fills the harness × model dimension on days recorded before it existed, but only where the
+   * day's own slices already prove the answer: a harness whose sessions were all filed under one
+   * model used that model for everything it recorded that day, so its slice copies over exactly.
+   * A harness that spread across several models that day is left alone — a rate split by guesswork
+   * is worse than a gap. Days whose slices were estimated already have the dimension. Returns the
+   * number of harness/day pairs recovered.
+   */
+  private recoverHarnessModelDays(): number {
+    let recovered = 0;
+    for (const day of Object.values(this.data.days)) {
+      const by = day.by;
+      if (!by) continue;
+      for (const [harness, slice] of Object.entries(by.harness)) {
+        const modelKey = dayModelCovering(by, slice.sessions ?? []);
+        if (!modelKey) continue;
+        const key = harnessModelKey(harness, modelKey);
+        if (by.harnessModel[key]) continue;
+        // Same shape `attribute` writes: the counters of the harness, labelled by the model.
+        by.harnessModel[key] = { ...slice, label: modelKeyLabel(modelKey), sessions: [...slice.sessions] };
+        recovered++;
+      }
+    }
+    return recovered;
+  }
+
   /** Aggregates completed tool calls from an old transcript into the store, one-time per session. */
   private async backfillTranscript(sessionId: string, dayTs: number, readTranscript: (id: string) => Promise<TranscriptItem[]>): Promise<void> {
     let items: TranscriptItem[];
@@ -704,7 +760,9 @@ export class AnalyticsStore {
       const model = completion.model?.model;
       if (model) {
         const by = (day.by ??= emptyDimensions());
-        addSlice(by.model, `${provider ?? ''}/${model}`, model, delta, meta.id);
+        const modelKey = `${provider ?? ''}/${model}`;
+        addSlice(by.model, modelKey, model, delta, meta.id);
+        addSlice(by.harnessModel, harnessModelKey(meta.config.harness, modelKey), model, delta, meta.id);
       }
     }
     this.scheduleWrite();
@@ -731,7 +789,8 @@ export class AnalyticsStore {
    * Moves queued subagent cost off the session's active model and onto the model each run used.
    * Bounded by the active model's own slice so a day can never go negative, and whatever cannot be
    * moved stays queued for a later delta — so the cumulative split converges even when the spend
-   * and the completion land in different turns.
+   * and the completion land in different turns. The harness × model slice carries the same cost,
+   * so it moves in lockstep: only the amount both slices can give up is ever moved.
    */
   private flushSubagentCost(meta: SessionMeta, day: UsageDay): void {
     const pending = this.pendingSubagentCost.get(meta.id);
@@ -740,18 +799,23 @@ export class AnalyticsStore {
     const by = (day.by ??= emptyDimensions());
     const fromKey = `${active.provider}/${active.model}`;
     const from = by.model[fromKey];
-    if (!from) return;
+    const fromHarness = by.harnessModel[harnessModelKey(meta.config.harness, fromKey)];
+    if (!from || !fromHarness) return;
     for (const [key, c] of pending) {
       if (key === fromKey) {
         pending.delete(key);
         continue;
       }
-      const moved = Math.min(c.costUsd, from.costUsd);
+      const moved = Math.min(c.costUsd, from.costUsd, fromHarness.costUsd);
       if (moved <= 0) continue;
       from.costUsd -= moved;
       const to = (by.model[key] ??= emptySlice(modelKeyLabel(key)));
       to.costUsd += moved;
       if (!to.sessions.includes(meta.id)) to.sessions.push(meta.id);
+      fromHarness.costUsd -= moved;
+      const toHarness = (by.harnessModel[harnessModelKey(meta.config.harness, key)] ??= emptySlice(modelKeyLabel(key)));
+      toHarness.costUsd += moved;
+      if (!toHarness.sessions.includes(meta.id)) toHarness.sessions.push(meta.id);
       c.costUsd -= moved;
       if (c.costUsd <= 1e-9) pending.delete(key);
     }
