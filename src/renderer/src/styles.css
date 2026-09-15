@@ -3369,75 +3369,307 @@ body.resizing {
   flex: 1;
   min-height: 0;
 }
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+/* Usage page: a session dashboard inside a narrow column. The chart primitives are the analytics
+   ones, so only the panel-scale overrides and the panel-only marks (turn columns, error log) live
+   here. Status hues stay reserved for status; mixes use the categorical --chart-N slots. */
+.usage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 12px 14px;
+  min-width: 0;
 }
-.stat {
+.usage-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.usage-hero-main {
+  min-width: 0;
+}
+.usage-hero-label {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+.usage-hero-value {
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+.usage-hero-sub {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+.usage-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 6px;
+}
+.ukpi {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  background: var(--bg-elev);
+  padding: 6px 8px 7px;
+  min-width: 0;
 }
-.stat-value {
+.ukpi-value {
   font-size: 16px;
   font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.stat-label {
+.ukpi-label {
+  font-size: 10.5px;
+  color: var(--fg-muted);
+}
+.ukpi-sub {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ukpi-bad .ukpi-value {
+  color: var(--red);
+}
+.ukpi-live .ukpi-value {
+  color: var(--accent);
+}
+.usage-meters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 16px;
+}
+.usage-block,
+.usage-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.usage h5 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.usage-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.usage-switch-note,
+.usage-note {
   font-size: 11px;
   color: var(--fg-muted);
 }
-.ctx-usage {
-  margin-top: 12px;
+/* The analytics bar list assumes a full-width card; in the panel the label column has to give. */
+.usage .hbar {
+  grid-template-columns: minmax(78px, 1.2fr) minmax(40px, 1fr) auto 36px;
+  gap: 8px;
 }
-.bar {
-  height: 8px;
-  border-radius: 4px;
-  background: var(--border);
-  overflow: hidden;
-  margin-top: 4px;
+.usage .chart-empty {
+  padding: 10px 0;
 }
-.bar span {
-  display: block;
+.usage .stackbar-legend {
+  gap: 2px 10px;
+}
+
+/* Turn activity: one column per turn, height by the selected metric, status by the reserved hues.
+   The value lands in the readout above rather than a floating tooltip, which will not fit here. */
+.uturn-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  min-height: 16px;
+}
+.uturn-readout-main {
+  font-weight: 600;
+}
+.uturn-readout-sub {
+  color: var(--fg-muted);
+}
+.uturns {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 84px;
+  padding: 0 1px;
+  border-bottom: 1px solid var(--border);
+}
+.uturn {
+  flex: 1 1 0;
+  /* Capped so a three-turn session draws three bars rather than three slabs. */
+  max-width: 20px;
+  min-width: 3px;
   height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: default;
+}
+.uturn-fill {
+  display: block;
+  width: 100%;
+  border-radius: 3px 3px 0 0;
   background: var(--accent);
 }
-.bar span.hot {
-  background: var(--red);
-}
-.turn-bars {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.turn-bar-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.turn-bar-status {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--green);
-}
-.turn-bar-status.st-failed {
-  background: var(--red);
-}
-.turn-bar-status.st-interrupted {
+.uturn.st-interrupted .uturn-fill {
   background: var(--amber);
 }
-.turn-bar {
-  flex: 1;
-  height: 8px;
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  overflow: hidden;
+.uturn.st-failed .uturn-fill {
+  background: var(--red);
 }
-.turn-bar span {
-  display: block;
-  height: 100%;
+.uturn.focused .uturn-fill {
+  outline: 2px solid var(--bg-elev);
+  outline-offset: -1px;
+  filter: brightness(1.15);
+}
+.uturn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.uturn-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.uturn-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.uturn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
   background: var(--accent);
+  flex: 0 0 auto;
+}
+.uturn-dot.st-interrupted {
+  background: var(--amber);
+}
+.uturn-dot.st-failed {
+  background: var(--red);
+}
+.uturn-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.uturn-row {
+  display: grid;
+  grid-template-columns: 7px 28px repeat(3, minmax(0, 1fr)) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.uturn-row-name {
+  color: var(--fg-muted);
+}
+.uturn-row-val,
+.uturn-row-rate {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Failure counters and the error log */
+.uerr-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 6px;
+}
+.uerr-count {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 5px 7px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.uerr-count.hot {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+}
+.uerr-count-value {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.uerr-count.hot .uerr-count-value {
+  color: var(--red);
+}
+.uerr-count-label {
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.uerr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.uerr {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 2px 6px;
+  border-left: 2px solid var(--red);
+  background: var(--red-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 5px 8px;
+}
+.uerr-icon {
+  color: var(--red);
+  grid-row: span 2;
+  margin-top: 2px;
+}
+.uerr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.uerr-label {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.uerr-time {
+  margin-left: auto;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.uerr-detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Terminal panel: tab strip, find/rename bars and the xterm mount. xterm paints its own screen
    from the theme (see terminal/host.ts); the chrome around it uses the panel tokens. */
