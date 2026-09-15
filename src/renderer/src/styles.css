@@ -1272,12 +1272,25 @@ h4 {
   opacity: 0;
   transition: opacity 0.1s ease, visibility 0.1s ease;
 }
+/* Selection is not pinning: only hover or keyboard focus reveals the toggle, and a pinned row is
+   the only one that shows a pin without either. */
 .session-row:hover .session-pin .row-act-btn,
-.session-row.active .session-pin .row-act-btn,
 .session-pin .row-act-btn:focus-visible,
 .session-pin .row-act-btn.is-pinned {
   visibility: visible;
   opacity: 1;
+}
+/* Hovering a pinned row swaps its state pin for the unpin action it offers. */
+.session-pin .row-act-btn .pin-off {
+  display: none;
+}
+.session-row:hover .session-pin .row-act-btn.is-pinned .pin-on,
+.session-pin .row-act-btn.is-pinned:focus-visible .pin-on {
+  display: none;
+}
+.session-row:hover .session-pin .row-act-btn.is-pinned .pin-off,
+.session-pin .row-act-btn.is-pinned:focus-visible .pin-off {
+  display: inline-flex;
 }
 .session-pin-indicator {
   display: inline-flex;

@@ -242,6 +242,20 @@ describe('title bar separator', () => {
   });
 });
 
+describe('sidebar session pin visibility', () => {
+  // jsdom never applies styles.css, so the rule that decides when the pin toggle appears is only
+  // reachable as text. Its selector list is the production boundary for "selection is not pinning".
+  const styles = fs.readFileSync(path.join(process.cwd(), 'src', 'renderer', 'src', 'styles.css'), 'utf8');
+  const reveal = styles.match(/\.session-row:hover \.session-pin \.row-act-btn,[\s\S]*?\{/)?.[0] ?? '';
+
+  it('reveals the pin on hover and keyboard focus, never because the row is selected', () => {
+    expect(reveal, 'the pin reveal rule moved; keep this test with it').not.toBe('');
+    expect(reveal).toContain('.session-row:hover .session-pin .row-act-btn');
+    expect(reveal).toContain('.session-pin .row-act-btn:focus-visible');
+    expect(reveal, 'a selected row must not show a pin it does not have').not.toContain('.session-row.active');
+  });
+});
+
 describe('model list for a session whose harness has not started', () => {
   const session = (id: string, harness: HarnessId): SessionMeta =>
     ({ id, config: { harness } }) as SessionMeta;
