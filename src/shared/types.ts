@@ -706,6 +706,14 @@ export interface SessionMeta {
   /** Current model as reported by the harness (may differ from config after live switch). */
   activeModel?: ModelRef;
   activeEffort?: EffortLevel;
+  /**
+   * Commands the running harness accepts itself — Claude's slash command names and their aliases, as
+   * advertised by the CLI. Reported by the adapter at startup and on every later change, so `/goal`
+   * can be handed to the harness when it has a goal of its own (see shared/goal-driver.ts).
+   */
+  harnessCommands?: string[];
+  /** Set while the harness's own goal command answers `/goal` for this session; the app's goal stays out of the way. */
+  nativeGoal?: string;
   goal?: GoalState;
   pinned?: boolean;
   /** Epoch ms when pinned; pinned rows sort by it ascending (first pin on top). Rewritten on drag-reorder. */
@@ -1049,7 +1057,11 @@ export interface AppSettings {
   collapsedFolders?: string[];
   /** Extra keyboard shortcuts keyed by canonical accelerator (e.g. 'Ctrl+Alt+A'); see shared/shortcuts.ts. */
   customShortcuts?: Record<string, ShortcutCommand>;
-  goalDefaults: { autoContinue: boolean; maxIterations: number };
+  /**
+   * App goal engine defaults. `preferHarness` hands `/goal` to a harness that has a goal command of
+   * its own (see shared/goal-driver.ts); with it off the app's engine answers everywhere.
+   */
+  goalDefaults: { autoContinue: boolean; maxIterations: number; preferHarness: boolean };
   terminal: TerminalSettings;
   /** Cheap model for background tasks (session titles, summaries). Unset until the user picks one. */
   utilityModel?: ModelRef;

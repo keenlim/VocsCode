@@ -269,6 +269,8 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     // Keys only: provider entries carry custom headers, and window bounds change every drag.
     const keys = patch && typeof patch === 'object' ? Object.keys(patch).filter((k) => k !== 'windowBounds') : [];
     if (keys.length) deps.log('debug', `settings updated: ${keys.join(', ')}`);
+    // `/goal` ownership follows the goal defaults, so a change there has to reach every open session.
+    if (patch && typeof patch === 'object' && 'goalDefaults' in patch) await sessions.refreshGoalDrivers();
     deps.push(PUSH_CHANNELS.settingsChanged, next);
     return next;
   });

@@ -231,7 +231,7 @@ export function defaultSettings(): AppSettings {
     folderOrder: [],
     collapsedFolders: [],
     customShortcuts: {},
-    goalDefaults: { autoContinue: true, maxIterations: 25 },
+    goalDefaults: { autoContinue: true, maxIterations: 25, preferHarness: true },
     terminal: { ...DEFAULT_TERMINAL_SETTINGS, customShellArgs: [] },
     agent: { enabled: true },
     gitSetupSkipped: []

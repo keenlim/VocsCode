@@ -304,7 +304,10 @@ export function NewSessionDialog() {
             </div>
             <span className="field-hint">Paste a screenshot or attach one with the button — it is sent with the first message.</span>
           </div>
-          <Field label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>} hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips.">
+          <Field
+            label={<span className="row gap6"><Icon name="target" size={13} /> Goal (optional)</span>}
+            hint="A persistent objective. The session keeps continuing until the agent proves it is done or the iteration guard trips. On a harness that has its own /goal command, the objective is handed to that harness instead and the guard does not apply."
+          >
             <textarea rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. Make the test suite pass and open a PR" />
           </Field>
 
