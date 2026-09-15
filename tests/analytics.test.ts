@@ -605,6 +605,11 @@ describe('per-dimension day slices', () => {
     expect(by?.harness.pi).toMatchObject({ costUsd: 2, turns: 2, toolCalls: 1, sessions: ['b'] });
     expect(by?.model['anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, toolCalls: 1, label: 'anthropic/opus' });
     expect(by?.model['anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, label: 'anthropic/sonnet', durationMs: 2_000 });
+    // The harness × model slices carry the same counters under the pair, so a harness's own models
+    // can be read without the other harnesses that share them.
+    expect(by?.harnessModel['claude|anthropic/opus']).toMatchObject({ costUsd: 1, turns: 1, inputTokens: 100, toolCalls: 1, label: 'anthropic/opus', sessions: ['a'] });
+    expect(by?.harnessModel['claude|anthropic/sonnet']).toMatchObject({ costUsd: 0.5, turns: 1, inputTokens: 50, toolCalls: 1, durationMs: 2_000, speedTokens: 100 });
+    expect(by?.harnessModel['pi|openrouter/glm']).toMatchObject({ costUsd: 2, turns: 2, inputTokens: 200, toolCalls: 1, sessions: ['b'] });
     expect(by?.project['/repo-b']?.toolCalls).toBe(1);
     expect(by?.tool.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
     expect(by?.modelTool['openrouter/glm']?.bash).toEqual({ calls: 1, errors: 0, declined: 0, durationMs: 10 });
@@ -632,6 +637,10 @@ describe('per-dimension day slices', () => {
     expect(r.unattributed.costUsd).toBe(0);
     expect(r.sessionIds.sort()).toEqual(['a', 'b']);
     expect(r.byModel.map((x) => x.key)).toEqual(['openrouter/glm', 'anthropic/opus', 'anthropic/sonnet']);
+    // The pair dimension accounts for the harness dimension exactly: the two cards must agree.
+    expect(r.byHarnessModel.map((x) => x.key).sort()).toEqual(['claude|anthropic/opus', 'claude|anthropic/sonnet', 'pi|openrouter/glm']);
+    expect(r.byHarnessModel.reduce((a, b) => a + b.usage.inputTokens, 0)).toBe(r.byHarness.reduce((a, b) => a + b.usage.inputTokens, 0));
+    expect(r.byHarnessModel.reduce((a, b) => a + b.usage.costUsd, 0)).toBeCloseTo(r.byHarness.reduce((a, b) => a + b.usage.costUsd, 0));
     expect(r.modelTools.map((x) => [x.key, x.name, x.calls])).toEqual([
       ['anthropic/opus', 'bash', 1],
       ['anthropic/sonnet', 'edit', 1],
@@ -667,6 +676,30 @@ describe('per-dimension day slices', () => {
     expect(s.modelTools.map((r) => [r.key, r.name, r.calls, r.errors])).toEqual([['anthropic/opus', 'Bash', 3, 1]]);
     expect(s.days[0].usage.by?.harnessModelTool['claude|anthropic/opus']?.Bash).toMatchObject({ calls: 1, errors: 0 });
     expect(s.days[0].usage.by?.harnessModelTool['pi|anthropic/opus']?.Bash).toMatchObject({ calls: 2, errors: 1 });
+  });
+
+  it('separates the cache reads of two harnesses running the same model, which the model-only slice merges', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const store = new AnalyticsStore(dir, { log });
+    // Same model, opposite caching: Claude reads most of its prompt from cache, pi almost none.
+    const activeModel = { provider: 'anthropic', model: 'opus' };
+    const claude = meta('claude-s', 'claude', usage({ inputTokens: 100, cacheReadTokens: 900, costUsd: 1, turns: 1 }), { updatedAt: t0, activeModel });
+    const pi = meta('pi-s', 'pi', usage({ inputTokens: 900, cacheReadTokens: 100, costUsd: 1, turns: 1 }), { updatedAt: t0, activeModel });
+    await store.load([claude, pi]);
+    await store.flush();
+
+    const fresh = new AnalyticsStore(dir, { log });
+    await fresh.load([]);
+    const s = fresh.summary(0, t0);
+    const by = s.days[0].usage.by;
+    const pairs = Object.fromEntries(Object.entries(by!.harnessModel).map(([key, slice]) => [key, [slice.inputTokens, slice.cacheReadTokens]]));
+    expect(pairs).toEqual({ 'claude|anthropic/opus': [100, 900], 'pi|anthropic/opus': [900, 100] });
+    // The model-only slice still merges the two, so only the pair can tell them apart.
+    expect(by?.model['anthropic/opus']).toMatchObject({ inputTokens: 1_000, cacheReadTokens: 1_000 });
+    expect(Object.fromEntries(rollupDays(s.days).byHarnessModel.map((b) => [b.key, b.usage.cacheReadTokens]))).toEqual({ 'claude|anthropic/opus': 900, 'pi|anthropic/opus': 100 });
+    // All time rolls the same pairs up from the session records.
+    expect(Object.fromEntries(s.byHarnessModel.map((b) => [b.key, b.usage.cacheReadTokens]))).toEqual({ 'claude|anthropic/opus': 900, 'pi|anthropic/opus': 100 });
   });
 
   it('backfills pre-existing sessions into slices and reports the window before the range', async () => {
@@ -752,6 +785,9 @@ describe('legacy day estimation', () => {
     expect(day.by?.harness.pi).toMatchObject({ costUsd: 1, turns: 2, inputTokens: 100, toolCalls: 2, durationMs: 2000, sessions: ['b'] });
     expect(day.by?.harness.native).toBeUndefined();
     expect(day.by?.model['anthropic/opus']).toMatchObject({ costUsd: 2, label: 'anthropic/opus' });
+    // Estimation goes through the same attribution, so those days carry the pair dimension too.
+    expect(day.by?.harnessModel['claude|anthropic/opus']).toMatchObject({ costUsd: 2, turns: 4, inputTokens: 200, sessions: ['a'] });
+    expect(day.by?.harnessModel['pi|openrouter/glm']).toMatchObject({ costUsd: 1, turns: 2, sessions: ['b'] });
     expect(day.by?.project['/p2']).toMatchObject({ costUsd: 1, turns: 2 });
     // 14 Bash calls all time, 4 recorded live on June 10: the other 10 (and the lone error) land on the legacy day.
     expect(day.by?.tool.Bash).toEqual({ calls: 10, errors: 1, declined: 0, durationMs: 0 });
@@ -801,6 +837,56 @@ describe('legacy day estimation', () => {
     expect(s.harnessModelTools.map((r) => [r.harness, r.key, r.label])).toEqual([['pi', '/glm', 'glm']]);
     expect(rollupDays(s.days).byModel.map((b) => [b.key, b.label])).toEqual([['/glm', 'glm']]);
     expect(dimensionSeries(s.days, 'model', (c) => c.costUsd, 5).series.map((x) => [x.key, x.label])).toEqual([['/glm', 'glm']]);
+  });
+});
+
+describe('harness × model recovery', () => {
+  it('recovers the pair for a day a harness spent on one model and leaves a harness that split its day alone', async () => {
+    const dir = tmpDir();
+    const t0 = Date.UTC(2025, 5, 9, 12);
+    const slice = (label: string, counters: Partial<UsageTotals>, sessions: string[]) => ({ ...emptyDay(), ...counters, label, sessions });
+    // A day written before the pair dimension existed: harness and model slices only. Claude spent
+    // the whole day on one model, so its pair is provable from the day itself; pi spread its day
+    // across two, so guessing how its cache reads divide between them would be worse than a gap.
+    const by = {
+      harness: {
+        claude: slice('claude', { inputTokens: 100, cacheReadTokens: 900, turns: 1 }, ['c1']),
+        pi: slice('pi', { inputTokens: 1_000, cacheReadTokens: 100, turns: 2 }, ['p1'])
+      },
+      model: {
+        'anthropic/opus': slice('anthropic/opus', { inputTokens: 100, cacheReadTokens: 900, turns: 1 }, ['c1']),
+        'openrouter/glm': slice('openrouter/glm', { inputTokens: 400, cacheReadTokens: 100, turns: 1 }, ['p1']),
+        'openrouter/sol': slice('openrouter/sol', { inputTokens: 600, turns: 1 }, ['p1'])
+      },
+      project: {},
+      tool: {},
+      modelTool: {},
+      harnessModelTool: {},
+      file: {}
+    };
+    await fs.writeFile(path.join(dir, 'analytics.json'), JSON.stringify({
+      version: 2,
+      days: { '2025-06-09': { ...emptyDay(), inputTokens: 1_100, cacheReadTokens: 1_000, turns: 3, by } },
+      recorded: {},
+      sessions: {},
+      tools: {},
+      files: {}
+    }));
+
+    const store = new AnalyticsStore(dir, { log });
+    await store.load([]);
+    const day = store.summary(0, t0).days[0].usage;
+    expect(Object.keys(day.by!.harnessModel)).toEqual(['claude|anthropic/opus']);
+    expect(day.by!.harnessModel['claude|anthropic/opus']).toMatchObject({ inputTokens: 100, cacheReadTokens: 900, label: 'anthropic/opus', sessions: ['c1'] });
+    expect(rollupDays([{ date: '2025-06-09', usage: day }]).byHarnessModel.map((b) => [b.key, b.usage.cacheReadTokens])).toEqual([['claude|anthropic/opus', 900]]);
+
+    // Recovered and persisted once: the next load finds it there rather than deriving it again.
+    await store.flush();
+    const again = new AnalyticsStore(dir, { log });
+    await again.load([]);
+    const day2 = again.summary(0, t0).days[0].usage;
+    expect(Object.keys(day2.by!.harnessModel)).toEqual(['claude|anthropic/opus']);
+    expect(day2.by!.harnessModel['claude|anthropic/opus']).toMatchObject({ inputTokens: 100, cacheReadTokens: 900, sessions: ['c1'] });
   });
 });
 

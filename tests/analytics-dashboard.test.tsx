@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AnalyticsDayPoint, AnalyticsSummary, SessionMeta, UsageSessionRecord } from '../src/shared/types';
 import { emptyReliabilityReport } from '../src/shared/analytics/reliability';
-import { addCounters, addSlice, emptyCounters, emptyDimensions } from '../src/shared/usage-rollup';
+import { addCounters, addSlice, emptyCounters, emptyDimensions, harnessModelKey } from '../src/shared/usage-rollup';
 
 const DAY = 86_400_000;
 const now = Date.now();
@@ -20,6 +20,7 @@ function sliced(daysAgo: number, rows: { id: string; harness: 'claude' | 'pi'; m
     addCounters(usage, delta);
     addSlice(by.harness, r.harness, r.harness, delta, r.id);
     addSlice(by.model, `p/${r.model}`, r.model, delta, r.id);
+    addSlice(by.harnessModel, harnessModelKey(r.harness, `p/${r.model}`), `p/${r.model}`, delta, r.id);
     addSlice(by.project, r.project, r.project, delta, r.id);
   }
   by.tool = { Bash: { calls: usage.toolCalls, errors: 0, declined: 0, durationMs: 0 } };
@@ -57,6 +58,7 @@ const summary: AnalyticsSummary = {
   previous: { ...emptyCounters(), costUsd: 3.25, turns: 3, toolCalls: 4 },
   byHarness: [],
   byModel: [],
+  byHarnessModel: [],
   byProject: [],
   modelRates: [{ key: 'p/opus', label: 'p/opus', usdPerMTok: 2, usdPerCall: 0.5, costUsd: 5, tokens: 2_500_000, calls: 10 }],
   toolTotals: { calls: 8, errors: 0, declined: 0, durationMs: 0 },
@@ -306,6 +308,43 @@ describe('analytics dashboard', () => {
       expect(meters.map((m) => m.querySelector('.meter-head span')?.textContent)).toEqual(['p/warm', 'p/cold']);
       expect(meters.map((m) => m.querySelector('.meter-value')?.textContent)).toEqual(['75%', '0%']);
       expect(meters.map((m) => m.querySelector('.meter-sub')?.textContent)).toEqual(['3.0k of 4.0k prompt tokens', '0 of 800 prompt tokens']);
+    } finally {
+      invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
+    }
+  });
+
+  it('shows the cache hit rate per harness and per harness × model on the tokens tab', async () => {
+    reset();
+    // One model under two harnesses: only the pair separates the two caching behaviours, which is
+    // what the model-only card has to merge into a single row.
+    const days: AnalyticsDayPoint[] = [
+      sliced(1, [
+        { id: 's1', harness: 'claude', model: 'opus', project: '/p', costUsd: 2, turns: 1, inputTokens: 1000, cacheReadTokens: 3000 },
+        { id: 's2', harness: 'pi', model: 'opus', project: '/p', costUsd: 1, turns: 1, inputTokens: 800, cacheReadTokens: 0 }
+      ])
+    ];
+    const response: AnalyticsSummary = { ...summary, days };
+    invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? response : []));
+    try {
+      const { container } = render(<AnalyticsDashboard />);
+      await waitFor(() => expect(container.querySelector('.kpi-value')).toBeTruthy());
+      fireEvent.click(container.querySelector("[data-tab='tokens']") as HTMLButtonElement);
+      const meters = (title: string) => {
+        const card = Array.from(container.querySelectorAll('.acard')).find((c) => c.querySelector('.acard-title')?.textContent === title) as HTMLElement;
+        expect(card).toBeTruthy();
+        return Array.from(card.querySelectorAll('.meter')).map((m) => [m.querySelector('.meter-head span')?.textContent, m.querySelector('.meter-value')?.textContent, m.querySelector('.meter-sub')?.textContent]);
+      };
+
+      expect(meters('Cache hit rate by harness')).toEqual([
+        ['Claude', '75%', '3.0k of 4.0k prompt tokens'],
+        ['Pi', '0%', '0 of 800 prompt tokens']
+      ]);
+      // The merged model row sits between the two, so the pair card is what explains the difference.
+      expect(meters('Cache hit rate by model')).toEqual([['p/opus', '63%', '3.0k of 4.8k prompt tokens']]);
+      expect(meters('Cache hit rate by harness × model')).toEqual([
+        ['Claude · p/opus', '75%', '3.0k of 4.0k prompt tokens'],
+        ['Pi · p/opus', '0%', '0 of 800 prompt tokens']
+      ]);
     } finally {
       invokeMock.mockImplementation((channel: string) => Promise.resolve(channel === 'analytics:summary' ? summary : []));
     }
