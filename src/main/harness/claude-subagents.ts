@@ -27,6 +27,19 @@ export const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
  */
 export const SYNTHETIC_MODEL = '<synthetic>';
 
+/**
+ * Characters kept from a failure reason. It is rendered inline in the run's detail pane, and an
+ * erroring tool result can carry a whole dump behind the line that explains it.
+ */
+const ERROR_CHARS = 2_000;
+
+/** A failure reason the panel can render inline: trimmed, and bounded to one message's worth. */
+function clipError(error: string | undefined): string | undefined {
+  const text = error?.trim();
+  if (!text) return undefined;
+  return text.length > ERROR_CHARS ? `${text.slice(0, ERROR_CHARS)}…` : text;
+}
+
 /** True for a model id a model actually reported, as opposed to the SDK's own sentinel. */
 export function isRealModel(model: string | undefined): model is string {
   return typeof model === 'string' && model.length > 0 && model !== SYNTHETIC_MODEL;
@@ -332,11 +345,17 @@ export class ClaudeSubagentRuns {
   /**
    * The spawning tool call returned. For a foreground subagent that is the end of the run; a
    * backgrounded one reports through `task_notification` and so is left alone.
+   *
+   * `output` is that result as the model saw it, and on an error it is the run's only account of
+   * itself: a spawn Claude Code refuses — past its concurrent subagent cap, an agent type it does
+   * not know — never becomes a task, so there is no transcript and no `task_notification` to read
+   * the reason from. Recording it is what keeps the panel from showing a bare `error` with nothing
+   * to explain it, which is how pi already reports a run it could not start.
    */
-  onCallResult(toolUseId: string, isError: boolean): void {
+  onCallResult(toolUseId: string, isError: boolean, output?: string): void {
     const state = this.runs.get(toolUseId);
     if (!state || state.ended || state.mode === 'background') return;
-    void this.finish(state, isError ? 'error' : 'completed');
+    void this.finish(state, isError ? 'error' : 'completed', isError ? output : undefined);
   }
 
   /**
@@ -434,7 +453,8 @@ export class ClaudeSubagentRuns {
     await this.closeCall(state);
     state.totals.toolUses = state.toolUses;
     state.totals.durationMs ||= Date.now() - state.startedAt;
-    await this.store?.end(state.runId, status, state.totals, error);
+    const reason = clipError(error);
+    await this.store?.end(state.runId, status, state.totals, reason);
     this.emit({
       type: 'subagent',
       completion: {
@@ -446,7 +466,7 @@ export class ClaudeSubagentRuns {
         costUsd: state.totals.costUsd,
         tokens: state.totals.inputTokens + state.totals.outputTokens + state.totals.cacheReadTokens + state.totals.cacheWriteTokens,
         durationMs: state.totals.durationMs,
-        ...(error ? { error } : {}),
+        ...(reason ? { error: reason } : {}),
         agentType: state.agent
       }
     });
