@@ -291,9 +291,31 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
     }
   };
 
-  /** Seeds the Ctrl+N quick picker with the issue so a session on it is two keystrokes away. */
-  const startSessionOnIssue = (issue: GitIssue) => {
-    useStore.getState().openQuickSession(true, `Fix issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and implement a fix.`);
+  /** Seeds the fix dialog: the issue table's New session action sends this once it is confirmed. */
+  const issueSessionPrompt = (issue: GitIssue) =>
+    `Fix issue #${issue.number} "${issue.title}" (${issue.url}): figure out the cause and implement a fix.`;
+
+  /** Starts a session on this repo: the issue table's New session action, no folder picker. */
+  const fixIssueInNewSession = async (issue: GitIssue) => {
+    const prompt = await askPrompt({
+      title: `Start a session on issue #${issue.number}?`,
+      body: `New session in ${session.config.projectRoot}, on its current checkout.`,
+      confirmLabel: 'Start session',
+      input: { label: 'First message', value: issueSessionPrompt(issue), rows: 6, testId: 'issue-prompt' }
+    });
+    if (prompt === null) return;
+    const firstMessage = prompt.trim();
+    try {
+      const meta = await invoke('sessions:create', {
+        config: { ...session.config, useWorktree: false },
+        title: `Fix issue #${issue.number}`,
+        initialPrompt: firstMessage || undefined
+      });
+      await setActive(meta.id);
+      toast(`Session started on issue #${issue.number}`, 'success');
+    } catch (e) {
+      toast(String((e as Error).message ?? e), 'error');
+    }
   };
 
   const newSessionOnBranch = async (b: GitBranchOverviewItem) => {
@@ -453,7 +475,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           onRefresh={() => void refreshIssues()}
           onOpen={(issue) => setSelectedIssue(issue)}
           onViewExternal={(issue) => void invoke('app:openExternal', { url: issue.url })}
-          onNewSession={startSessionOnIssue}
+          onNewSession={fixIssueInNewSession}
         />
       ) : view === 'prs' ? (
         <PrList
@@ -550,7 +572,7 @@ export function BranchesTab({ session }: { session: SessionMeta }) {
           }}
           onNewSession={() => {
             setSelectedIssue(null);
-            startSessionOnIssue(selectedIssue);
+            void fixIssueInNewSession(selectedIssue);
           }}
         />
       )}
@@ -1069,7 +1091,14 @@ function IssueRow({ issue, onOpen, onViewExternal, onNewSession }: { issue: GitI
       </span>
       <div className="branch-actions">
         <Button variant="ghost" size="sm" icon="external" title={`Open issue #${issue.number} on GitHub`} onClick={onViewExternal} />
-        <Button variant="ghost" size="sm" icon="plus" title="Start a session on this issue (pick a folder, Enter starts)" onClick={onNewSession} />
+        <Button
+          variant="ghost"
+          size="sm"
+          icon="sessionPlus"
+          title={`Start a new session on this repo to fix issue #${issue.number}`}
+          aria-label={`New session on issue #${issue.number}`}
+          onClick={onNewSession}
+        />
       </div>
     </div>
   );

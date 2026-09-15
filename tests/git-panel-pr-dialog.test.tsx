@@ -3,7 +3,8 @@
  * PR rows in the Git panel are readable at a glance but carry no description. Clicking one opens a
  * detail dialog with GitHub's markdown body, labels and review state — the same affordance issues
  * already have — while the row's own action buttons keep acting without opening it. The row's New
- * session button starts a review session on the repo, with the review template as its first message.
+ * session button starts a review session on the repo, with the review template as its first message;
+ * the issue row and its dialog footer do the same with the fix template.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,7 +19,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { RightPanel } from '../src/renderer/src/components/RightPanel';
 import { ConfirmHost } from '../src/renderer/src/components/ui';
 import { useStore } from '../src/renderer/src/store';
-import type { GitBranchOverview, GitPullRequest, GitPullRequestList, SessionMeta } from '../src/shared/types';
+import type { GitBranchOverview, GitIssue, GitIssueList, GitPullRequest, GitPullRequestList, SessionMeta } from '../src/shared/types';
 
 const session = (): SessionMeta => ({
   id: 's1',
@@ -53,17 +54,31 @@ const PR: GitPullRequest = {
 
 let prs: GitPullRequest[] = [];
 
+const ISSUE: GitIssue = {
+  number: 12,
+  title: 'Widget is wobbly',
+  state: 'OPEN',
+  url: 'https://github.com/o/r/issues/12',
+  author: 'octocat',
+  body: 'It **wobbles** badly.',
+  labels: [{ name: 'bug', color: 'ff0000' }],
+  comments: 1
+};
+
+let issues: GitIssue[] = [];
+
 beforeEach(() => {
   vi.useFakeTimers();
   invokeMock.mockReset();
   prs = [];
+  issues = [];
   // Reset the module-level store, activeId included, so each test's assertions stand on their own.
   useStore.setState({ panelTab: 'branches', toasts: [], activeId: null });
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
   invokeMock.mockImplementation((channel: string) => {
     if (channel === 'git:branchesOverview') return Promise.resolve(OVERVIEW);
     if (channel === 'git:pullRequests') return Promise.resolve({ prs: [...prs], fetchedAt: Date.now() } satisfies GitPullRequestList);
-    if (channel === 'git:issues') return Promise.resolve({ issues: [], fetchedAt: Date.now() });
+    if (channel === 'git:issues') return Promise.resolve({ issues: [...issues], fetchedAt: Date.now() } satisfies GitIssueList);
     if (channel === 'git:merge') return Promise.resolve({ ok: true, url: 'https://github.com/o/r/pull/7' });
     if (channel === 'sessions:create') return Promise.resolve({ id: 's_new', title: 'Review PR #7' });
     if (channel === 'sessions:transcript') return Promise.resolve([]);
@@ -77,6 +92,7 @@ afterEach(() => {
 });
 
 const prTab = () => screen.getByTitle('Pull requests on GitHub (via gh)');
+const issueTab = () => screen.getByTitle('Issues on GitHub (via gh)');
 
 /** Renders the panel on the PR view of an open repository with one pull request on GitHub. */
 async function openPrList(withConfirm = false) {
@@ -93,6 +109,22 @@ async function openPrList(withConfirm = false) {
   });
   // Fake timers keep waitFor from polling, so the promise flush above is the only wait needed.
   return screen.getByRole('button', { name: 'Read pull request #7: Add the thing' });
+}
+
+/** Renders the panel on the Issues view of an open repository with one issue on GitHub. */
+async function openIssueList(withConfirm = false) {
+  issues = [ISSUE];
+  render(
+    <>
+      <RightPanel session={session()} />
+      {withConfirm && <ConfirmHost />}
+    </>
+  );
+  await act(async () => {});
+  await act(async () => {
+    fireEvent.click(issueTab());
+  });
+  return screen.getByRole('button', { name: 'Read issue #12: Widget is wobbly' });
 }
 
 describe('Git panel PR detail dialog', () => {
@@ -209,5 +241,86 @@ describe('Git panel PR review session', () => {
     expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(useStore.getState().activeId).toBeNull();
+  });
+});
+
+/**
+ * Issues get the same two actions the PR rows have: the row's own New session button and the detail
+ * dialog's footer both start a session on the repo itself, after a dialog confirms the first
+ * message (the fix template, editable before it starts). Neither one routes through the folder
+ * picker any more.
+ */
+describe('Git panel issue session', () => {
+  it('confirms the first message in a dialog before starting the session', async () => {
+    await openIssueList(true);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New session on issue #12' }));
+    });
+
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Start a session on issue #12?')).toBeTruthy();
+    const prompt = within(dialog).getByTestId('issue-prompt') as HTMLTextAreaElement;
+    expect(prompt.value).toBe(
+      'Fix issue #12 "Widget is wobbly" (https://github.com/o/r/issues/12): figure out the cause and implement a fix.'
+    );
+    // Nothing is created while the dialog is open.
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
+
+    // The edited first message is what the session opens with, on the repo itself (no worktree).
+    fireEvent.change(prompt, { target: { value: 'Fix issue #12, starting with the regression test.' } });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Start session' }));
+    });
+
+    const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');
+    expect(created).toHaveLength(1);
+    expect(created[0]![1]).toEqual({
+      config: { harness: 'native', projectRoot: 'G:/proj/a', permissionMode: 'auto', useWorktree: false },
+      title: 'Fix issue #12',
+      initialPrompt: 'Fix issue #12, starting with the regression test.'
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(useStore.getState().activeId).toBe('s_new');
+    expect(useStore.getState().toasts.some((t) => t.kind === 'success' && t.text === 'Session started on issue #12')).toBe(true);
+  });
+
+  it('starts nothing when the dialog is dismissed', async () => {
+    await openIssueList(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'New session on issue #12' }));
+    });
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    });
+
+    expect(invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(0);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(useStore.getState().activeId).toBeNull();
+  });
+
+  it('starts the same session from the issue dialog footer, one dialog at a time', async () => {
+    await openIssueList(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Read issue #12: Widget is wobbly' }));
+    });
+
+    await act(async () => {
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start session' }));
+    });
+
+    // The details close as the prompt opens, so its confirm is the only Start session left.
+    const dialogs = screen.getAllByRole('dialog');
+    expect(dialogs).toHaveLength(1);
+    expect(within(dialogs[0]!).getByTestId('issue-prompt')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(within(dialogs[0]!).getByRole('button', { name: 'Start session' }));
+    });
+
+    const created = invokeMock.mock.calls.filter(([channel]) => channel === 'sessions:create');
+    expect(created).toHaveLength(1);
+    expect(created[0]![1]).toMatchObject({ title: 'Fix issue #12', initialPrompt: expect.stringContaining('Fix issue #12 "Widget is wobbly"') });
+    expect(useStore.getState().activeId).toBe('s_new');
   });
 });
