@@ -13,6 +13,7 @@ import type {
   SessionMeta,
   UserInput
 } from '../../shared/types';
+import type { AgentTypeInfo } from '../../shared/subagents';
 import type { RuntimeResolver } from '../runtime';
 import type { ResolvedServer } from '../mcp/effective';
 
@@ -77,6 +78,8 @@ export interface HarnessAdapter {
   /** Restores context to immediately before a persisted user message. Only supported by adapters with durable checkpoints. */
   rewindToUserMessage?(itemId: string): Promise<boolean>;
   listModels?(): Promise<ModelInfo[]>;
+  /** The subagent types this engine can delegate to, when it can name them at all. */
+  listAgents?(): Promise<AgentTypeInfo[]>;
   dispose(): Promise<void>;
 }
 

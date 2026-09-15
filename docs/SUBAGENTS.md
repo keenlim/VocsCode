@@ -116,6 +116,10 @@ field merging):
 5. `~/.claude/agents/*.md` — your global Claude set.
 6. The shipped templates.
 
+For a **Claude** session only #3 and #5 are in play, and Claude Code resolves them itself. Of those,
+the app reads back just #3 — the project's own definitions, in `src/main/claude-agents.ts` — to offer
+the model rows above; it never writes a new one, and never touches the global set.
+
 Frontmatter: `name`, `description`, `tools`, optional `model`, `prompt_mode` (`append` | `replace`),
 `mcp: false`. **Model defaults to the session model**; a pinned model is respected, which is why the
 shipped templates pin nothing — a committed pin would oblige every teammate to have that provider.
@@ -215,7 +219,30 @@ The right panel is a vertical split:
   calls, cost. Live while running, refreshed from the `subagent.run` session events.
 - Run detail: child transcript (text, thinking, tool calls, outputs), the per-call analytics table,
   and **Stop** / **Steer** for a running run (`/vocs-subagent-stop` and `/vocs-subagent-steer`).
-- Non-pi sessions explain that subagents are a pi feature rather than showing an empty pane.
+- A harness with no runs at all explains that rather than showing an empty pane.
+- The run list is one of up to three views, and the strip appears only for harnesses with something
+  in it: **Runs** always, **Agents** for pi (the `.pi/agents` manager), **Models** for Claude.
+
+**Claude: the Models view**
+
+Delegated Claude agents run on the **session's own model**, which the adapter applies for the whole
+session (`CLAUDE_CODE_SUBAGENT_MODEL`, plus `_FORCE` while the project pins nothing — see
+[ARCHITECTURE](ARCHITECTURE.md#harness-matrix)). So the view is mostly an account of what already
+happens: every type the engine reports is listed with the model it will run on.
+
+What it can change is a definition the project already supplies at
+`<projectRoot>/.claude/agents/<Name>.md`. Those rows carry a **model** select — *Same as session*
+clears the pin — and saving rewrites that one frontmatter line, leaving the rest of the file
+byte-identical. A type with no definition gets no control, because writing one would not *adjust* a
+built-in but **replace** it, instructions and all (verified against the bundled CLI: a
+frontmatter-only `Explore.md` left the agent describing itself as a general-purpose agent). That
+decision belongs to whoever writes the file; a definition created by hand or by asking the agent is
+editable here the moment it exists.
+
+The one thing to know about a pin: while any definition pins a model, the adapter stops forcing the
+session model, so the built-ins without a definition go back to Claude Code's own default — an
+Anthropic id that a third-party endpoint refuses. The view says so, and clearing the pin restores
+the forcing.
 
 **Transcript**
 
@@ -223,7 +250,8 @@ The right panel is a vertical split:
   summary, live status, and — once the run id is known — an `open run` chip that opens the panel on
   that run.
 
-**IPC**: `subagents:list`, `subagents:get`, `subagents:stop`, `subagents:steer`.
+**IPC**: `subagents:list`, `subagents:get`, `subagents:stop`, `subagents:steer`,
+`claude-agents:list`, `claude-agents:setModel`.
 
 ## Storage and wire contract
 
@@ -324,9 +352,9 @@ Per `AGENTS.md`, everything below must actually execute — no silent skips.
 
 | Layer | Coverage |
 | --- | --- |
-| Unit | Agent-file discovery and precedence, frontmatter parsing, tool allowlists; gate decision table across all five modes, dangerous commands, outside-workspace paths, symlink/junction escapes; run-file append/read and the reader's traversal rejections; per-call stats roll-up; the extension driven by a scripted child session (caps, gating, lifecycle, live events); the harness bridge (`pi.ts` subagent notifications → events); analytics attribution of background spend; the Subagents tab over a stubbed bridge. |
+| Unit | Agent-file discovery and precedence, frontmatter parsing, tool allowlists; gate decision table across all five modes, dangerous commands, outside-workspace paths, symlink/junction escapes; run-file append/read and the reader's traversal rejections; per-call stats roll-up; the extension driven by a scripted child session (caps, gating, lifecycle, live events); the harness bridge (`pi.ts` subagent notifications → events); analytics attribution of background spend; the Subagents tab over a stubbed bridge. For the Claude side: the model pair the adapter sets (and withholds), the Claude definition format and its one-field edit, and the Models view over a stubbed bridge. |
 | Integration (real pi CLI, offline scripted provider) | `tests/pi-subagents.integration.test.ts`: tools registered alongside the third-party ones, a foreground child runs and its run file parses, an unknown type is rejected, and a child command is **approved once and denied once — the denied one never runs**. |
-| Electron E2E (offline) | `tests/e2e.subagents.test.ts`: seeded transcript + run file drive the split, the strip, the run list, the detail with its per-call table and the card's `open run` link (plus a reload), and — under `VOCS_CODE_PI_INTEGRATION=1` — a real pi session whose recorded run reaches the panel. `tests/e2e.pi-tools.test.ts` asserts each bundled pi resource is copied byte-for-byte. |
+| Electron E2E (offline) | `tests/e2e.subagents.test.ts`: seeded transcript + run file drive the split, the strip, the run list, the detail with its per-call table and the card's `open run` link (plus a reload); a Claude session's Models view, which refuses to write a definition for a built-in and rewrites only the `model:` line of one the project already has; and — under `VOCS_CODE_PI_INTEGRATION=1` — a real pi session whose recorded run reaches the panel. `tests/e2e.pi-tools.test.ts` asserts each bundled pi resource is copied byte-for-byte. |
 | Packaged | `npm run dist:dir` + the subagent and pi suites against `HARNESS_E2E_EXE`, because the extension is a bundled resource. |
 | Live (manual) | `HARNESS_SMOKE=1 HARNESS_SMOKE_ONLY=pi` and the packaged Electron run. |
 
