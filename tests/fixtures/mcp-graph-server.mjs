@@ -9,8 +9,11 @@ import { z } from 'zod';
 
 const FOUND = {
   buildContext: { uid: 'Method:src/main/session-manager.ts:SessionManager.buildContext#2', name: 'buildContext', filePath: 'src/main/session-manager.ts', startLine: 520, endLine: 562 },
-  movedSymbol: { uid: 'Function:src/main/elsewhere.ts:movedSymbol', name: 'movedSymbol', filePath: 'src/main/elsewhere.ts', startLine: 3, endLine: 9 }
+  movedSymbol: { uid: 'Function:src/main/elsewhere.ts:movedSymbol', name: 'movedSymbol', filePath: 'src/main/elsewhere.ts', startLine: 3, endLine: 9 },
+  // Answers eventually, so a test can prove the resolver's budget bounds the wait for it.
+  sleepy: { uid: 'Function:src/main/slow.ts:sleepy', name: 'sleepy', filePath: 'src/main/slow.ts', startLine: 1, endLine: 2, slow: true }
 };
+const SLOW_MS = Number(process.env.GRAPH_SLOW_MS ?? 3000);
 
 function buildServer() {
   const server = new McpServer({ name: 'graph-fixture', version: '1.0.0' });
@@ -20,6 +23,9 @@ function buildServer() {
     async ({ name, file }) => {
       console.log(`CALL:context:${name}:${file ?? ''}`);
       const symbol = FOUND[name];
+      if (symbol?.slow) await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
+      // Printed before the reply so a test can see how many lookups were in flight at once.
+      console.log(`END:context:${name}:${file ?? ''}`);
       if (symbol) return { content: [{ type: 'text', text: JSON.stringify({ status: 'found', symbol }) }] };
       return { content: [{ type: 'text', text: `${JSON.stringify({ error: `Symbol '${name}' not found` })}\n\n---\n**Next:** use context({name: "${name}"})` }] };
     }

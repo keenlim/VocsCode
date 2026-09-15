@@ -2,7 +2,7 @@
  * The Layer 2 built-in MCP server: one stdio process per session serving the project wiki.
  *
  * Like GitNexus, the app owns the definition and injects it through the normal resolver, so every
- * harness with `inject`/`client` support gets the same five tools with no adapter code. Unlike
+ * harness with `inject`/`client` support gets the same six tools with no adapter code. Unlike
  * GitNexus there is no shared process and no cross-repo surface: the wiki lives in the project
  * root, and a worktree session additionally sees its own checkout's wiki root for branch-scope
  * pages. A project with no wiki gets no server at all rather than a tool that answers nothing.
