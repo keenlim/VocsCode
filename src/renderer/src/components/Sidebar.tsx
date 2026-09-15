@@ -248,9 +248,14 @@ export function Sidebar() {
           <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
-        {running > 0 && (
-          <div className="sidebar-running">
-            <Badge tone="blue">{running} running</Badge>
+        {(running > 0 || awaiting > 0) && (
+          <div className="sidebar-status">
+            {running > 0 && <Badge tone="blue">{running} running</Badge>}
+            {awaiting > 0 && (
+              <Badge tone="red" title={`${awaiting} ${awaiting === 1 ? 'session' : 'sessions'} awaiting approval`}>
+                {awaiting} awaiting
+              </Badge>
+            )}
           </div>
         )}
         <div className="sidebar-top-actions">
@@ -258,11 +263,6 @@ export function Sidebar() {
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
         </div>
       </div>
-      {awaiting > 0 && (
-        <div className="sidebar-summary">
-          <Badge tone="red">{awaiting} awaiting approval</Badge>
-        </div>
-      )}
       <div
         className="sidebar-list"
         onDragOver={(e) => {
