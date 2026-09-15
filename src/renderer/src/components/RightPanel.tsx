@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FsEntry, SessionMeta } from '../../../shared/types';
+import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { invoke } from '../api';
 import { useGitDiff, useGitSummary } from '../gitReads';
 import { workspaceRelativePath } from '../file-refs';
@@ -382,6 +383,18 @@ function GoalTab({ session }: { session: SessionMeta }) {
     setMaxIter(String(g?.maxIterations ?? 25));
   }, [g?.objective, g?.maxIterations]);
   const act = (action: 'set' | 'pause' | 'resume' | 'clear' | 'complete' | 'update', extra: { objective?: string; autoContinue?: boolean; maxIterations?: number } = {}) => void invoke('sessions:goal', { id: session.id, action, ...extra });
+  // The harness owns `/goal` in this session, so there is no app-side goal to drive: show who has it
+  // instead of controls that would start a second, competing goal.
+  if (session.nativeGoal) {
+    return (
+      <div className="goal pad">
+        <p className="muted small">
+          <code>/{session.nativeGoal}</code> belongs to {HARNESS_BY_ID[session.config.harness].name} in this session. Typing it in the composer sends the command straight to the harness, which keeps its own goal state — the app's goal engine stays out of the way.
+        </p>
+        <p className="muted small">Turn off <strong>Prefer a harness's own /goal</strong> under Settings → Goal defaults to give the command back to the app.</p>
+      </div>
+    );
+  }
   return (
     <div className="goal pad">
       <p className="muted small">A goal keeps the session working until the agent proves completion (it must end a reply with <code>GOAL_COMPLETE</code>) or the iteration guard stops it. Modeled on Codex's <code>/goal</code>, available for every harness.</p>

@@ -11,7 +11,8 @@ import {
   type PermissionResult,
   type Query,
   type SDKMessage,
-  type SDKUserMessage
+  type SDKUserMessage,
+  type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
@@ -46,6 +47,18 @@ const READ_ONLY_TOOLS = new Set([
   'ReadMcpResourceTool',
   'Skill'
 ]);
+
+/** Slash command names as the user types them — aliases included, lower-cased and de-duplicated. */
+function commandNames(commands: readonly SlashCommand[]): string[] {
+  const out: string[] = [];
+  for (const c of commands) {
+    for (const raw of [c.name, ...(c.aliases ?? [])]) {
+      const name = raw.trim().toLowerCase();
+      if (name && !out.includes(name)) out.push(name);
+    }
+  }
+  return out;
+}
 
 function toSdkMode(mode: PermissionMode): SdkPermissionMode {
   switch (mode) {
@@ -433,6 +446,18 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   /**
+   * Publishes the slash commands this CLI accepts, so `/goal` can be handed to the harness when it has
+   * a goal of its own (see shared/goal-driver.ts). Init reports the list on every process start and
+   * `commands_changed` re-reports it when skills appear mid-session; an unchanged list is not re-sent.
+   */
+  private reportCommands(commands: readonly SlashCommand[]): void {
+    const names = commandNames(commands);
+    const current = this.ctx.session().harnessCommands;
+    if (current && current.length === names.length && current.every((n, i) => n === names[i])) return;
+    this.ctx.updateMeta({ harnessCommands: names });
+  }
+
+  /**
    * Sums the cumulative per-model counters the CLI reports, re-deriving the cost of every model it
    * could not price itself. Claude Code flags them `costBasis: 'unknown'` and charges its default
    * model's rate — $5/$25/$0.50 per Mtok for a model it has no row for — which overstates a cheap
@@ -489,6 +514,11 @@ export class ClaudeAdapter implements HarnessAdapter {
                 this.ctx.log('debug', `supportedModels failed (${errorMessage(e)}); retrying on the next init`);
               });
           }
+          q.supportedCommands()
+            .then((commands) => this.reportCommands(commands))
+            .catch((e) => this.ctx.log('debug', `supportedCommands failed: ${errorMessage(e)}`));
+        } else if (msg.subtype === 'commands_changed') {
+          this.reportCommands(msg.commands);
         } else if (msg.subtype === 'compact_boundary') {
           if (msg.compact_metadata.trigger === 'manual') this.compactionWaiter?.resolve();
         } else if ((msg as { subtype?: string }).subtype === 'status') {

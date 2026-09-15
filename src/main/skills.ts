@@ -126,6 +126,21 @@ async function readSkill(dir: string): Promise<SkillInfo> {
   return { name: path.basename(dir), description: '', path: dir, file: null, mtimeMs: 0, broken: 'no SKILL.md' };
 }
 
+/**
+ * True when a harness has a skill of this name installed. Used for decisions that have to be made
+ * before a harness has started and reported what it accepts (e.g. whether a fresh Claude session's
+ * first `/goal` belongs to the harness's own goal skill).
+ */
+export async function skillInstalled(harness: SkillHarness, name: string, home?: string): Promise<boolean> {
+  if (!name || name.includes('/') || name.includes('\\')) return false;
+  try {
+    await fs.stat(path.join(skillRoot(harness, home), name, 'SKILL.md'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface SkillLocation {
   kind: 'root' | 'skill';
   root: SkillRootSpec;

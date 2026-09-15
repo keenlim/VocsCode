@@ -197,7 +197,7 @@ describe('Claude model reporting', () => {
   it('keeps the settings catalog for a gateway instead of the SDK Anthropic list', async () => {
     const supportedModels = vi.fn().mockResolvedValue([{ value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5' }]);
     queryMock.mockReset();
-    queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, supportedModels, close: vi.fn(), interrupt: vi.fn() });
+    queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close: vi.fn(), interrupt: vi.fn() });
     const events: SessionEvent[] = [];
     const adapter = new ClaudeAdapter(stubCtx(settings({ providers: [ANTHROPIC, GATEWAY] }), { provider: 'zai', model: 'glm-4.6' }, 'sk-gateway', events));
     await adapter.start();
@@ -210,7 +210,7 @@ describe('Claude model reporting', () => {
   it('still reports the SDK catalog on Anthropic\u2019s own endpoint', async () => {
     const supportedModels = vi.fn().mockResolvedValue([{ value: 'claude-sonnet-5', displayName: 'Claude Sonnet 5' }]);
     queryMock.mockReset();
-    queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, supportedModels, close: vi.fn(), interrupt: vi.fn() });
+    queryMock.mockReturnValue({ [Symbol.asyncIterator]: async function* () {}, supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close: vi.fn(), interrupt: vi.fn() });
     const events: SessionEvent[] = [];
     const adapter = new ClaudeAdapter(stubCtx(settings(), { provider: 'anthropic', model: 'claude-sonnet-5' }, 'sk-ant', events));
     await adapter.start();
