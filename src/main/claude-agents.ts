@@ -1,12 +1,13 @@
 /**
- * The project's Claude Code agent definitions: reading them, and setting the one field this app owns.
+ * The project's Claude Code agent definitions: reading them, setting the one field this app owns, and
+ * creating a new one.
  *
  * Claude Code reads `<projectRoot>/.claude/agents/*.md`, and a definition whose `name:` matches a
  * built-in (`Explore`, `Plan`) *replaces* that built-in — the built-in's own instructions are gone,
- * verified against the bundled CLI. So this module never creates a definition: it lists what the
- * project has and rewrites the `model:` line of one that is already there, leaving every other byte
- * as its author left it. Pinning a model is the user's deliberate act, not something the app does
- * on their behalf.
+ * verified against the bundled CLI. So this module creates only a definition for a name no built-in
+ * and no existing file claims: a new type is safe, replacing one is a decision only its author makes
+ * by hand. Editing stays narrow too — the app rewrites a definition's `model:` line and leaves every
+ * other byte of a hand-written file exactly as its author left it.
  *
  * The `model:` line is also what the adapter reads back: a project that pins a model anywhere cannot
  * be overridden wholesale by `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` (the CLI lets FORCE outrank a
@@ -16,12 +17,30 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { isValidAgentName } from '../shared/agent-files';
-import { parseClaudeAgentFile, withClaudeAgentModel, type ClaudeAgentFileInfo } from '../shared/claude-agent-files';
+import { CLAUDE_BUILTIN_AGENT_TYPES, parseClaudeAgentFile, serializeClaudeAgentFile, withClaudeAgentModel, type ClaudeAgentDraft, type ClaudeAgentFileInfo } from '../shared/claude-agent-files';
 
 export const CLAUDE_AGENT_DIR = path.join('.claude', 'agents');
 
 export function claudeAgentDir(projectRoot: string): string {
   return path.join(projectRoot, CLAUDE_AGENT_DIR);
+}
+
+/** `<dir>/<name>.md`, or null when the name could escape the folder or is not a safe file name. */
+function claudeAgentFile(projectRoot: string, name: string): string | null {
+  if (!isValidAgentName(name)) return null;
+  const dir = claudeAgentDir(projectRoot);
+  const file = path.join(dir, `${name}.md`);
+  // Defence in depth: the name is already a safe file name, and the path must stay inside the folder.
+  return path.dirname(path.resolve(file)) === path.resolve(dir) ? file : null;
+}
+
+async function exists(file: string): Promise<boolean> {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** One definition file resolved to what the panel and the adapter need from it. */
@@ -71,6 +90,43 @@ export async function hasClaudeAgentPins(projectRoot: string): Promise<boolean> 
 export function isPinnedModel(model: string | undefined): boolean {
   const value = model?.trim();
   return Boolean(value) && value !== 'inherit';
+}
+
+/**
+ * Create a new definition. Refuses a name that would replace a built-in or overwrite a definition
+ * the project already has — the two ways writing a file would take something away rather than add.
+ *
+ * `reserved` is what the live engine reports as its own types; `CLAUDE_BUILTIN_AGENT_TYPES` covers
+ * the built-ins an idle session cannot list, so the rule holds whether or not one is running.
+ */
+export async function createClaudeAgent(
+  projectRoot: string,
+  draft: ClaudeAgentDraft,
+  reserved: string[] = []
+): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const name = draft.name.trim();
+  if (!isValidAgentName(name)) return { ok: false, error: 'A definition needs a name of letters, digits, dot, dash or underscore.' };
+  if (!draft.description.trim()) return { ok: false, error: 'A description is required: Claude Code picks a subagent by it.' };
+  const reservedNames = [...CLAUDE_BUILTIN_AGENT_TYPES, ...reserved];
+  const builtin = reservedNames.find((candidate) => candidate.trim().toLowerCase() === name.toLowerCase());
+  if (builtin) {
+    return { ok: false, error: `${builtin} is one of Claude Code's built-in agent types: a definition named after it replaces it. Pick another name, or write that file by hand.` };
+  }
+  const file = claudeAgentFile(projectRoot, name);
+  if (!file) return { ok: false, error: 'Invalid definition name.' };
+  // A file the exact name already holds is the author's, even when it does not parse as a definition.
+  if (await exists(file)) return { ok: false, error: `${path.basename(file)} already exists; edit it in the list instead.` };
+  // The panel keys a row by the name in the file, so a differently-named file claiming this name —
+  // in any casing — counts as the project already defining it.
+  const existing = (await readAgentFiles(projectRoot)).find((info) => info.name.toLowerCase() === name.toLowerCase());
+  if (existing) return { ok: false, error: `This project already defines ${existing.name}; edit it in the list instead.` };
+  try {
+    await fs.mkdir(claudeAgentDir(projectRoot), { recursive: true });
+    await fs.writeFile(file, serializeClaudeAgentFile({ name, description: draft.description.trim() }, draft.prompt), 'utf8');
+    return { ok: true, path: file };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /**
