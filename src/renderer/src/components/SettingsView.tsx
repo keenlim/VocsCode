@@ -163,6 +163,11 @@ function General({ settings, update }: { settings: AppSettings; update: (p: Part
       <Field label="Iteration guard">
         <input type="number" min={1} max={500} value={settings.goalDefaults.maxIterations} onChange={(e) => update({ goalDefaults: { ...settings.goalDefaults, maxIterations: Number(e.target.value) || 25 } })} />
       </Field>
+      <Toggle
+        checked={settings.goalDefaults.preferHarness}
+        onChange={(v) => update({ goalDefaults: { ...settings.goalDefaults, preferHarness: v } })}
+        label="Prefer a harness's own /goal when it has one — the command goes to the harness instead of the app's goal engine"
+      />
       <h3>Editor</h3>
       <Field label="Editor command" hint="Used by “Open in editor”. VS Code (code) supports jumping to a line.">
         <input value={settings.binaries.editor ?? ''} placeholder="code" onChange={(e) => update({ binaries: { ...settings.binaries, editor: e.target.value } })} />

@@ -56,6 +56,12 @@ its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the to
 auto-compaction setting resolves to and the engine decides when to use it. An adapter that offers
 that method is never sent compaction requests, and `undefined` restores the engine's own default.
 
+`/goal` has a per-session driver (`src/shared/goal-driver.ts`): the Claude adapter reports the slash
+commands its CLI accepts (`supportedCommands()` on init, refreshed on `commands_changed`), and when
+that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
+forwards `/goal …` to the harness and the app sets no goal of its own. Every other session keeps the
+app's goal engine. Settings → Goal defaults (`preferHarness`) forces the app driver everywhere.
+
 ## Layering rules
 
 Layering is enforced by convention and by `tsconfig` project boundaries:
