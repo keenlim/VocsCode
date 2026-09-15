@@ -3,8 +3,8 @@
  * range), the chart series derived from it, and the display formatters the tabs share.
  */
 import type { AnalyticsDayPoint, AnalyticsSummary, FileUsageRow, HarnessModelToolRow, HarnessToolRow, ModelToolRow, ToolUsage, ToolUsageRow, UsageBucket, UsageCounters, UsageSessionRecord } from '../../../../shared/types';
-import { modelName } from '../../../../shared/model-names';
-import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
+import { modelKeyLabel, modelName } from '../../../../shared/model-names';
+import { addCounters, COUNTER_FIELDS, dimensionSeries, emptyCounters, fillDays, rollupDays, speedTps, splitHarnessModelKey, totalTokens, type SliceDimension } from '../../../../shared/usage-rollup';
 import { basename, fmtCost, fmtTokens } from '../../format';
 import type { AnalyticsRange, AnalyticsTab } from '../../store';
 import { harnessShort } from '../../format';
@@ -39,6 +39,8 @@ export interface Scope {
   previous?: UsageCounters;
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
+  /** Keyed `harness|provider/model`; all time this attributes each session to its last model. */
+  byHarnessModel: UsageBucket[];
   byProject: UsageBucket[];
   tools: ToolUsageRow[];
   toolTotals: ToolUsage;
@@ -79,6 +81,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
       totals,
       byHarness: summary.byHarness,
       byModel: summary.byModel,
+      byHarnessModel: summary.byHarnessModel,
       byProject: summary.byProject,
       tools: summary.tools,
       toolTotals: summary.toolTotals,
@@ -107,6 +110,7 @@ export function buildScope(summary: AnalyticsSummary, range: AnalyticsRange, now
     previous: summary.previous,
     byHarness: r.byHarness,
     byModel: r.byModel,
+    byHarnessModel: r.byHarnessModel,
     byProject: r.byProject,
     tools: r.tools,
     toolTotals: r.toolTotals,
@@ -161,9 +165,14 @@ export const METRICS: Record<Metric, MetricDef> = {
 /** Fixed colour slot per harness, so a harness keeps its colour whichever others are on screen. */
 export const HARNESS_ORDER = ['claude', 'codex', 'codex-exec', 'cursor', 'pi', 'acp', 'native'];
 
-export function harnessColor(id: string): string {
+/** Rank of a harness in the shared slot order; an unknown one sorts last, onto the fallback slot. */
+export function harnessIndex(id: string): number {
   const i = HARNESS_ORDER.indexOf(id);
-  return `var(--chart-${(i === -1 ? HARNESS_ORDER.length - 1 : i) + 1})`;
+  return i === -1 ? HARNESS_ORDER.length - 1 : i;
+}
+
+export function harnessColor(id: string): string {
+  return `var(--chart-${harnessIndex(id) + 1})`;
 }
 
 export const OTHER_COLOR = 'var(--chart-other)';
@@ -229,6 +238,31 @@ export function entityLabel(dim: SliceDimension, key: string, label: string): st
   return label || key;
 }
 
+/** The harness and model a `harness|provider/model` bucket key names. */
+export function harnessModelPair(key: string): { harness: string; model: string } {
+  const [harness, modelKey] = splitHarnessModelKey(key);
+  return { harness, model: modelKeyLabel(modelKey) };
+}
+
+/** `Claude · opus` for a `harness|provider/model` bucket key. */
+export function harnessModelLabel(key: string): string {
+  const { harness, model } = harnessModelPair(key);
+  return `${harnessShort(harness)} · ${model}`;
+}
+
+/**
+ * Harness × model buckets in harness-slot order, keeping their spend ranking within each harness,
+ * so the pairs of one harness read together and in the same order as the harness card beside them.
+ */
+export function harnessModelBuckets(scope: Scope): UsageBucket[] {
+  return [...scope.byHarnessModel].sort((a, b) => harnessIndex(harnessModelPair(a.key).harness) - harnessIndex(harnessModelPair(b.key).harness));
+}
+
+/** Prompt tokens of a slice: what the provider was asked to read before it answered. */
+export function promptTokens(c: { inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number {
+  return c.inputTokens + c.cacheReadTokens + c.cacheWriteTokens;
+}
+
 export const TOKEN_KINDS = [
   { key: 'inputTokens', label: 'Input', color: 'var(--chart-1)' },
   { key: 'outputTokens', label: 'Output', color: 'var(--chart-2)' },
@@ -255,7 +289,7 @@ export function cumulative(values: (number | null)[]): number[] {
 
 /** Share of prompt tokens the provider served from cache; null while no prompt tokens were counted. */
 export function cacheHitRate(c: { inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number | null {
-  const prompt = c.inputTokens + c.cacheReadTokens + c.cacheWriteTokens;
+  const prompt = promptTokens(c);
   return prompt > 0 ? c.cacheReadTokens / prompt : null;
 }
 

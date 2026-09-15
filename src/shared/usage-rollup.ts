@@ -39,7 +39,7 @@ export function emptySlice(label: string): UsageSlice {
 }
 
 export function emptyDimensions(): UsageDayDimensions {
-  return { harness: {}, model: {}, project: {}, tool: {}, modelTool: {}, harnessTool: {}, harnessModelTool: {}, file: {} };
+  return { harness: {}, model: {}, harnessModel: {}, project: {}, tool: {}, modelTool: {}, harnessTool: {}, harnessModelTool: {}, file: {} };
 }
 
 export function emptyToolUsage(): ToolUsage {
@@ -86,7 +86,7 @@ export function harnessModelKey(harness: string, modelKey: string): string {
 }
 
 /** Splits `harness|provider/model`; harness ids never contain the separator. */
-function splitHarnessModelKey(ownerKey: string): [harness: string, modelKey: string] {
+export function splitHarnessModelKey(ownerKey: string): [harness: string, modelKey: string] {
   const i = ownerKey.indexOf('|');
   return i === -1 ? [ownerKey, ''] : [ownerKey.slice(0, i), ownerKey.slice(i + 1)];
 }
@@ -166,6 +166,8 @@ export interface RangeRollup {
   totals: UsageCounters;
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
+  /** Keyed `harness|provider/model`; days recorded before the dimension existed contribute nothing. */
+  byHarnessModel: UsageBucket[];
   byProject: UsageBucket[];
   tools: ToolUsageRow[];
   toolTotals: ToolUsage;
@@ -184,7 +186,7 @@ export interface RangeRollup {
   estimatedDays: number;
 }
 
-function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension): UsageBucket[] {
+function bucketsOf(days: AnalyticsDayPoint[], dim: SliceDimension | 'harnessModel'): UsageBucket[] {
   const map = new Map<string, UsageBucket & { ids: Set<string> }>();
   for (const d of days) {
     const slices = d.usage.by?.[dim];
@@ -270,6 +272,7 @@ export function rollupDays(days: AnalyticsDayPoint[]): RangeRollup {
     totals,
     byHarness: bucketsOf(days, 'harness'),
     byModel: bucketsOf(days, 'model'),
+    byHarnessModel: bucketsOf(days, 'harnessModel'),
     byProject: bucketsOf(days, 'project'),
     tools: toolRows,
     toolTotals,
