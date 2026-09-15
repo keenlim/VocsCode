@@ -7,6 +7,7 @@ import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
+import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 import { OPTIONS_ALLOW_DENY } from './permissions';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -254,8 +255,9 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
-    if (meta.config.appendSystemPrompt) {
-      await appendSystemPrompt(args, meta.config.appendSystemPrompt, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
+    const append = sessionAppendPrompt(meta);
+    if (append) {
+      await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
     }
     await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
     args.push(...(s.pi.extraArgs ?? []));

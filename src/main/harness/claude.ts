@@ -21,6 +21,7 @@ import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
 import { UsageReporter } from '../util/usage-reporter';
 import { gateAction, isOutsideWorkspace, OPTIONS_ALLOW_DENY, PLAN_MODE_DENIAL } from './permissions';
+import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 const APP_ID = 'vocs-code/0.1.0';
@@ -147,6 +148,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     const s = this.ctx.settings();
     const meta = this.ctx.session();
     const cfg = meta.config;
+    const append = sessionAppendPrompt(meta);
     const mode = this.ctx.permissionMode();
     const bin = this.ctx.runtime.resolve('claude');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
@@ -165,8 +167,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       env,
       abortController: this.abort,
       settingSources: s.claude.settingSources,
-      systemPrompt: cfg.appendSystemPrompt
-        ? { type: 'preset', preset: 'claude_code', append: cfg.appendSystemPrompt }
+      systemPrompt: append
+        ? { type: 'preset', preset: 'claude_code', append }
         : { type: 'preset', preset: 'claude_code' },
       maxBudgetUsd: cfg.maxBudgetUsd,
       enableFileCheckpointing: true,

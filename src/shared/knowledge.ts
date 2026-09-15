@@ -173,8 +173,6 @@ export interface KnowledgeStatusSummary {
   proposals: number;
   /** Pages that name a file source which changed or disappeared. */
   stale: number;
-  /** Unresolved GitNexus availability for this project (informational). */
-  indexed: boolean;
   lastUpdated?: string;
   generating?: boolean;
   /** The last synthesis job for this project, so a failure cannot vanish into a toast. */
@@ -311,6 +309,15 @@ export function authorityOf(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 
 /** Pages an agent may be handed as current truth. Historical pages exist but are not served as now. */
 export function isServable(meta: Pick<KnowledgePageMeta, 'status'>): boolean {
   return meta.status === 'current' || meta.status === 'uncertain';
+}
+
+/**
+ * A page still waiting for a human decision. Only the legacy review-queue states count: `uncertain`
+ * is a recorded judgement about a claim, `deprecated` and `superseded` are history, and none of the
+ * three may be overwritten by a bulk accept. Ingestion is automatic, so this is normally empty.
+ */
+export function isPendingStatus(status: KnowledgeStatus): boolean {
+  return status === 'draft' || status === 'proposed';
 }
 
 export function authorityLabel(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 'updatedBy'>): string {

@@ -23,6 +23,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      // `--append-system-prompt`, so the session's own prompt is never replaced.
+      systemPrompt: true,
       // Injected through the bundled vocs-code-mcp extension, which registers each MCP tool with pi.
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
@@ -51,6 +53,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      // The claude_code preset with `append`, so Claude Code's own prompt stays underneath.
+      systemPrompt: true,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -78,6 +82,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: false,
+      // The app-server owns the thread's instructions; priming goes through the first message.
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -105,6 +111,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: false,
       costReporting: false,
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -132,6 +139,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      systemPrompt: false,
       mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -159,6 +167,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
@@ -185,6 +194,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      // `buildSystemPrompt` takes an `append` string; the loop owns the prompt.
+      systemPrompt: true,
       mcp: 'client',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'providers'

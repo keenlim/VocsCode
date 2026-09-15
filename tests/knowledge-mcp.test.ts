@@ -101,7 +101,7 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('vocs-memory MCP server', () => {
-  it('lists its five tools and searches pages the app wrote', async () => {
+  it('lists its six tools and searches pages the app wrote', async () => {
     const projectRoot = tmpDir('vocs-mem-');
     const store = new KnowledgeStore();
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
@@ -191,6 +191,52 @@ describe('vocs-memory MCP server', () => {
     const payload = JSON.parse(toolText(search)) as { results: { id: string; labels: string[] }[] };
     expect(payload.results.map((r) => r.id)).toContain(result.targetPageId);
     expect(payload.results.find((r) => r.id === result.targetPageId)?.labels).toEqual(['terminal-pty', 'terminal']);
+  });
+
+  it('files a worktree session proposal into the project wiki, not the branch slice', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const branchRoot = path.join(wiki, 'branches', 'vocscode-feature');
+    await fs.mkdir(branchRoot, { recursive: true });
+    // A worktree session is the app's default; every one of them carries a branch root.
+    const { request } = start(wiki, { VOCS_MEMORY_BRANCH_ROOT: branchRoot, VOCS_MEMORY_BRANCH: 'vocscode/feature' });
+    const propose = await request({
+      method: 'tools/call',
+      params: { name: 'knowledge_propose', arguments: { title: 'PTY ownership', claim: 'Only the main process owns a PTY.', kind: 'convention', body: 'Body text.' } }
+    });
+    const result = JSON.parse(toolText(propose)) as { targetPageId: string; scope: string };
+    expect(result.scope).toBe('repo');
+
+    // The page lands where every other session of the project can read it.
+    const raw = await fs.readFile(path.join(wiki, 'convention', 'pty-ownership.md'), 'utf8');
+    expect(raw).toContain('scope: repo');
+    expect(raw).not.toContain('branch:');
+    await expect(fs.access(path.join(branchRoot, 'convention'))).rejects.toThrow();
+
+    // A session on the branch sees it through the ordinary repo-scope overlay.
+    const store = new KnowledgeStore();
+    const fromBranch: KnowledgeScope = { projectRoot, cwd: projectRoot, branch: 'vocscode/feature' };
+    expect((await store.read(fromBranch, 'convention/pty-ownership'))?.meta.scope).toBe('repo');
+  });
+
+  it('rewrites an inherited branch page inside its own slice', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const branchRoot = path.join(wiki, 'branches', 'vocscode-feature');
+    const store = new KnowledgeStore();
+    const branchScope: KnowledgeScope = { projectRoot, cwd: projectRoot, branch: 'vocscode/feature' };
+    await store.write(branchScope, pageMeta({ id: 'conventions/branch-only', title: 'Branch note', claim: 'A claim only this branch has.', scope: 'branch', branch: 'vocscode/feature' }), 'branch body');
+
+    const { request } = start(wiki, { VOCS_MEMORY_BRANCH_ROOT: branchRoot, VOCS_MEMORY_BRANCH: 'vocscode/feature' });
+    const propose = await request({
+      method: 'tools/call',
+      params: { name: 'knowledge_propose', arguments: { title: 'Branch note', claim: 'A claim only this branch has.', kind: 'convention', page_id: 'conventions/branch-only', body: 'updated body' } }
+    });
+    expect((JSON.parse(toolText(propose)) as { scope: string }).scope).toBe('branch');
+
+    // The update stays in the branch slice: no repo-scope twin, and the branch copy is the new body.
+    expect(await fs.readFile(path.join(branchRoot, 'conventions', 'branch-only.md'), 'utf8')).toContain('updated body');
+    await expect(fs.access(path.join(wiki, 'conventions', 'branch-only.md'))).rejects.toThrow();
   });
 
   it('refuses a tombstoned claim and writes nothing', async () => {
@@ -339,6 +385,17 @@ describe('session history recall', () => {
     const archived = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect', include_archived: true } } });
     const withArchived = JSON.parse(toolText(archived)) as { results: { sessionId: string }[] };
     expect(withArchived.results.map((r) => r.sessionId).sort()).toEqual(['s_a', 's_c']);
+  });
+
+  it('serves nothing rather than every project when the app gave it no project scope', async () => {
+    const { userData, wiki } = await seedIndex();
+    // VOCS_MEMORY_ROOT is the wiki this server reads; the project scope is deliberately absent, as
+    // it would be for a session the app did not attribute to a project.
+    const { request } = start(wiki, { VOCS_MEMORY_USER_DATA: userData });
+    const call = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect' } } });
+    const payload = JSON.parse(toolText(call)) as { available: boolean; reason?: string; results?: unknown[] };
+    expect(payload.available).toBe(false);
+    expect(payload.results ?? []).toHaveLength(0);
   });
 
   it('degrades to an explanation when the app has no index yet', async () => {

@@ -6173,6 +6173,20 @@ body.resizing {
   gap: 6px;
   flex-wrap: wrap;
 }
+.knowledge-rejected {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.knowledge-rejected summary {
+  cursor: pointer;
+}
+.knowledge-rejected ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .knowledge-switches {
   display: flex;
   flex-direction: column;

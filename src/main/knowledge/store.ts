@@ -112,6 +112,17 @@ export class KnowledgeStore {
     return exists(this.repoDir(scope));
   }
 
+  /**
+   * Creates the wiki directory without writing a page into it. The directory itself is what turns
+   * the project's memory on — the `vocs-memory` MCP server is injected and git-boundary episodes are
+   * captured only once it exists — so a project whose docs are too thin to bootstrap from can still
+   * start one and fill it by hand.
+   */
+  async createWiki(scope: KnowledgeScope): Promise<void> {
+    await this.ensureIgnored(scope);
+    await ensureDir(this.repoDir(scope));
+  }
+
   /** A file's cheap identity, used to skip documents whose content has not changed since last scan. */
   async readScan(scope: KnowledgeScope): Promise<Record<string, { mtimeMs: number; size: number }>> {
     return readJson<Record<string, { mtimeMs: number; size: number }>>(path.join(this.repoDir(scope), KNOWLEDGE_SCAN_FILE), {});
@@ -178,20 +189,25 @@ export class KnowledgeStore {
     return this.write(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
   }
 
-  /** Removes one page from whichever scope holds it; used when a draft is discarded. */
+  /**
+   * Removes one page from whichever scope holds it; used when a draft is discarded. True only when
+   * a file was actually unlinked: `fs.rm` with `force` resolves for a missing path, so the branch
+   * scope would otherwise always claim the delete and a repo page discarded from a worktree session
+   * would survive on disk while the caller reported success.
+   */
   async deletePage(scope: KnowledgeScope, id: string): Promise<boolean> {
     if (!isKnowledgeId(id)) return false;
     for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
       if (!dir) continue;
       const file = path.join(dir, `${id}.md`);
-      if (!isInside(dir, file)) continue;
+      if (!isInside(dir, file) || !(await exists(file))) continue;
       try {
         await fs.rm(file, { force: true });
-        this.cache.delete(file);
-        return true;
       } catch {
-        /* try the next scope */
+        continue; // try the next scope
       }
+      this.cache.delete(file);
+      return true;
     }
     return false;
   }
@@ -292,13 +308,18 @@ export class KnowledgeStore {
     await fs.appendFile(file, `${JSON.stringify(episode)}\n`, 'utf8');
   }
 
+  /**
+   * The newest episodes first: day files sort newest-first by name, but rows are *appended*
+   * oldest-first inside a file, so the rows of each file are read backwards too. Callers take `[0]`
+   * as "the most recent outcome" and attribute distillation to its session.
+   */
   async readEpisodes(scope: KnowledgeScope, limit = 40): Promise<KnowledgeEpisode[]> {
     const dir = this.observationsDir(scope);
     if (!(await exists(dir))) return [];
     const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.jsonl')).sort().reverse();
     const out: KnowledgeEpisode[] = [];
     for (const file of files) {
-      const rows = (await fs.readFile(path.join(dir, file), 'utf8')).split('\n');
+      const rows = (await fs.readFile(path.join(dir, file), 'utf8')).split('\n').reverse();
       for (const row of rows) {
         if (!row.trim()) continue;
         try {
@@ -307,10 +328,10 @@ export class KnowledgeStore {
         } catch {
           /* a torn line is not worth failing a distillation over */
         }
-        if (out.length >= limit) return out;
+        if (out.length >= limit) return newestFirst(out).slice(0, limit);
       }
     }
-    return out;
+    return newestFirst(out).slice(0, limit);
   }
 
   /* ------------------------------------------------------------------ */
@@ -358,16 +379,6 @@ export class KnowledgeStore {
     } catch {
       /* not a git repo, or unreadable: the wiki still works, it is just visible to git */
     }
-  }
-
-  /** Deletes the in-memory snapshot for one project; callers use it after an external edit. */
-  invalidate(scope: KnowledgeScope): void {
-    const dirs = [this.repoDir(scope), this.branchDir(scope)].filter((d): d is string => !!d);
-    for (const key of [...this.cache.keys()]) if (dirs.some((d) => isInside(d, key) || key.startsWith(d))) this.cache.delete(key);
-    this.evidence = null;
-    this.rejected = null;
-    this.evidenceFile = null;
-    this.rejectedFile = null;
   }
 
   private async walkDir(dir: string): Promise<StoredPage[]> {
@@ -422,6 +433,11 @@ export class KnowledgeStore {
     this.cache.set(abs, { mtimeMs: stat.mtimeMs, size: stat.size, page });
     return page;
   }
+}
+
+/** Newest episode first by the episode's own stamp: a day file is named, a late append is not. */
+function newestFirst(episodes: KnowledgeEpisode[]): KnowledgeEpisode[] {
+  return [...episodes].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
 }
 
 /** Serializes only the pages the caller asked for, from a summary list; shared with publish. */
