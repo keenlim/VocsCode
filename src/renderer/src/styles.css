@@ -969,7 +969,7 @@ h4 {
   gap: 8px;
   font-weight: 700;
   font-size: 17px;
-  /* The live-session badge keeps its width; the wordmark gives up room first (see .brand > span). */
+  /* The status badges keep a badge's width; the wordmark gives up room first (see .brand > span). */
   min-width: 0;
 }
 .brand > .icon {
@@ -980,17 +980,17 @@ h4 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The count of live sessions sits on the title's row, not on a row of its own: the margin keeps it
-   off the wordmark, and margin-right keeps the header actions pinned to the right edge. */
-.sidebar-running {
+/* Every status count sits on the title's row next to the wordmark, never on a row of its own.
+   `min-content` basis (the width of the widest badge) means the cluster never claims room the
+   wordmark needs — it only grows into slack, so the badges sit side by side once the sidebar is
+   wide enough and stack in a column when it is not. A deficit is the wordmark's to absorb. */
+.sidebar-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  margin: 0 auto 0 10px;
-}
-.sidebar-summary {
-  display: flex;
   gap: 6px;
-  padding: 0 12px 8px;
+  flex: 1 1 min-content;
+  margin-left: 10px;
 }
 .sidebar-list {
   flex: 1;
