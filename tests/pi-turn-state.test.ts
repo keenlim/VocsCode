@@ -206,6 +206,52 @@ describe('Pi adapter turn-state tracking', () => {
     await a.dispose();
   });
 
+  it('counts a turn whose session stats never arrive, with the tokens pi streamed for it', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    // No prime(): get_session_stats rejects, the way a timeout or a dead pi process ends a turn.
+    // The session must still count the turn — a stats request that fails cannot be allowed to drop
+    // turns from the count — and the samples pi streamed for that turn are its usage.
+    feed(a, { type: 'agent_start' });
+    feed(a, { type: 'message_start', message: { role: 'assistant', content: [] } });
+    feed(a, {
+      type: 'message_update',
+      usage: { input: 100, output: 8, cacheRead: 40, cacheWrite: 2, reasoning: 5, totalTokens: 155, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.015 } },
+      assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+    });
+    feed(a, { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
+    // Every counter the turn moved, not just input/output: cache reads and reasoning are part of what
+    // it cost and how fast it ran.
+    expect(turn.usage).toMatchObject({ inputTokens: 100, outputTokens: 8, cacheReadTokens: 40, cacheWriteTokens: 2, reasoningTokens: 5, costUsd: 0.015 });
+    const usages = events.filter((e): e is Extract<SessionEvent, { type: 'usage' }> => e.type === 'usage');
+    expect(usages.at(-1)?.totals).toMatchObject({ turns: 1, inputTokens: 100, outputTokens: 8 });
+  });
+
+  it('measures the turn before the stats round-trip, not after it', async () => {
+    const { ctx, events } = stubCtx();
+    const a = new PiAdapter(ctx);
+    const priv = a as unknown as { child: unknown; extensionCapabilities: Set<string>; request: (type: string) => Promise<unknown> };
+    priv.child = {};
+    priv.extensionCapabilities = new Set(['approvals', 'tools', 'subagents']);
+    // The stats request stays in flight while the test waits, standing in for a stalled pi: the
+    // latency of that bookkeeping is not time the model spent, so it must not reach the turn's
+    // duration or the speed derived from it.
+    let release = (): void => {};
+    priv.request = async (type: string) =>
+      type === 'get_session_stats' ? new Promise<unknown>((resolve) => { release = () => resolve({ tokens: { input: 10, output: 2 }, cost: 0.01 }); }) : {};
+    feed(a, { type: 'agent_start' });
+    feed(a, { type: 'agent_end', messages: [] });
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    release();
+    await settle();
+    const turn = turns(events).at(-1) as Extract<TranscriptItem, { kind: 'turn' }>;
+    expect(turn.durationMs).toBeLessThan(50);
+  });
+
   it('does not report an epoch-long wall time when a turn ends with no recorded start', async () => {
     const { ctx, events } = stubCtx();
     const a = new PiAdapter(ctx);

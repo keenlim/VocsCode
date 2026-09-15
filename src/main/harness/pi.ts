@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
-import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
@@ -861,13 +861,17 @@ export class PiAdapter implements HarnessAdapter {
   private async finishTurn(): Promise<void> {
     this.declinedTools.clear();
     this._busy = false;
+    // The turn ends now, but the stats round-trip below is app bookkeeping rather than model work:
+    // measuring the wall time after it would fold a stalled request (up to the 10s timeout) into the
+    // turn's duration and depress the speed the panel derives from it. A turn that ends after
+    // turnStartedAt was reset (or before a start was seen) carries no duration at all, since
+    // measuring from 0 would report an epoch-long wall time.
+    const wallMs = this.turnStartedAt > 0 ? Date.now() - this.turnStartedAt : undefined;
     if (this.currentAssistant) {
       this.currentAssistant.streaming = false;
       this.ctx.emit({ type: 'item.upsert', item: { ...this.currentAssistant } });
       this.currentAssistant = null;
     }
-    let turnCost = 0;
-    let turnUsage: Partial<UsageTotals> | undefined;
     try {
       const stats = await withTimeout(
         this.request<{ tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }; cost?: number; contextUsage?: { tokens?: number; contextWindow?: number } | null; sessionFile?: string }>('get_session_stats'),
@@ -885,19 +889,25 @@ export class PiAdapter implements HarnessAdapter {
         contextTokens: stats.contextUsage?.tokens,
         contextWindow: stats.contextUsage?.contextWindow
       });
-      const completed = this.usage.finishTurn();
-      turnCost = completed.usage?.costUsd ?? 0;
-      turnUsage = completed.usage ? { inputTokens: completed.usage.inputTokens, outputTokens: completed.usage.outputTokens } : undefined;
-      // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
-      const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
-      this.pendingSubagentCost.clear();
-      this.usageReporter.report(completed.totals, subagentCostByModel);
-      this.usageReporter.flush();
     } catch (e) {
+      // A failed or timed-out stats request must not skip the turn's own accounting: pi reports
+      // tokens cumulatively, so the samples it already streamed for this turn are all the app has.
+      // Closing the turn outside the try keeps the session's turn count in step with the transcript
+      // and lets those samples be the turn's usage. They stay pending in the tracker, so the next
+      // cumulative snapshot still reconciles them rather than counting them twice.
       this.ctx.log('debug', `get_session_stats failed: ${errorMessage(e)}`);
-      // Do not leave a throttled live snapshot waiting after a failed stats request.
-      this.usageReporter.flush();
     }
+    const completed = this.usage.finishTurn();
+    // Subagent spend accrued since the last report, so analytics can put it on the model that ran it.
+    const subagentCostByModel = this.pendingSubagentCost.size ? [...this.pendingSubagentCost.values()] : undefined;
+    this.pendingSubagentCost.clear();
+    this.usageReporter.report(completed.totals, subagentCostByModel);
+    this.usageReporter.flush();
+    const turnCost = completed.usage?.costUsd ?? 0;
+    // The whole delta, not just input/output: a turn's cache reads and reasoning tokens are part of
+    // what it cost and how fast it ran. A turn with neither a streamed sample nor a stats snapshot
+    // has no measured usage at all, so the row stays unknown instead of claiming a measured zero.
+    const turnUsage = completed.usage && Object.values(completed.usage).some((value) => (value ?? 0) > 0) ? completed.usage : undefined;
     // pi ends a failed turn with an assistant message (stopReason 'error'), not an error event.
     const stopReason = this.lastStopReason;
     const errorMsg = this.lastErrorMessage;
@@ -912,9 +922,7 @@ export class PiAdapter implements HarnessAdapter {
         kind: 'turn',
         ts: Date.now(),
         status: failed ? 'failed' : stopReason === 'aborted' ? 'interrupted' : 'completed',
-        // A turn can end after turnStartedAt was reset (or before a start was seen): measuring from
-        // 0 would report an epoch-long wall time, so that case carries no duration at all.
-        durationMs: this.turnStartedAt > 0 ? Date.now() - this.turnStartedAt : undefined,
+        durationMs: wallMs,
         costUsd: turnCost,
         usage: turnUsage,
         error: failed ? errorMsg : undefined

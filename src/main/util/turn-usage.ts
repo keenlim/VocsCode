@@ -80,7 +80,9 @@ export class TurnUsageTracker {
     if (count) this.totals.turns += 1;
     const usage: TurnUsage = {};
     for (const field of USAGE_FIELDS) usage[field] = Math.max(0, this.totals[field] - base[field]);
-    this.pendingAdditions = {};
+    // Per-request samples stay pending across the turn boundary: they are still provisional until a
+    // cumulative counter covers them. Dropping them here would let the next setCumulative treat the
+    // samples as already reconciled and count them a second time.
     return { totals: this.snapshot(), usage };
   }
 }
