@@ -31,6 +31,13 @@ import { sessionAppendPrompt } from './system-prompt';
 import type { HarnessAdapter, HarnessContext } from './types';
 
 const APP_ID = 'vocs-code/0.1.0';
+/**
+ * How many subagents one session may run at once. Claude Code's own default is 20, a number tuned
+ * for a single terminal; a session here fans out deliberately (a review spread across thirty
+ * areas), and a spawn past the cap is refused outright, so the tail of that fan-out is lost. Each
+ * concurrent run is its own conversation, so cost is the real brake, not this number.
+ */
+const MAX_CONCURRENT_SUBAGENTS = 32;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const READ_ONLY_TOOLS = new Set([
   'Read',
@@ -187,6 +194,9 @@ export class ClaudeAdapter implements HarnessAdapter {
     // Never let this app's own Claude Code host variables leak into a nested session.
     for (const k of Object.keys(env)) if (k.startsWith('CLAUDE_CODE_') && k !== 'CLAUDE_CODE_USE_BEDROCK' && k !== 'CLAUDE_CODE_USE_VERTEX' && k !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[k];
     delete env.CLAUDECODE;
+    // After the scrub, which would otherwise drop it with every other CLAUDE_CODE_* variable. The
+    // SDK reads the cap from the child's environment and, left alone, applies its own default.
+    env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS = String(MAX_CONCURRENT_SUBAGENTS);
 
     const options: Options = {
       cwd: meta.cwd,
@@ -653,7 +663,9 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (msg.parent_tool_use_id) this.subagents.onNestedToolResult(msg.parent_tool_use_id, block.tool_use_id, output, !!block.is_error);
           // A foreground Agent call finishes here; a backgrounded one reports through its task
           // notification instead. Only spawning calls are tracked, so this is a no-op for the rest.
-          else this.subagents.onCallResult(block.tool_use_id, !!block.is_error);
+          // The result text goes with it: a spawn the CLI refused never runs, so this is the only
+          // place the reason it refused can be read from.
+          else this.subagents.onCallResult(block.tool_use_id, !!block.is_error, output);
           const item = this.toolItems.get(block.tool_use_id);
           if (!item) continue;
           item.output = output;

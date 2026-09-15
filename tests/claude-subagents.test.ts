@@ -180,6 +180,28 @@ describe('Claude adapter subagent capture', () => {
     expect(run.totals).toMatchObject({ turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
   });
 
+  it('records why a spawn the CLI refused produced nothing, instead of a bare error', async () => {
+    const { ctx, events, dir } = await stubCtx();
+    const a = new ClaudeAdapter(ctx);
+    feed(a, agentToolUse());
+
+    // A spawn past the CLI's concurrent cap never runs: the spawning call comes back an error and
+    // there is no child message, no task and no notification to read a reason from. This result is
+    // the whole account of the run, so dropping it leaves the panel with an `error` and no why.
+    const refusal = 'Concurrent subagent limit reached. You can run 20 subagents at once. Do not retry.';
+    feed(a, { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: AGENT_CALL, is_error: true, content: refusal }] } });
+
+    const run = await settled(dir, AGENT_CALL, 'error');
+    expect(run.error).toBe(refusal);
+    // Nothing ran, so nothing is invented: no transcript and no turn to charge for.
+    expect(run.items).toEqual([]);
+    expect(run.totals).toMatchObject({ turns: 0, toolUses: 0, costUsd: 0 });
+
+    // The panel and analytics read the completion event, so the reason rides on that too.
+    const completion = events.find((e): e is Extract<SessionEvent, { type: 'subagent' }> => e.type === 'subagent');
+    expect(completion!.completion).toMatchObject({ agentId: AGENT_CALL, status: 'error', error: refusal });
+  });
+
   it('keeps the child transcript out of the parent', async () => {
     const { ctx, events, dir } = await stubCtx();
     const a = new ClaudeAdapter(ctx);
