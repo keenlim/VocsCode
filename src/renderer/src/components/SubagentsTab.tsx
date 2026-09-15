@@ -15,6 +15,7 @@ import { fmtCost, fmtDuration, fmtTokens } from '../format';
 import { useStore } from '../store';
 import { Badge, Button, Icon, Spinner } from './ui';
 import { SubagentAgents } from './SubagentAgents';
+import { ClaudeAgentModels } from './ClaudeAgentModels';
 
 const LIVE_REFRESH_MS = 400;
 /** Bursts of activity (a tool call starting and ending) collapse into one refetch. */
@@ -55,7 +56,7 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
   const [detail, setDetail] = useState<SubagentRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [steerText, setSteerText] = useState('');
-  const [view, setView] = useState<'runs' | 'agents'>('runs');
+  const [view, setView] = useState<'runs' | 'agents' | 'models'>('runs');
   const reveal = useStore((s) => s.subagentReveal);
   const consumeReveal = useStore((s) => s.consumeSubagentReveal);
   const support = subagentSupport(session.config.harness);
@@ -146,18 +147,27 @@ export function SubagentsTab({ session }: { session: SessionMeta }) {
 
   return (
     <div className="subagents">
-      {support.agents && (
+      {(support.agents || support.models) && (
         <div className="subagent-views">
           <button type="button" className={`panel-tab ${view === 'runs' ? 'active' : ''}`} onClick={() => setView('runs')} data-testid="subagent-view-runs">
             Runs
           </button>
-          <button type="button" className={`panel-tab ${view === 'agents' ? 'active' : ''}`} onClick={() => setView('agents')} data-testid="subagent-view-agents">
-            Agents
-          </button>
+          {support.agents && (
+            <button type="button" className={`panel-tab ${view === 'agents' ? 'active' : ''}`} onClick={() => setView('agents')} data-testid="subagent-view-agents">
+              Agents
+            </button>
+          )}
+          {support.models && (
+            <button type="button" className={`panel-tab ${view === 'models' ? 'active' : ''}`} onClick={() => setView('models')} data-testid="subagent-view-models">
+              Models
+            </button>
+          )}
         </div>
       )}
       {support.agents && view === 'agents' ? (
         <SubagentAgents session={session} />
+      ) : support.models && view === 'models' ? (
+        <ClaudeAgentModels session={session} />
       ) : (
         <>
       {error && <div className="callout warn small">{error}</div>}

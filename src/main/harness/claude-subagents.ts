@@ -20,6 +20,18 @@ import type { ModelInfo, SessionEvent } from '../../shared/types';
 /** Tool names that spawn a Claude Code subagent. */
 export const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
 
+/**
+ * The SDK's sentinel for a message it composed itself — an API error notice, a context-limit
+ * warning — rather than one a model produced. It arrives on the nested stream shaped like an
+ * ordinary assistant message, so it is never the child's model and never a model call.
+ */
+export const SYNTHETIC_MODEL = '<synthetic>';
+
+/** True for a model id a model actually reported, as opposed to the SDK's own sentinel. */
+export function isRealModel(model: string | undefined): model is string {
+  return typeof model === 'string' && model.length > 0 && model !== SYNTHETIC_MODEL;
+}
+
 /** `system`/`task_started`, narrowed to the fields this tracker consumes. */
 export interface TaskStartedLike {
   task_id: string;
@@ -273,12 +285,16 @@ export class ClaudeSubagentRuns {
     if (!state || state.ended) return;
     // The model the spawning message named is the parent's; a child that runs on its own model
     // (Claude Code's Explore agent, an agent definition pinned to one) corrects the record here,
-    // which is also what the panel's run row and its cost attribution should say.
-    if (msg.message.model && msg.message.model !== state.model) {
-      state.model = msg.message.model;
+    // which is also what the panel's run row and its cost attribution should say. A synthetic
+    // message is the SDK speaking rather than a model, so it corrects nothing.
+    const childModel = msg.message.model;
+    if (isRealModel(childModel) && childModel !== state.model) {
+      state.model = childModel;
       void this.store?.start(this.metaOf(state));
     }
-    this.trackCall(state, msg);
+    // Its text is still shown below — that is how an API error reaches the transcript — but it opens
+    // no call row, which would invent a turn and a cost for a request that never reached a model.
+    if (isRealModel(childModel)) this.trackCall(state, msg);
     for (const block of msg.message.content ?? []) {
       if (block.type === 'text' && block.text) this.appendText(state, block.text);
       else if (block.type === 'tool_use' && block.id && block.name) {

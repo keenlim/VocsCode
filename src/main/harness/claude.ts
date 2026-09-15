@@ -15,10 +15,11 @@ import {
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
+import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
 import { subagentDir } from '../subagents';
-import { subagentSupport } from '../../shared/subagents';
+import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
 import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
@@ -253,6 +254,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       options.env = { ...(options.env ?? {}), ...overlay };
       auth = overlay.ANTHROPIC_BASE_URL ? `endpoint=${overlay.ANTHROPIC_BASE_URL}` : 'stored-key';
     }
+    options.env = { ...(options.env ?? {}), ...(await this.subagentModelEnv(options.model)) };
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
     this.q = query({ prompt: this.input, options });
     // This CLI counts the tokens and dollars of the process that is starting, not of the session:
@@ -881,6 +883,40 @@ export class ClaudeAdapter implements HarnessAdapter {
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
     return (await this.q.supportedModels()).map(claudeModelToInfo);
+  }
+
+  /**
+   * The agent types Claude Code will delegate to, so the Subagents panel can name them. Only a live
+   * query knows them; an idle session reports none and the panel falls back to the project's own
+   * definition files, which it can read at any time.
+   */
+  async listAgents(): Promise<AgentTypeInfo[]> {
+    if (!this.q) return [];
+    // Older CLI builds answer `supportedModels` but not this; an absent method is "unknown", not a crash.
+    if (typeof this.q.supportedAgents !== 'function') return [];
+    const agents = await this.q.supportedAgents();
+    return agents.map(({ name, description, model }) => ({ name, description, ...(model ? { model } : {}) }));
+  }
+
+  /**
+   * Make a delegated agent run on the session's own model.
+   *
+   * Claude Code resolves a subagent's model from its definition before anything else, and its
+   * built-ins (`Explore`, `Plan`) declare `inherit` — which on a provider that is not Anthropic does
+   * not mean the session's model but Claude's own default, an Anthropic id the endpoint answers with
+   * a 401. So naming the model here is what makes "a subagent runs on the model this session runs
+   * on" true rather than merely intended.
+   *
+   * `_FORCE` is required as well, not belt-and-braces: the built-ins' `inherit` is resolved before
+   * the plain variable and wins over it. It is withheld exactly when the project pins a model of its
+   * own, because FORCE outranks a definition's `model:` line too and would silently ignore the pin.
+   */
+  private async subagentModelEnv(model: string | undefined): Promise<Record<string, string | undefined>> {
+    if (!model) return {};
+    const env: Record<string, string | undefined> = { CLAUDE_CODE_SUBAGENT_MODEL: model };
+    const pinned = await hasClaudeAgentPins(this.ctx.session().config.projectRoot).catch(() => false);
+    if (!pinned) env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1';
+    return env;
   }
 
   async dispose(): Promise<void> {

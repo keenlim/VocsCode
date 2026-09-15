@@ -33,7 +33,7 @@ import type { ApprovalDraft, HarnessAdapter, HarnessContext } from './harness/ty
 import { branchGitState, createWorktree, gitRoot, gitWorktrees, removeWorktree, restoreWorktree, slugify, worktreeAddForBranch, worktreeInfo, type BranchGitState, type PrRef, type SessionPrQuery } from './git';
 import { tokensPerSecond, turnSpeed } from './analytics';
 import { isValidRunId, listSubagentRuns, readSubagentRun } from './subagents';
-import { subagentSupport, type SubagentRun, type SubagentRunSummary } from '../shared/subagents';
+import { subagentSupport, type AgentTypeInfo, type SubagentRun, type SubagentRunSummary } from '../shared/subagents';
 import { emptyUsage, enrichModelsFromProviders } from './models/static-models';
 import { applyModelOverrides } from '../shared/model-overrides';
 import type { RuntimeResolver } from './runtime';
@@ -527,6 +527,16 @@ export class SessionManager {
     const meta = this.get(id);
     if (!meta) return null;
     return readSubagentRun(this.deps.store.sessionDir(id), meta.config.harness, runId, { live: this.active.has(id) });
+  }
+
+  /**
+   * The subagent types a running session's engine can delegate to. Only a live process can name
+   * them, so an idle session answers with none rather than starting one to ask.
+   */
+  async subagentTypes(id: string): Promise<AgentTypeInfo[]> {
+    const adapter = this.active.get(id)?.adapter;
+    if (!adapter?.listAgents) return [];
+    return adapter.listAgents().catch(() => []);
   }
 
   /**

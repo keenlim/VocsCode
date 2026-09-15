@@ -207,18 +207,79 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       await win.locator('.subagent-calls tbody tr').first().waitFor({ timeout: 20_000 });
       expect(await win.locator('.subagent-calls tbody tr').count()).toBe(2);
 
-      // The Agents view edits `.pi/agents`, which a Claude session does not run with, so it is
-      // absent rather than empty. Stop/Steer have no per-child equivalent in the SDK either.
-      expect(await win.locator('[data-testid="subagent-view-agents"]').count()).toBe(0);
-      expect(await win.locator('[data-testid="subagent-view-runs"]').count()).toBe(0);
-
       await fs.mkdir(shots, { recursive: true });
       await win.screenshot({ path: path.join(shots, 'subagents-panel-claude.png') });
+
+      // The Agents view edits `.pi/agents`, which a Claude session does not run with, so it is
+      // absent rather than empty; the Models view is the Claude equivalent. Stop/Steer have no
+      // per-child equivalent in the SDK at all.
+      expect(await win.locator('[data-testid="subagent-view-agents"]').count()).toBe(0);
+      await win.getByTestId('subagent-view-models').click();
+
+      // This project supplies no `.claude/agents`, and the panel does not invent rows for the
+      // built-ins: writing a definition for one would replace its instructions, not adjust them.
+      await expect.poll(() => win.locator('.subagents').first().innerText(), { timeout: 20_000 }).toContain('This project defines no Claude agents');
+      expect(await win.locator('[data-testid="claude-agent-Explore"]').count()).toBe(0);
+      // Nothing is pinned, so the adapter holds the built-ins to the session model and there is
+      // nothing to warn about.
+      expect(await win.locator('.subagents .callout.warn').count()).toBe(0);
+
+      // That rule holds over IPC, not merely in the UI: saving a model for a built-in is refused and
+      // leaves no file behind.
+      const saved = await invoke(win, 'claude-agents:setModel', { id: SEED_SESSION_ID, name: 'Explore', model: 'deepseek-v4.1-flash' });
+      expect(saved).toMatchObject({ ok: false });
+      expect(saved.ok === false && saved.error).toContain('Explore');
+      expect(await fs.readdir(path.join(project, '.claude', 'agents')).catch(() => null)).toBeNull();
 
       // And the refusal is real, over IPC — not merely a hidden button.
       const stopped = await invoke(win, 'subagents:stop', { id: SEED_SESSION_ID, runId: 'agent_seed1' });
       expect(stopped).toMatchObject({ ok: false });
       expect(stopped.ok === false && stopped.error).toMatch(/not available for the claude harness/);
+    } finally {
+      await app?.close().catch(() => undefined);
+      app = null;
+      await fs.rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }, 180_000);
+
+  it("edits the model of a project's own Claude definition, and nothing else in the file", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-subagents-claude-models-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    const file = path.join(project, '.claude', 'agents', 'Explore.md');
+    // A definition the project wrote itself, pinning a model the catalog has never heard of.
+    const original = ['---', '# written by hand', 'name: Explore', 'description: Searches the repo', 'model: retired-model-9', '---', '', 'You search the repo.', ''].join('\n');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, original, 'utf8');
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    await seedSession(userData, project, 'claude');
+    try {
+      const win = await launch(userData);
+      await win.waitForSelector('.panel', { timeout: 30_000 });
+      await win.getByTestId('panel-bottom-subagents').click();
+      await win.getByTestId('subagent-view-models').click();
+
+      // The project's definition is listed, marked as the project's, showing the model it pins.
+      const tile = win.locator('[data-testid="claude-agent-Explore"]');
+      await tile.waitFor({ timeout: 20_000 });
+      expect(await tile.innerText()).toContain('project');
+      const select = win.locator('[data-testid="claude-agent-model-Explore"]');
+      expect(await select.inputValue()).toBe('retired-model-9');
+      // Because that pin exists, the adapter has stopped holding the other types to the session
+      // model — the one consequence of this screen a user has to be told about.
+      await expect.poll(() => win.locator('.subagents').first().innerText(), { timeout: 20_000 }).toContain('no longer held to the session model');
+
+      // Choosing the session model clears the pin, and only the pin: the author's comment, the
+      // other fields and the prompt are the file's own business.
+      await select.selectOption('');
+      await expect.poll(() => fs.readFile(file, 'utf8').then((text) => text.includes('model:')), { timeout: 20_000 }).toBe(false);
+      expect(await fs.readFile(file, 'utf8')).toBe(original.replace('model: retired-model-9\n', ''));
+      // Nothing is pinned any more, so the warning goes with the pin.
+      await expect.poll(() => win.locator('.subagents .callout.warn').count(), { timeout: 20_000 }).toBe(0);
+
+      await fs.mkdir(shots, { recursive: true });
+      await win.screenshot({ path: path.join(shots, 'subagents-panel-claude-models.png') });
     } finally {
       await app?.close().catch(() => undefined);
       app = null;

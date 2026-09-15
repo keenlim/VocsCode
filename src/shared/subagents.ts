@@ -14,23 +14,38 @@ export type SubagentRunMode = 'foreground' | 'background';
  *
  * `runs` is "this harness records runs the panel can list". `control` is per-run stop/steer, which
  * only pi has: the Claude SDK can interrupt a whole turn but not one child. `agents` is editing the
- * project's own agent definitions, which is pi's `.pi/agents` layout.
+ * project's own agent definitions, which is pi's `.pi/agents` layout. `models` is pinning the model
+ * one agent type runs on, which is Claude Code's `.claude/agents` layout — the two are different
+ * formats with different rules and neither panel can edit the other's files.
  */
 export interface SubagentSupport {
   runs: boolean;
   control: boolean;
   agents: boolean;
+  models: boolean;
 }
 
 const SUPPORT: Record<string, SubagentSupport> = {
-  pi: { runs: true, control: true, agents: true },
-  claude: { runs: true, control: false, agents: false }
+  pi: { runs: true, control: true, agents: true, models: false },
+  claude: { runs: true, control: false, agents: false, models: true }
 };
 
-const NO_SUPPORT: SubagentSupport = { runs: false, control: false, agents: false };
+const NO_SUPPORT: SubagentSupport = { runs: false, control: false, agents: false, models: false };
 
 export function subagentSupport(harness: string): SubagentSupport {
   return SUPPORT[harness] ?? NO_SUPPORT;
+}
+
+/**
+ * One subagent type an engine can delegate to, as the engine describes it.
+ *
+ * `model` is what the engine says the type runs on: an alias, a model id, or the literal `inherit`
+ * for "whatever the session uses". Absent means the engine said nothing.
+ */
+export interface AgentTypeInfo {
+  name: string;
+  description: string;
+  model?: string;
 }
 
 export interface SubagentRunMeta {
