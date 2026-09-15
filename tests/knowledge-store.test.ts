@@ -1,4 +1,4 @@
-/** Layer 2 store + service: scoping, proposals, the repeated-evidence rule, search and publish. */
+/** Layer 2 store + service: scoping, automated ingestion, the evidence rule, search and publish. */
 import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
@@ -33,6 +33,7 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
     status: 'current',
     scope: 'repo',
     keywords: ['harness', 'session'],
+    labels: [],
     sources: [],
     anchors: [],
     related: [],
@@ -83,7 +84,7 @@ describe('knowledge store scoping', () => {
     const svc = service();
 
     const filed = await svc.propose(branchScope, { title: 'PTY ownership', claim: 'Only the main process owns a PTY.', body: 'Body text long enough to be a real page.', kind: 'gotcha' }, 'agent:pi', 's1');
-    await svc.review(branchScope, filed.id, 'accept', { by: 'human' });
+    expect(filed.promoted).toBe(true);
 
     // The page belongs to the project: a session in the main checkout can read it.
     const fromRoot = await svc.detail(repoScope, 'gotcha/pty-ownership');
@@ -110,45 +111,39 @@ describe('knowledge store scoping', () => {
   });
 });
 
-describe('knowledge service proposals', () => {
-  it('files a proposal, accepts it into a current page, and records the review', async () => {
+describe('knowledge service ingestion', () => {
+  it('ingests a claim into a current, servable page immediately (no review step)', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const svc = service();
     const filed = await svc.propose(scope, { title: 'PTY ownership', claim: 'Renderer reconnects can double PTYs.', body: '## Why\n\nThe main process owns PTY lifetime.', kind: 'gotcha' }, 'agent:pi', 's1');
-    expect(filed.promoted).toBe(false);
+    expect(filed.promoted).toBe(true);
     expect(filed.rejected).toBe(false);
 
     const view = await svc.view(scope);
-    expect(view.proposals).toHaveLength(1);
-    expect(view.proposals[0].kind).toBe('gotcha');
-    expect(view.status.proposals).toBe(1);
+    expect(view.proposals).toHaveLength(0);
+    expect(view.status.proposals).toBe(0);
+    expect(view.pages).toHaveLength(1);
+    expect(view.pages[0].status).toBe('current');
 
-    await svc.review(scope, view.proposals[0].id, 'accept', { by: 'human' });
-    const after = await svc.view(scope);
-    expect(after.proposals).toHaveLength(0);
-    expect(after.pages).toHaveLength(1);
-    expect(after.pages[0].status).toBe('current');
-
-    const detail = await svc.detail(scope, after.pages[0].id);
+    const detail = await svc.detail(scope, view.pages[0].id);
     expect(detail?.page.body).toContain('main process owns PTY lifetime');
   });
 
-  it('promotes a claim seen in two independent sessions to a proposed page, never current', async () => {
+  it('records repeated evidence on the same page instead of queueing it', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const svc = service();
     const first = await svc.propose(scope, { title: 'Reconnect safety', claim: 'Reconnects must happen in the main process.', body: 'Body text long enough to be a real page body.' }, 'agent:pi', 's1');
-    expect(first.promoted).toBe(false);
+    expect(first.promoted).toBe(true);
     const second = await svc.propose(scope, { title: 'Reconnect safety', claim: 'Reconnects must happen in the main process.', body: 'Body text long enough to be a real page body.' }, 'agent:codex', 's2');
     expect(second.evidenceCount).toBe(2);
-    expect(second.promoted).toBe(true);
 
     const view = await svc.view(scope);
     expect(view.proposals).toHaveLength(0);
     expect(view.pages).toHaveLength(1);
-    expect(view.pages[0].status).toBe('proposed');
-    expect(view.status.needsReview).toBe(1);
+    expect(view.pages[0].status).toBe('current');
+    expect(view.pages[0].evidenceCount).toBe(2);
   });
 
   it('remembers a rejected claim and refuses to refile it', async () => {
@@ -160,18 +155,17 @@ describe('knowledge service proposals', () => {
     const again = await svc.propose(scope, { title: 'Bad idea again', claim: 'We should cache transcripts in the repo.', body: 'Body.' }, 'agent:pi', 's2');
     expect(again.rejected).toBe(true);
     const view = await svc.view(scope);
-    expect(view.proposals).toHaveLength(0);
     expect(view.rejectedClaims).toContain('We should cache transcripts in the repo.');
+    expect(await svc.store.read(scope, 'concept/bad-idea')).toBeNull();
   });
 
-  it('supersedes the pages a proposal names', async () => {
+  it('supersedes the pages a claim names as soon as it is ingested', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const store = new KnowledgeStore();
     const svc = new KnowledgeService({ log: () => undefined, settings: () => ({ knowledge: { prime: true, autoDistill: false } }) as AppSettings, store });
     await store.write(scope, pageMeta({ id: 'architecture/old', title: 'Old', status: 'current' }), 'old body');
-    const filed = await svc.propose(scope, { title: 'New', claim: 'The layout is different now.', body: 'new body', supersedes: ['architecture/old'] }, 'human');
-    await svc.review(scope, filed.id, 'accept', { by: 'human' });
+    await svc.propose(scope, { title: 'New', claim: 'The layout is different now.', body: 'new body', supersedes: ['architecture/old'] }, 'human');
     const old = await store.read(scope, 'architecture/old');
     expect(old?.meta.status).toBe('superseded');
     expect(old?.meta.supersededBy).toBeDefined();
@@ -240,14 +234,13 @@ describe('knowledge search and digest', () => {
     expect(view.status.job?.error).toContain('no usable pages');
   });
 
-  it('accepts a generated draft in place and discards one on request', async () => {
+  it('auto-accepts a legacy draft on view and discards one on request', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const svc = service();
     await svc.store.write(scope, pageMeta({ id: 'gotcha/draft-one', title: 'Draft one', status: 'draft', claim: 'A draft claim.' }), 'body text');
-    expect((await svc.view(scope)).status.needsReview).toBe(1);
 
-    await svc.review(scope, 'gotcha/draft-one', 'accept', { by: 'human' });
+    // Opening the panel promotes anything left in the old review queue; nothing waits for a human.
     const accepted = await svc.view(scope);
     expect(accepted.pages[0].status).toBe('current');
     expect(accepted.status.needsReview).toBe(0);
@@ -278,18 +271,15 @@ describe('knowledge search and digest', () => {
     expect(bare?.anchors[0]).toMatchObject({ status: 'unavailable', note: 'Anchor resolution is unavailable.' });
   });
 
-  it('accepts every pending item at once and leaves history alone', async () => {
+  it('auto-accepts legacy drafts on view and leaves history alone', async () => {
     const projectRoot = tmpDir('vocs-kb-');
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
     const svc = service();
     await svc.store.write(scope, pageMeta({ id: 'conventions/settled', status: 'current', review: { state: 'reviewed' } }), 'body');
     await svc.store.write(scope, pageMeta({ id: 'conventions/draft', title: 'Draft', status: 'draft', claim: 'A draft claim.' }), 'body');
     await svc.store.write(scope, pageMeta({ id: 'conventions/old', title: 'Old', status: 'deprecated', claim: 'An old claim.' }), 'body');
-    const filed = await svc.propose(scope, { title: 'Pending proposal', claim: 'A proposed claim.', body: 'Body.' }, 'agent:pi', 's1');
-    expect(filed.promoted).toBe(false);
+    await svc.propose(scope, { title: 'Fresh claim', claim: 'A fresh claim.', body: 'Body.' }, 'agent:pi', 's1');
 
-    const result = await svc.acceptAll(scope, { by: 'human' });
-    expect(result.accepted).toBe(2);
     const after = await svc.view(scope);
     expect(after.proposals).toHaveLength(0);
     expect(after.pages.find((p) => p.id === 'conventions/draft')?.status).toBe('current');
@@ -317,7 +307,9 @@ describe('knowledge search and digest', () => {
 
     const result = await svc.generate(scope, 'distill');
     expect(result.ok).toBe(true);
-    expect(result.detail).toContain('proposed 1');
-    expect((await svc.view(scope)).proposals).toHaveLength(1);
+    expect(result.detail).toContain('recorded 1');
+    const after = await svc.view(scope);
+    expect(after.proposals).toHaveLength(0);
+    expect(after.pages.some((p) => p.id === 'gotcha/pty-guard' && p.status === 'current')).toBe(true);
   });
 });

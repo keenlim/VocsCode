@@ -17,6 +17,10 @@ export const KNOWLEDGE_PUBLISH_DIR = 'docs/wiki';
 /** Reserved subdirectories of a wiki. Pages never live under a leading underscore. */
 export const KNOWLEDGE_PROPOSALS_DIR = '_proposals';
 export const KNOWLEDGE_OBSERVATIONS_DIR = '_observations';
+/** Ledger of document files already scanned into the wiki, so a re-scan only reads what changed. */
+export const KNOWLEDGE_SCAN_FILE = '_scan.json';
+/** The derived relation graph (rebuildable, git-ignored); never a source of truth. */
+export const KNOWLEDGE_GRAPH_FILE = '_graph.json';
 /** Branch-scope pages live under this directory of a project's wiki, keyed by branch. */
 export const KNOWLEDGE_BRANCHES_DIR = 'branches';
 
@@ -96,6 +100,8 @@ export interface KnowledgePageMeta {
   branch?: string;
   confidence?: KnowledgeConfidence;
   keywords: string[];
+  /** Normalized tags that colour the relation graph and group related pages. */
+  labels: string[];
   sources: KnowledgeSource[];
   anchors: KnowledgeAnchor[];
   related: string[];
@@ -143,6 +149,7 @@ export interface KnowledgePageSummary {
   claim?: string;
   targetPageId?: string;
   keywords: string[];
+  labels: string[];
   updatedAt?: string;
   updatedBy?: string;
   confidence?: KnowledgeConfidence;
@@ -161,7 +168,7 @@ export interface KnowledgeStatusSummary {
   /** A wiki directory exists for this scope. */
   hasWiki: boolean;
   pages: number;
-  /** Pages whose status still needs a human decision (draft/proposed/uncertain). */
+  /** Pages still in a pre-current state (`draft`/`proposed`); normally 0 now that ingestion is automatic. */
   needsReview: number;
   proposals: number;
   /** Pages that name a file source which changed or disappeared. */
@@ -176,7 +183,7 @@ export interface KnowledgeStatusSummary {
 
 /** In-memory state of the most recent bootstrap/distill job for one project. */
 export interface KnowledgeJobState {
-  mode: 'bootstrap' | 'distill';
+  mode: 'bootstrap' | 'distill' | 'reflect';
   state: 'running' | 'done' | 'failed';
   at: string;
   /** provider/model the job ran on, for the status line. */
@@ -210,6 +217,7 @@ export interface KnowledgeProposalInput {
   /** Updates this existing page when accepted; a new slug is minted when absent. */
   pageId?: string;
   keywords?: string[];
+  labels?: string[];
   sources?: KnowledgeSource[];
   anchors?: KnowledgeAnchor[];
   related?: string[];
@@ -469,6 +477,7 @@ export function toKnowledgePage(raw: Record<string, unknown>, body: string, path
     status: statusOf(raw.status),
     scope: raw.scope === 'branch' ? 'branch' : 'repo',
     keywords: asStringList(raw.keywords),
+    labels: normalizeLabels(asStringList(raw.labels)),
     sources: (Array.isArray(raw.sources) ? raw.sources : []).map(sourceOf).filter((s): s is KnowledgeSource => !!s),
     anchors: (Array.isArray(raw.anchors) ? raw.anchors : []).map(anchorOf).filter((a): a is KnowledgeAnchor => !!a),
     related: asStringList(raw.related),
@@ -514,6 +523,7 @@ export function serializeKnowledgeDocument(meta: KnowledgePageMeta, body: string
   if (meta.claim) lines.push(`claim: ${quote(meta.claim)}`);
   if (meta.targetPageId) lines.push(`target_page: ${quote(meta.targetPageId)}`);
   if (meta.keywords.length) lines.push(`keywords: [${meta.keywords.map((k) => quote(k)).join(', ')}]`);
+  if (meta.labels.length) lines.push(`labels: [${meta.labels.map((l) => quote(l)).join(', ')}]`);
   if (meta.sources.length) {
     lines.push('sources:');
     for (const s of meta.sources) {
@@ -601,4 +611,163 @@ export function isSameClaim(a: string | undefined, b: string | undefined): boole
   const shorter = left.length <= right.length ? left : right;
   const longer = left.length <= right.length ? right : left;
   return shorter.length >= 24 && longer.includes(shorter);
+}
+
+/* ------------------------------------------------------------------ */
+/* Labels and the relation graph                                      */
+/* ------------------------------------------------------------------ */
+
+/** `Auth & Security` → `auth-security`; labels are normalized so edges and filters agree. */
+export function normalizeLabel(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+export function normalizeLabels(values: Iterable<string>): string[] {
+  const out = new Set<string>();
+  for (const value of values) {
+    const label = normalizeLabel(value);
+    if (label) out.add(label);
+    if (out.size >= 24) break;
+  }
+  return [...out];
+}
+
+/** Edge kinds: the three the model authors, plus the three derived from the page itself. */
+export const KNOWLEDGE_EDGE_TYPES = ['related', 'supersedes', 'contradicts', 'anchor', 'label', 'link'] as const;
+export type KnowledgeEdgeType = (typeof KNOWLEDGE_EDGE_TYPES)[number];
+
+export interface KnowledgeGraphNode {
+  id: string;
+  kind: KnowledgeKind;
+  status: KnowledgeStatus;
+  labels: string[];
+  /** Number of edges touching this page; the cheap centrality signal retrieval ranks by. */
+  degree: number;
+}
+
+export interface KnowledgeGraphEdge {
+  from: string;
+  to: string;
+  type: KnowledgeEdgeType;
+  weight: number;
+}
+
+export interface KnowledgeGraph {
+  builtAt: string;
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+}
+
+/** `[[page-id]]`, `[[page-id|label]]` and a relative markdown link are all edges. */
+function wikilinkIds(body: string): string[] {
+  const out: string[] = [];
+  const wiki = /\[\[([a-z0-9][a-z0-9/_-]*)(?:\|[^\]]*)?\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = wiki.exec(body))) out.push(match[1]);
+  const markdown = /\]\(\.?\/?([a-z0-9][a-z0-9/_-]*)\.md\)/g;
+  while ((match = markdown.exec(body))) out.push(match[1]);
+  return out;
+}
+
+/** Links every member of a group to its next few peers, so a popular label stays cheap. */
+function groupEdges(
+  ids: string[],
+  type: KnowledgeEdgeType,
+  weight: number,
+  add: (from: string, to: string, type: KnowledgeEdgeType, weight: number) => void
+): void {
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i++) {
+    for (let j = i + 1; j < unique.length && j <= i + 8; j++) add(unique[i], unique[j], type, weight);
+  }
+}
+
+/**
+ * The relation graph, derived from the pages themselves. Markdown stays the source of truth: this
+ * is rebuildable at any time, so it can never drift from the wiki and needs no migration.
+ */
+export function buildKnowledgeGraph(pages: KnowledgePage[]): KnowledgeGraph {
+  const known = new Set(pages.map((p) => p.meta.id));
+  const edges = new Map<string, KnowledgeGraphEdge>();
+  const add = (from: string, to: string, type: KnowledgeEdgeType, weight: number): void => {
+    if (from === to || !known.has(from) || !known.has(to)) return;
+    const key = `${from}\u0000${to}\u0000${type}`;
+    const existing = edges.get(key);
+    if (existing) existing.weight = Math.max(existing.weight, weight);
+    else edges.set(key, { from, to, type, weight });
+  };
+  const byAnchor = new Map<string, string[]>();
+  const byLabel = new Map<string, string[]>();
+  for (const page of pages) {
+    const meta = page.meta;
+    for (const id of meta.related) add(meta.id, id, 'related', 2);
+    for (const id of meta.supersedes) add(meta.id, id, 'supersedes', 3);
+    for (const id of meta.contradicts) add(meta.id, id, 'contradicts', 3);
+    for (const id of wikilinkIds(page.body)) add(meta.id, id, 'link', 1);
+    for (const anchor of meta.anchors) {
+      const key = anchor.file.replace(/\\/g, '/');
+      const list = byAnchor.get(key);
+      if (list) list.push(meta.id);
+      else byAnchor.set(key, [meta.id]);
+    }
+    for (const label of meta.labels) {
+      const list = byLabel.get(label);
+      if (list) list.push(meta.id);
+      else byLabel.set(label, [meta.id]);
+    }
+  }
+  for (const ids of byAnchor.values()) groupEdges(ids, 'anchor', 1, add);
+  for (const ids of byLabel.values()) groupEdges(ids, 'label', 1, add);
+  const adjacency = new Map<string, number>();
+  for (const edge of edges.values()) {
+    adjacency.set(edge.from, (adjacency.get(edge.from) ?? 0) + 1);
+    adjacency.set(edge.to, (adjacency.get(edge.to) ?? 0) + 1);
+  }
+  return {
+    builtAt: new Date().toISOString(),
+    nodes: pages.map((p) => ({ id: p.meta.id, kind: p.meta.kind, status: p.meta.status, labels: p.meta.labels, degree: adjacency.get(p.meta.id) ?? 0 })),
+    edges: [...edges.values()]
+  };
+}
+
+/** Every edge touching one page, in either direction. */
+export function graphNeighbours(graph: KnowledgeGraph, id: string): KnowledgeGraphEdge[] {
+  return graph.edges.filter((edge) => edge.from === id || edge.to === id);
+}
+
+/**
+ * Neighbour scores for a set of matched pages: a BFS whose contribution decays with distance, so a
+ * page one or two hops from a strong match can surface even when it shares no query terms.
+ */
+export function expandKnowledgeQuery(graph: KnowledgeGraph, seeds: string[], hops = 2, decay = 0.5): Map<string, number> {
+  const neighbours = new Map<string, Array<{ id: string; weight: number }>>();
+  const push = (id: string, entry: { id: string; weight: number }): void => {
+    const list = neighbours.get(id);
+    if (list) list.push(entry);
+    else neighbours.set(id, [entry]);
+  };
+  for (const edge of graph.edges) {
+    push(edge.from, { id: edge.to, weight: edge.weight });
+    push(edge.to, { id: edge.from, weight: edge.weight });
+  }
+  const seen = new Set(seeds);
+  const boost = new Map<string, number>();
+  let frontier = [...new Set(seeds)].filter((id) => neighbours.has(id));
+  for (let hop = 1; hop <= hops && frontier.length; hop++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const { id: other, weight } of neighbours.get(id) ?? []) {
+        if (seen.has(other)) continue;
+        seen.add(other);
+        boost.set(other, (boost.get(other) ?? 0) + weight * decay ** (hop - 1));
+        next.push(other);
+      }
+    }
+    frontier = next;
+  }
+  return boost;
 }

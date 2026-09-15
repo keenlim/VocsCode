@@ -23,6 +23,7 @@ function meta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
     status: 'current',
     scope: 'repo',
     keywords: ['harness', 'lifecycle'],
+    labels: [],
     sources: [],
     anchors: [],
     related: [],
@@ -138,6 +139,7 @@ describe('session digest', () => {
     scope: 'repo',
     path: 'conventions/x.md',
     keywords: [],
+    labels: [],
     authority: 3,
     ...over,
     ...(over.path ? {} : { path: `${over.id ?? 'conventions/x'}.md` })

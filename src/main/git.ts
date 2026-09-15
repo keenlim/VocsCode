@@ -34,6 +34,8 @@ const DIFF_TIMEOUT_MS = 60_000;
 const MAX_UNTRACKED_COUNT_BYTES = 512 * 1024;
 const MAX_UNTRACKED_DIFF_BYTES = 500_000;
 const MAX_SINGLE_FILE_DIFF_BYTES = 2_000_000;
+/** A PR reflection reads a bounded patch, not the whole change; the commits carry the rest. */
+const MAX_PR_DIFF_CHARS = 12_000;
 
 /** Reads a file only when it is small enough; a multi-GB artifact is never buffered just to be sized. */
 async function readCapped(file: string, maxBytes: number): Promise<string | undefined> {
@@ -386,6 +388,17 @@ export async function gitRevertFile(cwd: string, file: string): Promise<{ ok: bo
 export async function gitStageAll(cwd: string): Promise<{ ok: boolean; error?: string }> {
   const r = await git(cwd, ['add', '-A']);
   return r.code === 0 ? { ok: true } : { ok: false, error: r.stderr };
+}
+
+/** Commits and a bounded patch between `base` and `head` (or HEAD), for a PR reflection. */
+export async function gitRangeEvidence(cwd: string, base: string, head?: string): Promise<{ commits: string[]; diff: string }> {
+  if (!(await gitRoot(cwd))) return { commits: [], diff: '' };
+  const range = head ? `${base}...${head}` : `${base}...HEAD`;
+  const log = await git(cwd, ['log', '--oneline', '-n', '40', range]);
+  const patch = await git(cwd, ['diff', '-U1', range], DIFF_TIMEOUT_MS);
+  const commits = log.code === 0 && !log.truncated ? log.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [];
+  const text = patch.stdout ?? '';
+  return { commits, diff: text.length > MAX_PR_DIFF_CHARS ? `${text.slice(0, MAX_PR_DIFF_CHARS)}\n…(truncated)` : text };
 }
 
 export async function gitCommit(cwd: string, message: string): Promise<{ ok: boolean; output: string }> {

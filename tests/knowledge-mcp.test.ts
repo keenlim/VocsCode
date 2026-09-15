@@ -12,7 +12,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { KnowledgeStore } from '../src/main/knowledge/store';
 import { SearchIndex } from '../src/main/search';
 import { SessionStore } from '../src/main/store';
-import { serializeKnowledgeDocument } from '../src/shared/knowledge';
+import { claimKey, serializeKnowledgeDocument } from '../src/shared/knowledge';
 import type { KnowledgePageMeta, KnowledgeScope } from '../src/shared/knowledge';
 import type { SessionMeta } from '../src/shared/types';
 
@@ -89,6 +89,7 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
     scope: 'repo',
     claim: 'A harness process belongs to exactly one session.',
     keywords: ['harness', 'session', 'lifecycle'],
+    labels: [],
     sources: [{ type: 'file', ref: 'src/main/session-manager.ts' }],
     anchors: [{ file: 'src/main/session-manager.ts', symbol: 'SessionManager.buildContext' }],
     related: [],
@@ -146,7 +147,7 @@ describe('vocs-memory MCP server', () => {
     expect(JSON.parse(toolText(zebra)).count).toBe(0);
   });
 
-  it('writes proposals the app can read back', async () => {
+  it('writes a current page the app reads back and serves', async () => {
     const projectRoot = tmpDir('vocs-mem-');
     const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
     await fs.mkdir(wiki, { recursive: true });
@@ -160,24 +161,119 @@ describe('vocs-memory MCP server', () => {
           claim: 'Only the main process may create or kill a PTY.',
           kind: 'convention',
           body: '## Why\n\nThe renderer re-attaches to snapshots.',
+          labels: ['Terminal & PTY', 'terminal'],
           sources: [{ type: 'file', ref: 'src/main/terminal.ts' }],
           anchors: [{ file: 'src/main/terminal.ts' }]
         }
       }
     });
-    const result = JSON.parse(toolText(propose)) as { id: string; status: string };
-    expect(result.status).toBe('proposed');
+    const result = JSON.parse(toolText(propose)) as { id: string; targetPageId: string; status: string; saved: boolean };
+    expect(result).toMatchObject({ status: 'current', saved: true });
+    expect(result.targetPageId).toBe('convention/renderer-never-owns-a-pty');
 
+    // The page lands under the wiki root, never in the legacy proposal queue.
+    const raw = await fs.readFile(path.join(wiki, 'convention', 'renderer-never-owns-a-pty.md'), 'utf8');
+    expect(raw).toContain('status: current');
+    expect(raw).toContain('updated_by: agent:mcp');
+    await expect(fs.access(path.join(wiki, '_proposals'))).rejects.toThrow();
+
+    // The app's own store reads it back, normalizing the labels the same way shared does.
     const store = new KnowledgeStore();
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
-    const proposals = await store.proposals(scope);
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0].meta.title).toBe('Renderer never owns a PTY');
-    expect(proposals[0].meta.claim).toBe('Only the main process may create or kill a PTY.');
-    expect(proposals[0].meta.kind).toBe('convention');
-    expect(proposals[0].meta.targetPageId).toBe('convention/renderer-never-owns-a-pty');
-    expect(proposals[0].meta.sources[0]).toEqual({ type: 'file', ref: 'src/main/terminal.ts' });
-    expect(proposals[0].body).toContain('re-attaches to snapshots');
+    const page = await store.read(scope, result.targetPageId);
+    expect(page?.meta.status).toBe('current');
+    expect(page?.meta.updatedBy).toBe('agent:mcp');
+    expect(page?.meta.labels).toEqual(['terminal-pty', 'terminal']);
+    expect(page?.body).toContain('re-attaches to snapshots');
+
+    // It is servable immediately: knowledge_search finds the new page.
+    const search = await request({ method: 'tools/call', params: { name: 'knowledge_search', arguments: { query: 'renderer PTY' } } });
+    const payload = JSON.parse(toolText(search)) as { results: { id: string; labels: string[] }[] };
+    expect(payload.results.map((r) => r.id)).toContain(result.targetPageId);
+    expect(payload.results.find((r) => r.id === result.targetPageId)?.labels).toEqual(['terminal-pty', 'terminal']);
+  });
+
+  it('refuses a tombstoned claim and writes nothing', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const claim = 'Only the main process may create or kill a PTY.';
+    await fs.writeFile(path.join(wiki, '_rejected.json'), JSON.stringify({ [claimKey(claim)]: { claim, at: new Date().toISOString() } }), 'utf8');
+    const { request } = start(wiki);
+    const propose = await request({
+      method: 'tools/call',
+      params: { name: 'knowledge_propose', arguments: { title: 'Renderer never owns a PTY', claim, kind: 'convention', body: 'body' } }
+    });
+    const result = JSON.parse(toolText(propose)) as { rejected?: boolean; saved?: boolean };
+    expect(result.rejected).toBe(true);
+    expect(result.saved).toBe(false);
+    // Nothing was written: the kind directory was never created.
+    await expect(fs.access(path.join(wiki, 'convention'))).rejects.toThrow();
+  });
+
+  it('updates the page a page_id already names instead of duplicating it', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(path.join(wiki, 'conventions'), { recursive: true });
+    const store = new KnowledgeStore();
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    await store.write(
+      scope,
+      pageMeta({ id: 'conventions/custom-id', title: 'Existing page', claim: 'The first claim.', labels: ['alpha'], createdAt: '2020-01-01T00:00:00.000Z' }),
+      'original body'
+    );
+    const { request } = start(wiki);
+    const propose = await request({
+      method: 'tools/call',
+      params: {
+        name: 'knowledge_propose',
+        arguments: { title: 'Updated title', claim: 'A different claim.', kind: 'convention', page_id: 'conventions/custom-id', body: 'new body', labels: ['beta'] }
+      }
+    });
+    expect((JSON.parse(toolText(propose)) as { targetPageId: string }).targetPageId).toBe('conventions/custom-id');
+
+    const files = (await fs.readdir(path.join(wiki, 'conventions'))).filter((f) => f.endsWith('.md'));
+    expect(files).toEqual(['custom-id.md']);
+    const raw = await fs.readFile(path.join(wiki, 'conventions', 'custom-id.md'), 'utf8');
+    expect(raw).toContain('created_at: 2020-01-01T00:00:00.000Z');
+
+    // A fresh store sees the rewritten page: new claim/body, merged labels, original created_at.
+    const page = await new KnowledgeStore().read(scope, 'conventions/custom-id');
+    expect(page?.meta.claim).toBe('A different claim.');
+    expect(page?.meta.labels).toEqual(['alpha', 'beta']);
+    expect(page?.meta.createdAt).toBe('2020-01-01T00:00:00.000Z');
+    expect(page?.body).toBe('new body');
+  });
+
+  it('surfaces a page that shares only a label with a lexical match', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const store = new KnowledgeStore();
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    await store.write(scope, pageMeta({ id: 'gotchas/alpha', title: 'Alpha fix', claim: 'Alpha thing.', keywords: ['alpha'], labels: ['pty'], anchors: [] }), 'alpha body');
+    await store.write(scope, pageMeta({ id: 'gotchas/beta', title: 'Beta fix', claim: 'Beta thing.', keywords: ['beta'], labels: ['pty'], anchors: [] }), 'beta body');
+    const { request } = start(wiki);
+    const search = await request({ method: 'tools/call', params: { name: 'knowledge_search', arguments: { query: 'alpha' } } });
+    const payload = JSON.parse(toolText(search)) as { results: { id: string; degree?: number }[] };
+    const ids = payload.results.map((r) => r.id);
+    expect(ids).toContain('gotchas/alpha');
+    // Beta matches no query term and is pulled in only by the shared `pty` label edge.
+    expect(ids).toContain('gotchas/beta');
+    expect(payload.results.find((r) => r.id === 'gotchas/beta')?.degree).toBe(1);
+  });
+
+  it('reports the edge type that connects two related pages', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const store = new KnowledgeStore();
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    await store.write(scope, pageMeta({ id: 'concepts/left', title: 'Left', claim: 'Left claim.', labels: ['auth'], anchors: [{ file: 'a.ts' }] }), 'left');
+    await store.write(scope, pageMeta({ id: 'concepts/right', title: 'Right', claim: 'Right claim.', labels: ['auth'], anchors: [{ file: 'b.ts' }] }), 'right');
+    const { request } = start(wiki);
+    const related = await request({ method: 'tools/call', params: { name: 'knowledge_related', arguments: { page: 'concepts/left' } } });
+    const payload = JSON.parse(toolText(related)) as { page: string; related: { id: string; title: string; edge: string }[] };
+    expect(payload.page).toBe('concepts/left');
+    expect(payload.related).toContainEqual({ id: 'concepts/right', title: 'Right', edge: 'label' });
   });
 
   it('rejects a page that does not exist with a usable error', async () => {

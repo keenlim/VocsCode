@@ -51,7 +51,7 @@ import type {
 } from './types';
 import type { AgentClientContext, AgentState } from './agent';
 import type { ExecutionRecord } from './analytics/records';
-import type { KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
+import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
 import type { SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
@@ -291,10 +291,14 @@ export interface IpcContract {
   'knowledge:review': [{ sessionId: string; id: string; action: 'accept' | 'reject'; note?: string }, KnowledgeView];
   /** Accept every proposal and draft at once; deprecated and superseded pages are left alone. */
   'knowledge:reviewAll': [{ sessionId: string }, { accepted: number; view: KnowledgeView }];
-  /** Run the bootstrap synthesis or the episode distillation with the utility model. */
-  'knowledge:generate': [{ sessionId: string; mode: 'bootstrap' | 'distill' }, { ok: boolean; detail?: string; error?: string }];
+  /** Run the docs scan (bootstrap), an episode distillation, or a PR reflection with the utility model. */
+  'knowledge:generate': [{ sessionId: string; mode: 'bootstrap' | 'distill' | 'reflect' }, { ok: boolean; detail?: string; error?: string }];
   /** Copy reviewed pages into the tracked docs/wiki/ path; committing them stays the user's act. */
   'knowledge:publish': [{ sessionId: string; ids: string[] }, { ok: boolean; dir: string; written: string[]; error?: string }];
+  /** The derived relation graph (labels, anchors, links) for a session's project. */
+  'knowledge:graph': [{ sessionId: string }, KnowledgeGraph];
+  /** Deletes one page without tombstoning it; rejecting is what stops a claim returning. */
+  'knowledge:delete': [{ sessionId: string; id: string }, KnowledgeView];
 
   'terminal:list': [void, TerminalInfo[]];
   'terminal:shells': [void, ShellOption[]];

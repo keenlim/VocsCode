@@ -1,8 +1,9 @@
 /**
- * End-to-end flow for Layer 2 project knowledge: a seeded wiki renders in the right panel's
- * Knowledge tab, a proposal is accepted only on an explicit click, and the accepted page is written
- * back to markdown with human-review provenance. The session and wiki are seeded on disk so no
- * harness and no provider key is involved. Requires `npm run build`; gated by VOCS_CODE_E2E_UI=1.
+ * End-to-end flow for Layer 2 project knowledge: a wiki seeded on disk is ingested and rendered in
+ * the right panel's Knowledge tab without any accept step, labels and provenance are shown, a claim
+ * is rejected (tombstoned) from its row, and an open page's anchors and relation graph render. The
+ * session and wiki are seeded on disk so no harness and no provider key is involved. Requires
+ * `npm run build`; gated by VOCS_CODE_E2E_UI=1.
  */
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +13,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
 import { serializeKnowledgeDocument, type KnowledgePageMeta } from '../src/shared/knowledge';
 import type { SessionMeta } from '../src/shared/types';
-import { seedSettings } from './e2e-ui';
+import { isolatedEnv, seedSettings } from './e2e-ui';
 
 const enabled = process.env.VOCS_CODE_E2E_UI === '1';
 const root = path.resolve(__dirname, '..');
@@ -32,49 +33,48 @@ function pageMeta(over: Partial<KnowledgePageMeta>): KnowledgePageMeta {
     scope: 'repo',
     claim: 'A harness process belongs to exactly one session.',
     keywords: ['harness', 'session'],
+    labels: ['session-lifecycle'],
+    updatedBy: 'agent:bootstrap',
     sources: [],
     anchors: [],
     related: [],
     supersedes: [],
     contradicts: [],
-    review: { state: 'reviewed', by: 'human' },
     ...over
   };
 }
 
 describe.runIf(enabled)('project knowledge panel', () => {
-  it('shows the wiki, accepts a proposal on click, and writes it back as reviewed markdown', async () => {
+  it('renders the auto-ingested wiki, rejects a claim, and shows anchors and relations', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-knowledge-${Date.now()}`);
     const userData = path.join(tmp, 'userData');
     const project = path.join(tmp, 'project');
     const wiki = path.join(project, '.vocs-code', 'wiki');
     await fs.mkdir(path.join(wiki, 'conventions'), { recursive: true });
-    await fs.mkdir(path.join(wiki, '_proposals'), { recursive: true });
+    await fs.mkdir(path.join(wiki, 'gotchas'), { recursive: true });
     await fs.mkdir(userData, { recursive: true });
+    // An auto-ingested page: current with no human review step, and an anchor to check.
     await fs.writeFile(path.join(wiki, 'conventions', 'harness-lifecycle.md'), serializeKnowledgeDocument(pageMeta({ anchors: [{ file: 'src/main/session-manager.ts', symbol: 'buildContext' }] }), 'The main process owns harness lifetime.'));
+    // A second current page that relates to the first, so the graph has an edge to render.
     await fs.writeFile(
-      path.join(wiki, '_proposals', 'pty-guard.md'),
+      path.join(wiki, 'gotchas', 'duplicate-pty.md'),
       serializeKnowledgeDocument(
         pageMeta({
-          id: 'pty-guard',
-          title: 'PTY guard',
+          id: 'gotchas/duplicate-pty',
+          title: 'Duplicate PTYs',
           kind: 'gotcha',
-          status: 'proposed',
           claim: 'Renderer reconnects can duplicate a PTY.',
-          targetPageId: 'gotchas/pty-guard',
-          review: { state: 'unreviewed' }
+          labels: ['pty-lifecycle'],
+          updatedBy: 'agent:distill',
+          related: ['conventions/harness-lifecycle']
         }),
         'Reconnects must stay in the main process.'
       )
     );
-    // A generated draft, which the panel must be able to accept into the served wiki.
-    await fs.mkdir(path.join(wiki, 'architecture'), { recursive: true });
+    // A throwaway page to reject; its claim must end up tombstoned and its file removed.
     await fs.writeFile(
-      path.join(wiki, 'architecture', 'process-split.md'),
-      serializeKnowledgeDocument(
-        pageMeta({ id: 'architecture/process-split', title: 'Process split', kind: 'architecture', status: 'draft', claim: 'The main process owns privileged work.', review: { state: 'unreviewed' } }),
-        'The renderer stays sandboxed.'
-      )
+      path.join(wiki, 'gotchas', 'stale-flag.md'),
+      serializeKnowledgeDocument(pageMeta({ id: 'gotchas/stale-flag', title: 'Stale flag', kind: 'gotcha', claim: 'The stale flag is set by the CLI.', labels: ['cli'] }), 'A flag the CLI sets.')
     );
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
@@ -95,20 +95,11 @@ describe.runIf(enabled)('project knowledge panel', () => {
     await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
     await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), '');
 
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v === undefined) continue;
-      if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
-      if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
-      env[k] = v;
-    }
-    env.VOCS_CODE_USER_DATA = userData;
-
     const packaged = process.env.HARNESS_E2E_EXE;
     app = await electron.launch({
       executablePath: packaged || (require('electron') as string),
       args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')],
-      env,
+      env: isolatedEnv(userData),
       timeout: 60_000
     });
     const win: Page = await app.firstWindow();
@@ -120,42 +111,52 @@ describe.runIf(enabled)('project knowledge panel', () => {
 
     const tab = win.getByTestId('knowledge-tab');
     await tab.waitFor({ timeout: 30_000 });
-    const accepted = win.getByTestId('knowledge-page-conventions/harness-lifecycle');
-    await accepted.waitFor({ timeout: 10_000 });
-    expect(await accepted.innerText()).toContain('human-reviewed');
 
-    // The proposal is rendered and nothing has been written yet.
-    const proposal = win.getByTestId('knowledge-proposal-pty-guard');
-    await proposal.waitFor({ timeout: 10_000 });
-    expect(await proposal.innerText()).toContain('Renderer reconnects can duplicate a PTY.');
-    const proposalFile = path.join(wiki, '_proposals', 'pty-guard.md');
-    expect(await fs.readFile(proposalFile, 'utf8')).toContain('status: proposed');
+    // The page is there on first paint: ingestion is automatic, with no queue to accept from.
+    const lifecycle = win.getByTestId('knowledge-page-conventions/harness-lifecycle');
+    await lifecycle.waitFor({ timeout: 10_000 });
+    const lifecycleText = await lifecycle.innerText();
+    expect(lifecycleText).toContain('accepted');
+    expect(lifecycleText).toContain('agent:bootstrap');
+    expect(await win.getByTestId('knowledge-labels-conventions/harness-lifecycle').innerText()).toContain('session-lifecycle');
+    expect(await win.getByTestId('knowledge-auto-note').innerText()).toContain('automatically');
+    expect(await win.getByTestId('knowledge-accept-all').count()).toBe(0);
+    expect(await win.getByTestId('knowledge-proposals').count()).toBe(0);
 
-    // A draft is accepted straight from its row, without opening it.
-    const draftFile = path.join(wiki, 'architecture', 'process-split.md');
-    expect(await fs.readFile(draftFile, 'utf8')).toContain('status: draft');
-    await win.getByTestId('knowledge-row-accept-architecture/process-split').click();
-    await win.getByTestId('knowledge-row-accept-architecture/process-split').waitFor({ state: 'detached', timeout: 10_000 });
-    const acceptedDraft = await fs.readFile(draftFile, 'utf8');
-    expect(acceptedDraft).toContain('status: current');
-    expect(acceptedDraft).toContain('review_state: reviewed');
+    // Rejecting a claim tombstones it and removes the page, with nothing left on disk.
+    const staleFile = path.join(wiki, 'gotchas', 'stale-flag.md');
+    expect(await fs.readFile(staleFile, 'utf8')).toContain('status: current');
+    await win.getByTestId('knowledge-row-reject-gotchas/stale-flag').click();
+    await win.getByTestId('knowledge-page-gotchas/stale-flag').waitFor({ state: 'detached', timeout: 10_000 });
+    expect(await fs.readFile(staleFile, 'utf8').catch(() => '')).toBe('');
+    const rejected = JSON.parse(await fs.readFile(path.join(wiki, '_rejected.json'), 'utf8')) as Record<string, { claim: string }>;
+    expect(Object.values(rejected).map((r) => r.claim)).toContain('The stale flag is set by the CLI.');
 
-    // Accept all takes what is left: the proposal becomes a reviewed page under its target id.
-    await win.getByTestId('knowledge-accept-all').click();
-    await proposal.waitFor({ state: 'detached', timeout: 10_000 });
-    expect(await fs.readFile(proposalFile, 'utf8').catch(() => '')).toBe('');
-    const stored = await fs.readFile(path.join(wiki, 'gotchas', 'pty-guard.md'), 'utf8');
-    expect(stored).toContain('status: current');
-    expect(stored).toContain('review_state: reviewed');
-    expect(stored).not.toContain('target_page:');
-    expect(stored).toContain('Reconnects must stay in the main process.');
+    // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
+    // instead of failing or pretending the pointer is good.
+    await lifecycle.click();
+    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
+    const detail = await win.getByTestId('knowledge-detail').innerText();
+    // innerText reflects the rendered case (the heading is uppercased by CSS) and the flex row
+    // breaks the anchor into separate lines.
+    expect(detail).toContain('The main process owns harness lifetime.');
+    expect(detail).toContain('GITNEXUS ANCHORS');
+    expect(detail).toContain('buildContext');
+    expect(detail).toContain('not checked');
+    expect(detail).toContain('This project is not indexed by GitNexus.');
+
+    // The relation graph is derived from the pages: the gotcha points at this page.
+    const relations = win.getByTestId('knowledge-graph');
+    await relations.waitFor({ timeout: 10_000 });
+    const relationText = await relations.innerText();
+    expect(relationText).toContain('related');
+    expect(relationText).toContain('Duplicate PTYs');
 
     // The built-in MCP server for the wiki is injected and shown on the MCP tab.
     await win.getByTestId('panel-bottom-mcp').click();
     const builtin = win.getByTestId('builtin-vocs-memory');
     await builtin.waitFor({ timeout: 10_000 });
     expect(await builtin.innerText()).toContain('on');
-
     // The AGENTS.md snippet stays collapsed until asked for, and copies to the real clipboard.
     expect(await win.getByTestId('memory-guide-text').count()).toBe(0);
     await win.getByTestId('memory-guide-toggle').click();
@@ -166,20 +167,6 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(guideText).toContain('session_history_search');
     await win.getByTestId('memory-guide-copy').click();
     await expect.poll(() => app!.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 10_000 }).toContain('**L3 — session history.**');
-
-    await win.getByTestId('panel-bottom-knowledge').click();
-
-    // An anchor is checked against GitNexus live; this sandbox has no index, so the panel says so
-    // instead of failing or pretending the pointer is good.
-    await win.getByTestId('knowledge-page-conventions/harness-lifecycle').click();
-    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
-    const detail = await win.getByTestId('knowledge-detail').innerText();
-    // innerText reflects the rendered case (the heading is uppercased by CSS) and the flex row
-    // breaks the anchor into separate lines.
-    expect(detail).toContain('GITNEXUS ANCHORS');
-    expect(detail).toContain('buildContext');
-    expect(detail).toContain('not checked');
-    expect(detail).toContain('This project is not indexed by GitNexus.');
 
     await app.close();
     app = null;
