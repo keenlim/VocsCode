@@ -50,6 +50,14 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
+Delegated agents differ too. A Claude session's subagents run on the **session's own model**: the
+adapter sets `CLAUDE_CODE_SUBAGENT_MODEL` to it and, while the project pins no model of its own,
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` alongside it. The pair is required — Claude Code's built-ins
+declare `model: inherit`, which on an endpoint that is not Anthropic resolves to an Anthropic id and
+is refused with a `401 ... model sent to the API`. A project definition in `.claude/agents` that
+names a model wins instead, which is why `_FORCE` is withheld the moment one does; the Subagents
+tab's **Models** view lists every type with the model it will run on and edits that one field.
+
 Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
 boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so
 its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the token window that the
@@ -122,4 +130,4 @@ The dashboard (`src/renderer/src/components/analytics/`) asks for one range at a
 - Custom Codex model providers are passed as thread config overrides and were not verified against a live OpenAI-compatible endpoint.
 - ACP agents expose models only after the session starts; pick the model from the header once the agent is up.
 - The terminal tab's directory tracking relies on the shell announcing its cwd (OSC 7, or OSC 9;9 as Windows Terminal profiles do); shells without such a prompt hook show the directory they started in.
-- The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with.
+- The Subagents panel covers pi and Claude runs; `subagentSupport` in `src/shared/subagents.ts` is the one answer for what each harness offers. Claude's per-call dollars are estimated from the shared pricing table (its SDK reports tokens, not cost), and its SDK can interrupt a turn but not one child, so the panel offers it no per-run stop/steer and no Agents view — that view edits `.pi/agents`, which a Claude session does not run with. Its **Models** view instead lists the agent types with the model each will run on, and edits the model of a definition the project already has; it never writes one, because a definition named after a built-in replaces that built-in rather than adjusting it.

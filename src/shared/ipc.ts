@@ -52,10 +52,27 @@ import type {
 import type { AgentClientContext, AgentState } from './agent';
 import type { ExecutionRecord } from './analytics/records';
 import type { KnowledgeGraph, KnowledgePageDetail, KnowledgeSearchResult, KnowledgeView } from './knowledge';
-import type { SubagentRun, SubagentRunSummary } from './subagents';
+import type { AgentTypeInfo, SubagentRun, SubagentRunSummary } from './subagents';
 import type { AgentFileFields, ParsedAgentFile } from './agent-files';
 import type { ProjectAgentInfo } from './agent-info';
+import type { ClaudeAgentFileInfo } from './claude-agent-files';
 import type { ShellKind, ShellOption, TerminalInfo } from './terminal';
+
+/**
+ * What the Claude subagent rows are built from: the types the engine names, the project's own
+ * definitions, and the model this session's subagents fall back to.
+ *
+ * `types` is empty for a session that is not running — only a live engine can name its agent types —
+ * while `files` is readable at any time. `forced` says whether the session's model is being applied
+ * to every delegated agent, which is what a project pin turns off.
+ */
+export interface ClaudeAgentTypesInfo {
+  types: AgentTypeInfo[];
+  files: ClaudeAgentFileInfo[];
+  /** The model a subagent runs on when nothing overrides it; null when the session has none yet. */
+  sessionModel: string | null;
+  forced: boolean;
+}
 
 /**
  * Request/response contract for ipcRenderer.invoke channels.
@@ -181,6 +198,10 @@ export interface IpcContract {
   'agents:delete': [{ id: string; name: string }, { ok: boolean; error?: string }];
   /** Shares one definition with the repo, or keeps it local again. */
   'agents:track': [{ id: string; name: string; tracked: boolean }, { ok: boolean; error?: string }];
+  /** The Claude agent types a session can delegate to, and the definitions its project supplies. */
+  'claude-agents:list': [{ id: string }, ClaudeAgentTypesInfo];
+  /** Pins (or with `null`, unpins) one project definition's model, rewriting only its `model:` line. */
+  'claude-agents:setModel': [{ id: string; name: string; model: string | null }, { ok: boolean; error?: string }];
   /** Deep search: session titles/goals plus full transcript content (FTS5 index in main). */
   'sessions:search': [{ q: string; filters?: SearchFilters; limit?: number }, SearchResponse];
   'sessions:delete': [{ id: string; removeWorktree?: boolean }, void];

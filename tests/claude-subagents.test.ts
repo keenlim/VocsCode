@@ -157,6 +157,29 @@ describe('Claude adapter subagent capture', () => {
     expect(completion!.completion.usage).toBeUndefined();
   });
 
+  it('does not let the SDK’s own <synthetic> message become the run’s model or a turn', async () => {
+    const { ctx, dir } = await stubCtx();
+    const a = new ClaudeAdapter(ctx);
+    feed(a, agentToolUse());
+    // A child that dies on an API error: the SDK reports the failure as an assistant message it
+    // composed itself, marked with a sentinel rather than any model's id.
+    feed(a, {
+      type: 'assistant',
+      parent_tool_use_id: AGENT_CALL,
+      message: { id: 'msg_synthetic', model: '<synthetic>', content: [{ type: 'text', text: 'Agent terminated early due to an API error: 401' }] }
+    });
+    feed(a, { type: 'system', subtype: 'task_notification', task_id: 'task_1', tool_use_id: AGENT_CALL, status: 'failed' });
+
+    const run = await settled(dir, AGENT_CALL, 'error');
+    // The run keeps the model its spawning call named, not a sentinel that names no model at all.
+    expect(run.meta.model).toBe('claude-sonnet-4-5');
+    // The notice still reaches the transcript: that is how an API error is shown to the user.
+    expect(texts(run)).toContain('Agent terminated early due to an API error: 401');
+    // But it opens no call row, so no turn and no cost are invented for a request that never ran.
+    expect(run.calls).toEqual([]);
+    expect(run.totals).toMatchObject({ turns: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+  });
+
   it('keeps the child transcript out of the parent', async () => {
     const { ctx, events, dir } = await stubCtx();
     const a = new ClaudeAdapter(ctx);

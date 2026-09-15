@@ -10,6 +10,7 @@ import type { IpcChannel, IpcRequest, IpcResponse } from '../shared/ipc';
 import { PUSH_CHANNELS } from '../shared/ipc';
 import { Vesta } from './agents';
 import { deleteProjectAgent, listProjectAgents, readProjectAgent, saveProjectAgent, setProjectAgentTracked } from './agent-files';
+import { isPinnedModel, listClaudeAgents, setClaudeAgentModel } from './claude-agents';
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
@@ -534,6 +535,27 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     const root = projectRootOf(id);
     if (!root) return { ok: false, error: 'Session not found' };
     return setProjectAgentTracked(root, name, tracked);
+  });
+  // Claude Code's own agent definitions. Same project root, different format and different rules:
+  // a definition replaces the built-in it is named after, so the app only ever edits an existing one.
+  const claudeSessionModel = (id: string): string | null => {
+    const meta = sessions.get(id);
+    return meta?.config.model?.model ?? meta?.activeModel?.model ?? null;
+  };
+  handle('claude-agents:list', async ({ id }) => {
+    const root = projectRootOf(id);
+    const files = root ? await listClaudeAgents(root) : [];
+    return {
+      types: await sessions.subagentTypes(id),
+      files,
+      sessionModel: claudeSessionModel(id),
+      forced: !files.some((file) => isPinnedModel(file.model))
+    };
+  });
+  handle('claude-agents:setModel', async ({ id, name, model }) => {
+    const root = projectRootOf(id);
+    if (!root) return { ok: false, error: 'Session not found' };
+    return setClaudeAgentModel(root, name, model ?? undefined);
   });
   handle('sessions:search', (req) => deps.search.search(req));
   handle('sessions:delete', async ({ id, removeWorktree }) => {

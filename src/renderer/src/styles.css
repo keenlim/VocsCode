@@ -6734,6 +6734,15 @@ body.resizing {
   color: var(--fg);
   border-color: var(--accent);
 }
+/* The one control inside a Claude agent tile: a row-height select, not a full-size field. */
+.agent-model-select {
+  align-self: stretch;
+  width: auto;
+  margin: 0 7px 7px;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: var(--bg-elev);
+}
 .agent-editor {
   display: flex;
   flex-direction: column;
