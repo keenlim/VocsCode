@@ -7,7 +7,7 @@ import { errorMessage, shortId, truncate } from '../util/async';
 import { toCodex } from '../mcp/effective';
 import { TurnUsageTracker } from '../util/turn-usage';
 import type { HarnessAdapter, HarnessContext } from './types';
-import { CODEX_STATIC_MODELS } from '../models/static-models';
+import { CODEX_STATIC_MODELS, estimateCostUsd, findPricing } from '../models/static-models';
 
 function sandboxFor(mode: PermissionMode): SandboxMode {
   switch (mode) {
@@ -35,6 +35,8 @@ export class CodexExecAdapter implements HarnessAdapter {
   private _busy = false;
   private abort: AbortController | null = null;
   private model: string | undefined;
+  /** The provider the session's model ref names; Codex's own models arrive as 'openai'/'codex'. */
+  private modelProvider: string | undefined;
   private effort: EffortLevel | undefined;
   private items = new Map<string, TranscriptItem>();
   private turnStartedAt = 0;
@@ -72,6 +74,7 @@ export class CodexExecAdapter implements HarnessAdapter {
     this.ctx.log('info', `codex exec SDK: ${override ? `${override} (${bin?.source} runtime)` : bin ? `SDK-bundled binary (${bin.path} is a shim the SDK cannot spawn)` : 'SDK-bundled binary'}${config ? `, ${mcp.length} MCP server(s)` : ''}`);
     this.codex = new Codex({ codexPathOverride: override, env, config });
     this.model = meta.config.model?.model;
+    this.modelProvider = meta.config.model?.provider;
     this.effort = this.ctx.effort();
     this.usage = new TurnUsageTracker(meta.usage);
     this.ensureThread();
@@ -138,6 +141,16 @@ export class CodexExecAdapter implements HarnessAdapter {
     })();
   }
 
+  /**
+   * Rates for the model this session is pinned to. Codex reports tokens but never a price, so a turn
+   * with no lookup here reads as $0.00 however much it used. The SDK thread is created without a
+   * `model_providers` entry, so only Codex's own models can run: they arrive as 'openai'/'codex'
+   * and resolve from the bundled catalogs.
+   */
+  private pricing(): ModelInfo['pricing'] | undefined {
+    return findPricing(this.modelProvider ?? 'openai', this.model ?? '');
+  }
+
   private async streamTurn(thread: Thread, parts: CodexInput[], startedAt: number): Promise<void> {
     const { events } = await thread.runStreamed(parts, { signal: this.abort!.signal });
     for await (const ev of events) this.handle(ev);
@@ -160,7 +173,12 @@ export class CodexExecAdapter implements HarnessAdapter {
         const u = ev.usage;
         // input_tokens includes cached_input_tokens (OpenAI convention); count the uncached
         // remainder as input so cache reads are not counted twice in rates and cost estimates.
-        this.usage.addUsage({ inputTokens: Math.max(0, u.input_tokens - u.cached_input_tokens), outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens });
+        const delta = { inputTokens: Math.max(0, u.input_tokens - u.cached_input_tokens), outputTokens: u.output_tokens, cacheReadTokens: u.cached_input_tokens, cacheWriteTokens: u.cache_write_input_tokens, reasoningTokens: u.reasoning_output_tokens };
+        // Codex reports tokens but no price, so the turn's spend is priced here from the same
+        // catalog the rest of the app bills through; without it the session reads $0.00 however
+        // much it used. The delta is per-turn usage, so the rates apply to this turn alone.
+        const turnCost = estimateCostUsd(this.pricing(), delta);
+        this.usage.addUsage({ ...delta, costUsd: turnCost });
         const completed = this.usage.finishTurn();
         this.ctx.emit({ type: 'usage', totals: completed.totals });
         this.ctx.emit({
@@ -171,7 +189,8 @@ export class CodexExecAdapter implements HarnessAdapter {
             ts: Date.now(),
             status: 'completed',
             durationMs: Date.now() - this.turnStartedAt,
-            usage: completed.usage
+            usage: completed.usage,
+            costUsd: turnCost
           }
         });
         return;
@@ -230,6 +249,7 @@ export class CodexExecAdapter implements HarnessAdapter {
 
   async setModel(model: ModelRef): Promise<void> {
     this.model = model.model;
+    this.modelProvider = model.provider;
     this.thread = null; // rebuilt with the new model on the next turn (resumes the same thread id)
     this.ctx.updateMeta({ activeModel: model });
   }
