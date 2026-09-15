@@ -461,7 +461,8 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
         startRename();
       }}
     >
-      {/* The pin lives at the start of the row, so its state reads before the title. */}
+      {/* The pin lives at the start of the row, so its state reads before the title. It is the
+          pinned state that keeps it on screen: selecting a row never reveals a pin it does not have. */}
       <div className="session-pin">
         {s.archived ? (
           s.pinned ? <span className="session-pin-indicator" title="Pinned"><Icon name="pin" size={13} /></span> : null
@@ -474,7 +475,9 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
             aria-label={s.pinned ? 'Unpin session' : 'Pin session'}
             onClick={(e) => { e.stopPropagation(); void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }); }}
           >
-            <Icon name="pin" size={13} />
+            <Icon name="pin" size={13} className="pin-on" />
+            {/* Hovering a pinned row turns its state pin into the unpin action. */}
+            {s.pinned && <Icon name="pinOff" size={13} className="pin-off" />}
           </button>
         )}
       </div>
