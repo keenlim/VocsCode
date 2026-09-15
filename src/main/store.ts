@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { SessionMeta, TranscriptItem } from '../shared/types';
 import type { Logger } from './log';
-import { appendLine, ensureDir, exists, readJson, readJsonl, rmrf, writeJson } from './util/fs';
+import { appendLine, ensureDir, exists, readJson, readJsonl, rmrf, writeJson, writeText } from './util/fs';
 import { promises as fs } from 'node:fs';
 
 const SESSION_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -82,6 +82,50 @@ export class SessionStore {
     if (idx >= 0) this.sessions[idx] = meta;
     else this.sessions.unshift(meta);
     await this.flushIndex();
+  }
+
+  /**
+   * Writes the index back after something outside the store changed a meta it already holds —
+   * the load-time usage repair corrects `usage` in place on the live list.
+   */
+  async persist(): Promise<void> {
+    await this.flushIndex();
+  }
+
+  /**
+   * Rewrites the cost of transcript turn rows, leaving every other row byte-for-byte as it was.
+   * `reprice` returns the corrected cost for a turn, or undefined to keep the recorded one; an id
+   * written by more than one upsert gets the same answer each time, so copies stay consistent.
+   * Returns how many rows changed.
+   */
+  async repriceTurns(id: string, reprice: (turn: Extract<TranscriptItem, { kind: 'turn' }>) => number | undefined): Promise<number> {
+    assertValidSessionId(id);
+    const file = path.join(this.sessionDir(id), 'transcript.jsonl');
+    return this.queueTranscriptWrite(id, async () => {
+      if (!(await exists(file))) return 0;
+      const lines = (await fs.readFile(file, 'utf8')).split('\n');
+      let changed = 0;
+      const rewritten = lines.map((line) => {
+        if (!line) return line;
+        let item: TranscriptItem;
+        try {
+          item = JSON.parse(line) as TranscriptItem;
+        } catch {
+          return line;
+        }
+        if (!item || item.kind !== 'turn') return line;
+        const cost = reprice(item);
+        if (cost === undefined || cost === item.costUsd) return line;
+        changed++;
+        return JSON.stringify({ ...item, costUsd: cost });
+      });
+      if (!changed) return 0;
+      // Not routed through `hooks.onRewrite`: only a figure the search index never reads has
+      // changed, so re-reading a transcript that can run to tens of megabytes would buy nothing.
+      // Atomic, because a transcript interrupted mid-write is a session's history lost.
+      await writeText(file, rewritten.join('\n'));
+      return changed;
+    });
   }
 
   async remove(id: string): Promise<void> {

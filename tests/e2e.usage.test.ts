@@ -136,3 +136,95 @@ describe.runIf(enabled)('electron e2e: usage dashboard', () => {
     expect(content!.height).toBeGreaterThan(body!.height * 0.9);
   }, 180_000);
 });
+
+/**
+ * The boot-time repair of spend the Claude CLI recorded at its own fallback rates.
+ *
+ * The fixture is the shape of the report that prompted it: a Claude session on a cheap third-party
+ * model the CLI has no pricing row for, so it billed $5/$25/$0.50 per Mtok where the catalog's rate
+ * is $0.15/$0.60/$0.003 — $36.75 on the clock against $0.94 of real money. Both figures are read off
+ * the same session the panel draws, so the assertion cannot pass on an unrepaired profile: the
+ * headline and the turn bar must both open on the catalog's number.
+ */
+describe.runIf(enabled)('electron e2e: usage repair', () => {
+  const SID_REPAIR = 's_usage_repair';
+  // One turn's worth of tokens; two turns make the same totals. Catalog: 0.15 + 0.60 + 0.003 +
+  // 0.15*1.25 (cache writes default to 1.25x input) = $0.9405 for the pair.
+  const TURN_USAGE = { inputTokens: 500_000, outputTokens: 500_000, cacheReadTokens: 500_000, cacheWriteTokens: 500_000 };
+  const TURN_FALLBACK = 18.375;
+  let repairApp: ElectronApplication | null = null;
+
+  afterAll(async () => {
+    await repairApp?.close().catch(() => undefined);
+  });
+
+  it('opens on the catalog price for a session the CLI billed at its fallback rates', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'vocs-usage-repair-'));
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+
+    const session: SessionMeta = {
+      id: SID_REPAIR,
+      title: 'Fallback-priced session',
+      createdAt: T,
+      updatedAt: T,
+      config: { harness: 'claude', projectRoot: project, permissionMode: 'ask', model: { provider: 'opencode-go', model: 'deepseek-v4.1-flash' } },
+      cwd: project,
+      status: 'idle',
+      harnessRef: {},
+      usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000, reasoningTokens: 0, costUsd: TURN_FALLBACK * 2, turns: 2 }
+    };
+    const rows: TranscriptItem[] = [
+      { id: 'r1', kind: 'turn', ts: T, status: 'completed', durationMs: 1200, costUsd: TURN_FALLBACK, usage: TURN_USAGE },
+      { id: 'r2', kind: 'turn', ts: T + 1, status: 'completed', durationMs: 900, costUsd: TURN_FALLBACK, usage: TURN_USAGE }
+    ];
+    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+    await fs.mkdir(path.join(userData, 'sessions', SID_REPAIR), { recursive: true });
+    await fs.writeFile(path.join(userData, 'sessions', SID_REPAIR, 'transcript.jsonl'), rows.map((i) => JSON.stringify(i)).join('\n') + '\n');
+
+    const packaged = process.env.HARNESS_E2E_EXE;
+    repairApp = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const win: Page = await repairApp.firstWindow();
+    await win.waitForSelector('.brand', { timeout: 60_000 });
+    await expectQuietWindow(repairApp);
+
+    await win.click('.panel-tab:has-text("Usage")');
+    const panel = win.getByTestId('usage-panel');
+    await panel.waitFor({ timeout: 30_000 });
+
+    // The session index, repriced from the catalog: $0.9405, not the $36.75 the CLI recorded.
+    expect(await win.locator('.usage-hero-value').innerText()).toBe('$0.94');
+
+    // And the transcript rows under it, which the same boot rewrote: each turn is worth $0.47025.
+    expect(await win.locator('.uturn-row').count()).toBe(2);
+    expect(await win.locator('.uturn-row-val').first().innerText()).toBe('$0.47');
+    await win.locator('.uturn').first().hover();
+    expect(await win.locator('.uturn-readout').innerText()).toContain('Turn 1/2 · $0.47');
+
+    // The repair runs once: the next boot has nothing left that looks fallback-priced.
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'usage-04-repair.png') });
+    await repairApp.close();
+    repairApp = null;
+
+    repairApp = await electron.launch({
+      executablePath: packaged || (require('electron') as string),
+      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`],
+      env: isolatedEnv(userData),
+      timeout: 60_000
+    });
+    const again: Page = await repairApp.firstWindow();
+    await again.waitForSelector('.brand', { timeout: 60_000 });
+    await again.click('.panel-tab:has-text("Usage")');
+    await again.getByTestId('usage-panel').waitFor({ timeout: 30_000 });
+    expect(await again.locator('.usage-hero-value').innerText()).toBe('$0.94');
+  }, 240_000);
+});
