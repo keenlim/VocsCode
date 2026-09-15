@@ -22,8 +22,10 @@ import type {
   UserInput
 } from '../shared/types';
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
+import { nativeGoalCommand } from '../shared/goal-driver';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
 import { modelName } from '../shared/model-names';
+import { skillInstalled } from './skills';
 import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
 import { builtinServerIds, resolveForSession } from './mcp';
@@ -329,7 +331,12 @@ export class SessionManager {
       worktreeBranch = wt.branch;
     }
     const s = this.settings();
-    const title = req.title?.trim() || (req.initialPrompt ? titleFromPrompt(req.initialPrompt) : 'New session');
+    const objective = req.goal?.trim() ?? '';
+    // A session created with a goal on a harness that owns `/goal` belongs to the harness: the
+    // objective is sent to it as a command and the app sets no goal state (see shared/goal-driver.ts).
+    const nativeGoal = objective ? await this.harnessGoal(cfg.harness) : null;
+    const titleSeed = req.initialPrompt ?? (nativeGoal ? objective : '');
+    const title = req.title?.trim() || (titleSeed ? titleFromPrompt(titleSeed) : 'New session');
     const meta: SessionMeta = {
       id,
       title,
@@ -360,9 +367,11 @@ export class SessionManager {
         this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
       }
     }
-    if (req.goal?.trim()) {
+    if (nativeGoal) {
+      meta.nativeGoal = nativeGoal;
+    } else if (objective) {
       meta.goal = {
-        objective: req.goal.trim(),
+        objective,
         status: 'active',
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -372,7 +381,7 @@ export class SessionManager {
       };
     }
     await this.deps.store.upsert(meta);
-    this.deps.log('info', `[${id}] session created: harness=${cfg.harness} model=${describeModel(meta.activeModel)} permissions=${cfg.permissionMode} cwd=${cwd}${worktreeBranch ? ` worktree=${worktreeBranch}` : ''}${meta.goal ? ' goal=yes' : ''}`);
+    this.deps.log('info', `[${id}] session created: harness=${cfg.harness} model=${describeModel(meta.activeModel)} permissions=${cfg.permissionMode} cwd=${cwd}${worktreeBranch ? ` worktree=${worktreeBranch}` : ''}${meta.goal ? ' goal=yes' : ''}${meta.nativeGoal ? ` native-goal=${meta.nativeGoal}` : ''}`);
     this.deps.analytics.touchSession(meta);
     const recent = [cfg.projectRoot, ...s.recentProjects.filter((p) => p !== cfg.projectRoot)].slice(0, 12);
     // The folder keeps its sidebar entry even after its last session is archived or deleted.
@@ -381,7 +390,15 @@ export class SessionManager {
     this.pushSessions();
     const promptText = req.initialPrompt?.trim() ?? '';
     const initialImages = req.initialImages?.length ? req.initialImages : undefined;
-    if (promptText || initialImages) {
+    if (meta.nativeGoal) {
+      // A slash command has to open its message, so the objective rides along as its argument. The
+      // harness's own goal takes it from there — no kickoff prompt, no app-side continuation.
+      if (!req.title?.trim()) this.scheduleLlmTitle(id, title, promptText || objective);
+      void this.send(id, { text: `/${meta.nativeGoal} ${objective}` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      if (promptText || initialImages) {
+        void this.send(id, { text: promptText, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      }
+    } else if (promptText || initialImages) {
       // A user-supplied title stands; otherwise the prompt-derived one is only a placeholder
       // until the one-shot LLM title call lands.
       if (!req.title?.trim() && promptText) this.scheduleLlmTitle(id, title, promptText);
@@ -583,6 +600,16 @@ export class SessionManager {
         // A harness may discover its actual model only after startup. Refresh the analytics
         // snapshot immediately so tool calls before the first usage update are not unattributed.
         if ('activeModel' in patch) this.deps.analytics.touchSession(m);
+        // The harness just reported the commands it accepts: `/goal` may have changed hands.
+        if ('harnessCommands' in patch) {
+          void this.applyGoalDriver(m)
+            .then((changed) => {
+              if (!changed) return;
+              this.schedulePersist(m);
+              this.pushSessions();
+            })
+            .catch((e) => this.deps.log('warn', `[${id}] goal driver update failed: ${errorMessage(e)}`));
+        }
         this.schedulePersist(m);
         this.pushSessions();
       },
@@ -600,6 +627,14 @@ export class SessionManager {
     }
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
+    // The previous run's advertised commands say nothing about this one: the harness re-reports them
+    // once it starts. Recompute the driver before the first send, so a `/goal` opening a resumed
+    // session is not handed to a command this harness no longer has.
+    if (meta.harnessCommands?.length) {
+      meta.harnessCommands = undefined;
+      await this.applyGoalDriver(meta);
+      this.schedulePersist(meta);
+    }
     const ctx = this.buildContext(meta, id);
     const adapter = createAdapter(meta.config.harness, ctx);
     const active: ActiveSession = {
@@ -1306,6 +1341,51 @@ export class SessionManager {
     await this.deps.store.upsert(meta);
     this.pushSessions();
     return meta;
+  }
+
+  /**
+   * `/goal` belongs to the harness when it has a goal command of its own. The list the adapter reports
+   * is authoritative; before a harness has started (it starts on the first send, so a brand-new session
+   * has no list yet) a `goal` skill on disk stands in for it — Claude only, and only when the CLI is
+   * configured to load `~/.claude` at all.
+   */
+  private async resolveNativeGoal(meta: SessionMeta): Promise<string | null> {
+    return this.harnessGoal(meta.config.harness, meta.harnessCommands);
+  }
+
+  /** The same rule keyed by harness alone, for a session that does not exist yet (`create()`). */
+  private async harnessGoal(harness: HarnessId, advertised?: string[]): Promise<string | null> {
+    const preferHarness = this.settings().goalDefaults.preferHarness;
+    const installed = preferHarness && !advertised?.length ? await this.harnessGoalInstalled(harness) : false;
+    return nativeGoalCommand({ preferHarness, advertised, installed });
+  }
+
+  private async harnessGoalInstalled(harness: HarnessId): Promise<boolean> {
+    if (harness !== 'claude') return false;
+    // Without 'user' in settingSources the CLI never reads ~/.claude, so its skills cannot answer /goal.
+    if (!this.settings().claude.settingSources.includes('user')) return false;
+    return skillInstalled('claude', 'goal');
+  }
+
+  /** Applies the driver to one session; true when it changed. */
+  private async applyGoalDriver(meta: SessionMeta): Promise<boolean> {
+    const next = await this.resolveNativeGoal(meta);
+    if (next ? meta.nativeGoal === next : meta.nativeGoal === undefined) return false;
+    if (next) meta.nativeGoal = next;
+    else delete meta.nativeGoal;
+    return true;
+  }
+
+  /** Recomputes `/goal` ownership everywhere: the preference is app-wide and the advertised lists are per harness. */
+  async refreshGoalDrivers(): Promise<void> {
+    let changed = false;
+    for (const meta of this.deps.store.list()) {
+      if (await this.applyGoalDriver(meta)) {
+        this.schedulePersist(meta);
+        changed = true;
+      }
+    }
+    if (changed) this.pushSessions();
   }
 
   /**

@@ -134,9 +134,16 @@ export function Composer({ session }: { session: SessionMeta }) {
       setSlash(null);
       setHistIdx(-1);
     };
-    // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
-    // composer looking frozen; their progress and outcome appear as info lines in the transcript.
-    if (t.startsWith('/') && SLASH_COMMANDS.some((c) => c.name === t.slice(1).split(/\s+/)[0])) {
+    const typedCommand = t.startsWith('/') ? t.slice(1).split(/\s+/)[0] : '';
+    // A command the harness owns itself is prompt text, not an app command: `/goal` on a session whose
+    // harness has its own goal goes to the harness verbatim (see shared/goal-driver.ts). The rest of
+    // the send path is unchanged, so history and draft handling stay correct for free.
+    if (typedCommand && typedCommand === session.nativeGoal?.toLowerCase()) {
+      toast(`${harness.name} answers /${typedCommand} itself — sent to the harness.`, 'info');
+      useStore.getState().setPanelTab('goal');
+    } else if (typedCommand && SLASH_COMMANDS.some((c) => c.name === typedCommand)) {
+      // Known commands are cleared right away so long-running ones (/pr, /merge…) do not leave the
+      // composer looking frozen; their progress and outcome appear as info lines in the transcript.
       clearDraft();
       void runSlash(t).catch((e) => toast(String((e as Error).message ?? e), 'error'));
       return;

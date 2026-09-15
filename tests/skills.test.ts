@@ -2,7 +2,7 @@ import { mkdir, readFile, rm, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, parseFrontmatter, skillRoot, skillRoots } from '../src/main/skills';
+import { copySkill, createSkill, deleteSkill, listSkills, locateSkillPath, parseFrontmatter, skillInstalled, skillRoot, skillRoots } from '../src/main/skills';
 
 let home: string;
 
@@ -150,6 +150,25 @@ describe('copySkill', () => {
   });
   it('refuses unknown paths', async () => {
     expect((await copySkill({ path: path.join(home, 'x'), toHarness: 'claude' }, home)).ok).toBe(false);
+  });
+});
+
+describe('skillInstalled', () => {
+  it('is true only for a skill folder that has a SKILL.md', async () => {
+    const goal = path.join(home, '.claude', 'skills', 'goal');
+    await mkdir(goal, { recursive: true });
+    expect(await skillInstalled('claude', 'goal', home)).toBe(false);
+    await writeFile(path.join(goal, 'SKILL.md'), '---\nname: goal\n---\n', 'utf8');
+    expect(await skillInstalled('claude', 'goal', home)).toBe(true);
+    // Each harness has its own root: Claude's goal says nothing about pi's.
+    expect(await skillInstalled('pi', 'goal', home)).toBe(false);
+    expect(await skillInstalled('claude', 'missing', home)).toBe(false);
+  });
+
+  it('refuses a name that is not a single folder', async () => {
+    expect(await skillInstalled('claude', '../goal', home)).toBe(false);
+    expect(await skillInstalled('claude', 'a/b', home)).toBe(false);
+    expect(await skillInstalled('claude', '', home)).toBe(false);
   });
 });
 
