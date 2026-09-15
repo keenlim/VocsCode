@@ -47,10 +47,18 @@ export function cursorModelToInfo(m: { id: string; displayName?: string; descrip
   };
 }
 
+/**
+ * DeepSeek's own catalog. V4.1 Flash is served under the bare id `deepseek-flash` — DeepSeek's
+ * `/models` answers that, not the OpenCode Go slug `deepseek-v4.1-flash` — and it takes image input,
+ * so the text-only default `m()` gives a DeepSeek model is overridden. Without the entry the model
+ * still reached the picker from the live list but resolved to no context window and no pricing,
+ * which left its context meter blank and its percentage auto-compaction thresholds unable to fire.
+ */
 export const DEEPSEEK_STATIC_MODELS: ModelInfo[] = [
   m('deepseek', 'deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, { input: 0.435, output: 0.87, cacheRead: 0.003625 }, true),
-  m('deepseek', 'deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }),
-  { ...m('deepseek', 'deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision (exp)', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }), supportsImages: true }
+  { ...m('deepseek', 'deepseek-flash', 'DeepSeek V4.1 Flash', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }), supportsImages: true },
+  m('deepseek', 'deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }),
+  { ...m('deepseek', 'deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision (exp)', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }), supportsImages: true }
 ];
 
 /**
