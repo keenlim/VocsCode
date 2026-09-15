@@ -101,6 +101,27 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.click('button:has-text("Start session")');
       await win.waitForSelector('.header', { timeout: 30_000 });
 
+      // The leading pin is a hover affordance, not a selection mark: the new session is the active
+      // row, and it must still read as unpinned. Hovering it offers the pin.
+      const sessionRow = win.locator('[data-testid="session-row"]').first();
+      await sessionRow.click();
+      // Move the pointer off the row: the assertion is about selection, not the hover Playwright's
+      // own click leaves behind.
+      await win.mouse.move(0, 0);
+      const pinToggle = sessionRow.getByTestId('session-pin');
+      await expect.poll(async () => pinToggle.evaluate((el) => getComputedStyle(el).visibility), { timeout: 10_000 }).toBe('hidden');
+      await sessionRow.hover();
+      await expect.poll(async () => pinToggle.evaluate((el) => getComputedStyle(el).visibility), { timeout: 10_000 }).toBe('visible');
+      expect(await pinToggle.locator('.pin-on').evaluate((el) => getComputedStyle(el).display), 'an unpinned row offers pin').not.toBe('none');
+      // Pinned, the pin stays on screen as state, and hovering it reads as the unpin action instead.
+      await pinToggle.click();
+      await expect.poll(async () => pinToggle.getAttribute('class'), { timeout: 10_000 }).toContain('is-pinned');
+      expect(await pinToggle.getAttribute('title')).toBe('Unpin');
+      expect(await pinToggle.locator('.pin-on').evaluate((el) => getComputedStyle(el).display), 'hover swaps the state pin for the unpin icon').toBe('none');
+      expect(await pinToggle.locator('.pin-off').evaluate((el) => getComputedStyle(el).display)).not.toBe('none');
+      await pinToggle.click(); // unpin, leaving the sidebar as the rest of the flow expects it
+      await expect.poll(async () => pinToggle.getAttribute('title'), { timeout: 10_000 }).toBe('Pin to top');
+
       // The MCP tab keeps the global GitNexus controls first, followed by this repo's servers.
       await win.click('.panel-tab:has-text("MCP")');
       const global = win.getByTestId('mcp-global-section');

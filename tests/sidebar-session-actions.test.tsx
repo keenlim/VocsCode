@@ -90,6 +90,26 @@ describe('sidebar session actions', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: false });
   });
 
+  it('carries an unpin icon on a pinned row that an unpinned row never gets', () => {
+    useStore.setState({
+      sessions: [session('s_a', { title: 'A', pinned: true, pinnedAt: 5 }), session('s_b', { title: 'B' })],
+      settings,
+      activeId: null,
+      view: 'chat'
+    });
+    const { container } = render(<Sidebar />);
+    const pinned = container.querySelector('[data-session-id="s_a"] [data-testid="session-pin"]') as HTMLElement;
+    const unpinned = container.querySelector('[data-session-id="s_b"] [data-testid="session-pin"]') as HTMLElement;
+    // The pair is what the hover rule swaps between; the CSS shows only one of them at a time.
+    expect(pinned.querySelector('.pin-on')).toBeTruthy();
+    expect(pinned.querySelector('.pin-off')).toBeTruthy();
+    // Hovering an unpinned row can only ever offer pinning, so it must not carry an unpin icon.
+    expect(unpinned.querySelector('.pin-on')).toBeTruthy();
+    expect(unpinned.querySelector('.pin-off')).toBeNull();
+    expect(pinned.title).toBe('Unpin');
+    expect(unpinned.title).toBe('Pin to top');
+  });
+
   it('fork action opens a harness menu and forks into the picked harness', () => {
     useStore.setState({ sessions: [session('s_a', { title: 'A' })], settings, activeId: null, view: 'chat' });
     const { container } = render(<Sidebar />);
