@@ -188,6 +188,22 @@ describe('sidebar session actions', () => {
     expect(invokeMock).toHaveBeenCalledWith('sessions:pin', { id: 's_a', pinned: true });
   });
 
+  it('orders rows by the last message the user sent, not by the agent working in the background', () => {
+    useStore.setState({
+      sessions: [
+        // Mid-turn: the harness has been busy here for a while, but the user wrote to it hours ago.
+        session('s_agent_busy', { title: 'Busy', updatedAt: 9_000, lastUserMessageAt: 1_000 }),
+        // Written to a moment ago; the harness has been quiet since.
+        session('s_just_wrote', { title: 'Mine', updatedAt: 2_000, lastUserMessageAt: 8_000 })
+      ],
+      settings,
+      activeId: null,
+      view: 'chat'
+    });
+    const { container } = render(<Sidebar />);
+    expect([...container.querySelectorAll('.session-row')].map((r) => r.getAttribute('data-session-id'))).toEqual(['s_just_wrote', 's_agent_busy']);
+  });
+
   it('dragging one pinned row over another persists the new pin order', () => {
     useStore.setState({
       sessions: [
@@ -216,6 +232,16 @@ describe('sidebar session actions', () => {
 });
 
 describe('sortSessionRows', () => {
+  it('orders unpinned rows by the user\'s own last message, falling back to activity for rows without the stamp', () => {
+    const list = [
+      session('s_agent_busy', { updatedAt: 900, lastUserMessageAt: 100 }),
+      session('s_just_wrote', { updatedAt: 200, lastUserMessageAt: 800 }),
+      // Written before the stamp existed: it keeps its place by activity instead of dropping to the bottom.
+      session('s_legacy', { updatedAt: 700 })
+    ];
+    expect(sortSessionRows(list).map((s) => s.id)).toEqual(['s_just_wrote', 's_legacy', 's_agent_busy']);
+  });
+
   it('pinned first by earliest pin stamp, unpinned by recency', () => {
     const list = [
       session('s_c', { updatedAt: 300 }),

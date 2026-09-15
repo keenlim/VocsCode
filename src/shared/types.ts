@@ -691,6 +691,12 @@ export interface SessionMeta {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Epoch ms of the last message the user sent here. The sidebar orders a folder's rows by it, so a
+   * long agent turn cannot reshuffle the list; `updatedAt` keeps tracking every kind of activity.
+   * Absent on sessions written before it existed — the sidebar falls back to `updatedAt` for those.
+   */
+  lastUserMessageAt?: number;
   config: SessionConfig;
   /** Effective working directory (worktree path if isolated). */
   cwd: string;
