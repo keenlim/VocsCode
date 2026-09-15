@@ -371,3 +371,57 @@ describe('model list for a session whose harness has not started', () => {
     expect(Object.keys(useStore.getState().models)).toEqual(['s_keep']);
   });
 });
+
+describe('which session the app shows after the active one leaves the list', () => {
+  const meta = (id: string, projectRoot: string, updatedAt: number, patch: Partial<SessionMeta> = {}): SessionMeta =>
+    ({ id, title: id, createdAt: updatedAt, updatedAt, config: { harness: 'claude', projectRoot }, ...patch }) as SessionMeta;
+
+  it('archives into the row below within the same folder, not the newest session anywhere', () => {
+    const toast = vi.fn();
+    // Three rows in one folder, newest first: c, b, a. A fourth folder holds the newest session
+    // anywhere, so picking it would prove only that recency won — not that the folder was respected.
+    const a = meta('a', 'G:/proj/a', 1000);
+    const b = meta('b', 'G:/proj/a', 2000);
+    const c = meta('c', 'G:/proj/a', 3000);
+    const elsewhere = meta('z', 'G:/proj/b', 9000);
+    useStore.setState({ sessions: [a, b, c, elsewhere], activeId: 'b', transcripts: {}, loaded: { a: true }, toast } as never);
+    useStore.getState().setSessions([a, { ...b, archived: true }, c, elsewhere]);
+    expect(useStore.getState().activeId).toBe('a');
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('was archived; switched to "a"'), 'info');
+  });
+
+  it('archives into the row above when it was the last row of its folder', () => {
+    // Newest first: a, b — the active row is the bottom one, so there is nothing below to take over.
+    const a = meta('a', 'G:/proj/a', 3000);
+    const b = meta('b', 'G:/proj/a', 2000);
+    const elsewhere = meta('z', 'G:/proj/b', 9000);
+    useStore.setState({ sessions: [a, b, elsewhere], activeId: 'b', transcripts: {}, loaded: { a: true }, toast: vi.fn() } as never);
+    useStore.getState().setSessions([a, { ...b, archived: true }, elsewhere]);
+    expect(useStore.getState().activeId).toBe('a');
+  });
+
+  it('falls back to the newest remaining session when its folder has nothing left', () => {
+    const only = meta('only', 'G:/proj/a', 1000);
+    const elsewhere = meta('z', 'G:/proj/b', 9000);
+    useStore.setState({ sessions: [only, elsewhere], activeId: 'only', transcripts: {}, loaded: { z: true }, toast: vi.fn() } as never);
+    useStore.getState().setSessions([{ ...only, archived: true }, elsewhere]);
+    expect(useStore.getState().activeId).toBe('z');
+  });
+
+  it('leaves no session selected when the last active one is archived', () => {
+    const only = meta('only', 'G:/proj/a', 1000);
+    useStore.setState({ sessions: [only], activeId: 'only', transcripts: {}, loaded: {}, toast: vi.fn() } as never);
+    useStore.getState().setSessions([{ ...only, archived: true }]);
+    expect(useStore.getState().activeId).toBeNull();
+  });
+
+  it('keeps an archived session selected while it is being read in the Archived view', () => {
+    // Rows in the Archived view are clickable, and every later push re-runs this reconciliation:
+    // only a session that was still visible a moment ago counts as having left.
+    const read = meta('read', 'G:/proj/a', 1000, { archived: true });
+    const live = meta('live', 'G:/proj/a', 2000);
+    useStore.setState({ sessions: [read, live], activeId: 'read', transcripts: {}, loaded: {}, toast: vi.fn() } as never);
+    useStore.getState().setSessions([read, { ...live, status: 'running' as SessionMeta['status'] }]);
+    expect(useStore.getState().activeId).toBe('read');
+  });
+});
