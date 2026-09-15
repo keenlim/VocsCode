@@ -120,6 +120,18 @@ export const BUILTIN_PROVIDERS: ProviderConfig[] = [
     enabled: true
   },
   {
+    // A $10/month plan over the OpenCode Zen gateway; off until a subscriber turns it on.
+    id: 'opencode-go',
+    kind: 'opencode-go',
+    name: 'OpenCode Go',
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    hasApiKey: false,
+    envKey: 'OPENCODE_API_KEY',
+    models: [],
+    builtin: true,
+    enabled: false
+  },
+  {
     id: 'ollama',
     kind: 'ollama',
     name: 'Ollama (local)',

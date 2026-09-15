@@ -64,7 +64,7 @@ describe.runIf(enabled)('file mentions open in the Files panel', () => {
       if (v === undefined) continue;
       if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
       // No key: the seeded transcript never runs a turn, which is exactly the point.
-      if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
+      if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|OPENCODE|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
       env[k] = v;
     }
     env.VOCS_CODE_USER_DATA = userData;
