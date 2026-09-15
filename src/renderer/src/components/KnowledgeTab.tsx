@@ -4,6 +4,7 @@
  * rejecting a proposal and copying reviewed pages into docs/wiki/.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { isPendingStatus } from '../../../shared/knowledge';
 import type { KnowledgeJobState, KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
@@ -50,6 +51,8 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   const [results, setResults] = useState<KnowledgePageSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
+  /** Opening a page resolves its anchors against GitNexus, which can take seconds. */
+  const [opening, setOpening] = useState<string | null>(null);
   const liveId = useRef(session.id);
 
   const load = useCallback(async () => {
@@ -92,11 +95,27 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   };
 
   const open = async (id: string) => {
+    setOpening(id);
     try {
       const next = await invoke('knowledge:read', { sessionId: session.id, id });
-      setDetail(next && next.page ? next : null);
+      if (next && next.page) setDetail(next);
+      else toast(`"${id}" is no longer in this project's wiki`, 'error');
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setOpening(null);
+    }
+  };
+
+  const startWiki = async () => {
+    setBusy(true);
+    try {
+      setView(await invoke('knowledge:init', { sessionId: session.id }));
+      toast('Project wiki created', 'success');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -176,8 +195,9 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
   };
 
   const shown = useMemo(() => (results ?? view?.pages ?? []).slice(0, 200), [results, view?.pages]);
-  // Anything still awaiting a decision: proposals plus non-current, non-historical pages.
-  const pendingCount = (view?.proposals.length ?? 0) + (view?.pages ?? []).filter((p) => p.status !== 'current' && p.status !== 'deprecated' && p.status !== 'superseded').length;
+  // Proposals plus draft/proposed pages. `uncertain` is a recorded judgement, not a pending
+  // decision, so Accept all leaves it alone and must not count it either.
+  const pendingCount = (view?.proposals.length ?? 0) + (view?.pages ?? []).filter((p) => isPendingStatus(p.status)).length;
 
   if (!view) {
     return (
@@ -244,6 +264,12 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
       {!status.hasWiki && !status.pages && (
         <EmptyState icon="book" title="No project wiki yet">
           <p>Generate a first set of pages from this project's README, docs and instructions, then review what is worth keeping.</p>
+          {/* Bootstrap needs both docs to read and a utility model. Starting an empty wiki needs
+              neither, and is what switches on the memory tools and the git-boundary episodes. */}
+          <p>Or start an empty one and let agents propose pages as they work.</p>
+          <Button size="sm" icon="plus" disabled={busy} data-testid="knowledge-start-wiki" onClick={() => void startWiki()}>
+            Start a wiki
+          </Button>
         </EmptyState>
       )}
 
@@ -263,7 +289,9 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
               <div className="knowledge-card-actions">
                 <Button size="sm" variant="primary" disabled={busy} data-testid={`knowledge-accept-${p.id}`} onClick={() => void decide(p.id, 'accept')}>Accept</Button>
                 <Button size="sm" disabled={busy} data-testid={`knowledge-reject-${p.id}`} onClick={() => void decide(p.id, 'reject')}>Reject</Button>
-                <Button size="sm" variant="ghost" onClick={() => void open(p.id)}>Preview</Button>
+                <Button size="sm" variant="ghost" disabled={opening === p.id} data-testid={`knowledge-preview-${p.id}`} onClick={() => void open(p.id)}>
+                  {opening === p.id ? 'Opening…' : 'Preview'}
+                </Button>
               </div>
             </div>
           ))}
@@ -334,9 +362,10 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
         </section>
       ) : (
         <section className="knowledge-pages">
+          {opening && <div className="mcp-loading"><Spinner size={12} /> Checking anchors against GitNexus…</div>}
           {shown.length === 0 && status.hasWiki && <div className="muted small">No pages match.</div>}
           {shown.map((page) => {
-            const pending = page.status !== 'current' && page.status !== 'deprecated' && page.status !== 'superseded';
+            const pending = isPendingStatus(page.status) || page.status === 'uncertain';
             return (
               <div
                 key={page.id}
@@ -379,6 +408,21 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
             );
           })}
         </section>
+      )}
+
+      {/* The tombstones the promotion policy runs on: an agent that refiles one of these is
+          refused, so the list has to be inspectable rather than only implied. */}
+      {view.rejectedClaims.length > 0 && (
+        <details className="knowledge-rejected" data-testid="knowledge-rejected">
+          <summary className="muted small">
+            {view.rejectedClaims.length} rejected claim{view.rejectedClaims.length === 1 ? '' : 's'} — refused if proposed again
+          </summary>
+          <ul className="muted small">
+            {view.rejectedClaims.map((claim) => (
+              <li key={claim}>{claim}</li>
+            ))}
+          </ul>
+        </details>
       )}
 
       <section className="knowledge-switches">

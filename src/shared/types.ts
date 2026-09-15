@@ -700,6 +700,17 @@ export interface SessionMeta {
    * to the next user message so the new harness starts with the prior conversation, then cleared.
    */
   pendingForkContext?: boolean;
+  /**
+   * Layer 2 priming: the bounded knowledge digest computed when the session was created. It is kept
+   * out of `config` on purpose — the config is copied when a session is reused ("New session on
+   * branch", "Review PR"), and a copied digest would be appended a second time and go stale.
+   */
+  knowledgeDigest?: string;
+  /**
+   * Set once the digest has been delivered as a first-turn preamble, for harnesses that take no
+   * system prompt. Persisted so a restart or resume does not prime the same session twice.
+   */
+  knowledgePrimed?: boolean;
   usage: UsageTotals;
   lastError?: string;
   /** Current model as reported by the harness (may differ from config after live switch). */
@@ -950,6 +961,12 @@ export interface HarnessCapabilities {
   fork: boolean;
   plan: boolean;
   costReporting: boolean;
+  /**
+   * Whether the harness takes an appended system prompt (`config.appendSystemPrompt` and the
+   * Layer 2 knowledge digest). The Codex app-server, Codex exec, ACP and Cursor SDKs expose no
+   * such hook, so for those the digest is delivered as a preamble on the session's first turn.
+   */
+  systemPrompt: boolean;
   /**
    * How MCP servers reach this harness. `inject`: we pass the effective set through its SDK or
    * protocol. `client`: we run the MCP client ourselves and merge the tools in. `inherit`: the

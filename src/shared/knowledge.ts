@@ -166,8 +166,6 @@ export interface KnowledgeStatusSummary {
   proposals: number;
   /** Pages that name a file source which changed or disappeared. */
   stale: number;
-  /** Unresolved GitNexus availability for this project (informational). */
-  indexed: boolean;
   lastUpdated?: string;
   generating?: boolean;
   /** The last synthesis job for this project, so a failure cannot vanish into a toast. */
@@ -303,6 +301,15 @@ export function authorityOf(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 
 /** Pages an agent may be handed as current truth. Historical pages exist but are not served as now. */
 export function isServable(meta: Pick<KnowledgePageMeta, 'status'>): boolean {
   return meta.status === 'current' || meta.status === 'uncertain';
+}
+
+/**
+ * Statuses that are waiting for a human decision, and so are what "Accept all" acts on. `uncertain`
+ * is excluded deliberately: it is a recorded judgement about the claim, not an unreviewed candidate,
+ * and a bulk accept must not silently turn it into current truth.
+ */
+export function isPendingStatus(status: KnowledgeStatus): boolean {
+  return status === 'draft' || status === 'proposed';
 }
 
 export function authorityLabel(meta: Pick<KnowledgePageMeta, 'status' | 'review' | 'updatedBy'>): string {
@@ -577,6 +584,25 @@ export function renderKnowledgeDigest(pages: KnowledgePageSummary[], opts: { pro
   lines.push('', `Call knowledge_search for detail, knowledge_read for one page, and knowledge_propose after discovering something durable. Working wiki: ${opts.wikiDir}`);
   const text = lines.join('\n');
   return text.length > max + 400 ? null : text;
+}
+
+/**
+ * What a harness that takes an appended system prompt should be started with: the user's own
+ * addition, then the digest. The digest lives on the session meta rather than in `config`, so a
+ * session created from another session's config never carries a stale copy of it.
+ */
+export function appendedSystemPrompt(meta: { config: { appendSystemPrompt?: string }; knowledgeDigest?: string }): string | undefined {
+  const parts = [meta.config.appendSystemPrompt?.trim(), meta.knowledgeDigest?.trim()].filter((p): p is string => !!p);
+  return parts.length ? parts.join('\n\n') : undefined;
+}
+
+/**
+ * The same digest as a preamble on a session's first turn, for the harnesses whose SDK exposes no
+ * system-prompt hook (Codex app-server, Codex exec, ACP, Cursor). Delivered once per session and
+ * never written into the transcript, so the user's own message is what they see.
+ */
+export function knowledgePreamble(digest: string): string {
+  return `<project-knowledge>\n${digest}\n</project-knowledge>\n\nThe block above is standing context for this project, supplied once at the start of the session. It is not a request — answer what follows.`;
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,6 +1,7 @@
 /** Built-in agent loop adapter: drives a provider directly and runs the local tool set, with approvals gated in-process. */
 import type { EffortLevel, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UserInput } from '../../../shared/types';
 import { modelName } from '../../../shared/model-names';
+import { appendedSystemPrompt } from '../../../shared/knowledge';
 import { errorMessage, shortId, truncate } from '../../util/async';
 import { TurnUsageTracker } from '../../util/turn-usage';
 import { estimateCostUsd, findContextWindow, findPricing, STATIC_MODELS_BY_PROVIDER } from '../../models/static-models';
@@ -198,7 +199,7 @@ export class NativeAdapter implements HarnessAdapter {
           this.history.push({ role: 'user', text: `[steer] ${s.text}`, images: s.images });
           this.ctx.updateMeta({ queued: this.queue.length + this.steer.length });
         }
-        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: this.ctx.session().config.appendSystemPrompt, model });
+        const system = await buildSystemPrompt(this.ctx.session().cwd, { planMode: this.ctx.permissionMode() === 'plan', append: appendedSystemPrompt(this.ctx.session()), model });
         const assistant: Extract<TranscriptItem, { kind: 'assistant' }> = { id: shortId('a_'), kind: 'assistant', ts: Date.now(), text: '', thinking: '', streaming: true, model: model.model };
         let emitted = false;
         const ensure = () => {

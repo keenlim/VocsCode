@@ -100,7 +100,7 @@ function pageMeta(over: Partial<KnowledgePageMeta> = {}): KnowledgePageMeta {
 }
 
 describe('vocs-memory MCP server', () => {
-  it('lists its five tools and searches pages the app wrote', async () => {
+  it('lists its six tools and searches pages the app wrote', async () => {
     const projectRoot = tmpDir('vocs-mem-');
     const store = new KnowledgeStore();
     const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
@@ -180,6 +180,94 @@ describe('vocs-memory MCP server', () => {
     expect(proposals[0].body).toContain('re-attaches to snapshots');
   });
 
+  it('files an agent proposal against the project, not the branch it was discovered on', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    const branchWiki = path.join(wiki, 'branches', 'vocscode-feature');
+    await fs.mkdir(branchWiki, { recursive: true });
+    // Every worktree session gets a branch root; it is the app's default for new sessions.
+    const { request } = start(wiki, { VOCS_MEMORY_BRANCH_ROOT: branchWiki, VOCS_MEMORY_BRANCH: 'vocscode/feature', VOCS_MEMORY_SESSION_ID: 's_a' });
+    await request({
+      method: 'tools/call',
+      params: { name: 'knowledge_propose', arguments: { title: 'Shared invariant', claim: 'The main process owns every PTY.', body: 'Body long enough to be a real page.' } }
+    });
+
+    const store = new KnowledgeStore();
+    const proposals = await store.proposals({ projectRoot, cwd: projectRoot });
+    expect(proposals).toHaveLength(1);
+    // A branch-scope page would live under branches/<slug>/ and be invisible to every other
+    // session, and could not be accepted at all from a session with no branch.
+    expect(proposals[0].meta.scope).toBe('repo');
+    expect(proposals[0].meta.branch).toBeUndefined();
+  });
+
+  it('refuses a claim a human already rejected, and does not requeue it', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const claim = 'Reconnects can duplicate a PTY.';
+    await store.reject(scope, claim, 'human');
+
+    const { request } = start(wiki, { VOCS_MEMORY_SESSION_ID: 's_a' });
+    const call = await request({
+      method: 'tools/call',
+      params: { name: 'knowledge_propose', arguments: { title: 'PTY duplication', claim, body: 'Body long enough to be a real page.' } }
+    });
+    const result = JSON.parse(toolText(call)) as { status: string; note: string };
+    expect(result.status).toBe('rejected');
+    expect(result.note).toContain('rejected before');
+    // Nothing queued: an agent that refiles every session is exactly what the tombstone prevents.
+    expect(await store.proposals(scope)).toHaveLength(0);
+  });
+
+  it('counts evidence per session and promotes a claim seen in two of them', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const scope: KnowledgeScope = { projectRoot, cwd: projectRoot };
+    const store = new KnowledgeStore();
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const args = { title: 'Worktree lifetime', claim: 'Knowledge must outlive the worktree it was found in.', body: 'Body long enough to be a real page.', kind: 'convention' };
+
+    const first = start(wiki, { VOCS_MEMORY_SESSION_ID: 's_a' });
+    const one = JSON.parse(toolText(await first.request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: args } }))) as { status: string; evidenceCount: number };
+    expect(one).toMatchObject({ status: 'proposed', evidenceCount: 1 });
+    // The same session proposing twice is still one sighting.
+    const again = JSON.parse(toolText(await first.request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: args } }))) as { evidenceCount: number };
+    expect(again.evidenceCount).toBe(1);
+    expect(await store.evidenceFor(scope, args.claim)).toBe(1);
+
+    const second = start(wiki, { VOCS_MEMORY_SESSION_ID: 's_b' });
+    const two = JSON.parse(toolText(await second.request({ method: 'tools/call', params: { name: 'knowledge_propose', arguments: args } }))) as { status: string; id: string; evidenceCount: number };
+    expect(two).toMatchObject({ status: 'promoted', id: 'convention/worktree-lifetime', evidenceCount: 2 });
+
+    // A promoted page is a *proposed* page: still awaiting review, still not served as current.
+    const page = await store.read(scope, 'convention/worktree-lifetime');
+    expect(page?.meta.status).toBe('proposed');
+    expect(page?.meta.scope).toBe('repo');
+    expect(page?.meta.evidenceCount).toBe(2);
+    expect(await store.proposals(scope)).toHaveLength(0);
+    const search = await second.request({ method: 'tools/call', params: { name: 'knowledge_search', arguments: { query: 'worktree lifetime' } } });
+    expect(JSON.parse(toolText(search)).count).toBe(0);
+  });
+
+  it('keeps a model-supplied page id out of the filesystem', async () => {
+    const projectRoot = tmpDir('vocs-mem-');
+    const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
+    await fs.mkdir(wiki, { recursive: true });
+    const { request } = start(wiki, { VOCS_MEMORY_SESSION_ID: 's_a' });
+    const call = await request({
+      method: 'tools/call',
+      params: {
+        name: 'knowledge_propose',
+        arguments: { title: 'Escape attempt', claim: 'An id is also a path.', body: 'Body long enough to be a real page.', page_id: '../../../../etc/passwd' }
+      }
+    });
+    const result = JSON.parse(toolText(call)) as { targetPageId: string };
+    expect(result.targetPageId).toBe('concept/escape-attempt');
+  });
+
   it('rejects a page that does not exist with a usable error', async () => {
     const projectRoot = tmpDir('vocs-mem-');
     const wiki = path.join(projectRoot, '.vocs-code', 'wiki');
@@ -243,6 +331,18 @@ describe('session history recall', () => {
     const archived = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect', include_archived: true } } });
     const withArchived = JSON.parse(toolText(archived)) as { results: { sessionId: string }[] };
     expect(withArchived.results.map((r) => r.sessionId).sort()).toEqual(['s_a', 's_c']);
+  });
+
+  it('serves nothing when the app did not say which project this is', async () => {
+    const { userData, wiki } = await seedIndex();
+    // Fails closed: without the boundary there is no way to tell this project's sessions from
+    // every other project's, and cross-project recall is exactly what must not happen.
+    const { request } = start(wiki, { VOCS_MEMORY_USER_DATA: userData });
+    const call = await request({ method: 'tools/call', params: { name: 'session_history_search', arguments: { query: 'PTY reconnect' } } });
+    const payload = JSON.parse(toolText(call)) as { available: boolean; reason?: string; results?: unknown[] };
+    expect(payload.available).toBe(false);
+    expect(payload.results).toBeUndefined();
+    expect(payload.reason).toContain('which project');
   });
 
   it('degrades to an explanation when the app has no index yet', async () => {

@@ -126,6 +126,27 @@ describe('anchor resolution', () => {
     expect(urlAsked).toBe(false);
   });
 
+  it('gives up on the whole page within one budget, not one timeout per anchor', async () => {
+    // A page naming a dozen symbols against a server that never answers used to hold the detail
+    // view for minutes: every call had its own 10s timeout and there was no overall deadline.
+    const anchors = Array.from({ length: 12 }, (_, i) => ({ file: `src/main/f${i}.ts`, symbol: `sym${i}` }));
+    const resolve = createGitnexusAnchorResolver({
+      // A black-hole address: the connect attempt hangs rather than refusing.
+      url: async () => 'http://10.255.255.1:65531/mcp',
+      repoName: async () => 'Vocs-Code',
+      log: () => undefined,
+      budgetMs: 1_500
+    });
+    const started = Date.now();
+    const out = await resolve.resolve(scope(), anchors);
+    const elapsed = Date.now() - started;
+
+    expect(out).toHaveLength(12);
+    expect(out.every((a) => a.status === 'unavailable')).toBe(true);
+    // Twelve anchors must not cost twelve timeouts.
+    expect(elapsed).toBeLessThan(12_000);
+  });
+
   it('keeps the page order when only some anchors resolve', async () => {
     const url = await startGraph();
     const out = await resolver(url).resolve(scope(), [

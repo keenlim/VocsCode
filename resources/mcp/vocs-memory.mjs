@@ -7,9 +7,15 @@
  * worktree session, `VOCS_MEMORY_BRANCH_ROOT` at the checkout's own wiki. It reads only markdown:
  * no database, no network, no Electron.
  *
- * Tools are deliberately pull-based and narrow — search, read, related, propose, status — because
- * a wiki that is pasted into every prompt is just context bloat. `propose` writes a proposal file
- * and nothing else; accepting or rejecting one is a human decision in the app.
+ * Six tools, deliberately pull-based and narrow — search, read, related, propose, status, and L3
+ * session-history recall — because a wiki that is pasted into every prompt is just context bloat.
+ *
+ * `propose` enforces the same promotion policy as KnowledgeService (docs/MEMORY.md): a tombstoned
+ * claim is refused on sight, every sighting is counted in `_evidence.json` against the session that
+ * saw it, and a claim independently seen in two sessions becomes a `status: proposed` page — which
+ * is still not servable and still never published. Accepting anything as current stays a human
+ * decision in the app. Without those rules here the policy would only hold on the app's own write
+ * path, not on the one agents actually use.
  *
  * The frontmatter subset here must stay in lockstep with src/shared/knowledge.ts. That pairing is
  * covered by tests/knowledge-mcp.test.ts, which writes with one side and reads with the other.
@@ -366,6 +372,30 @@ function claimKey(claim) {
   return hash.toString(16).padStart(8, '0');
 }
 
+/** Mirrors isKnowledgeId in src/shared/knowledge.ts: a page id is also a path, so it must be strict. */
+export function isKnowledgeId(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 160 && /^[a-z0-9][a-z0-9/_-]*$/.test(value) && !value.includes('..');
+}
+
+/* ──────────────────────── claim ledgers ──────────────────────── */
+
+/** `_evidence.json` / `_rejected.json`, read fresh every time: the app writes them too. */
+async function readLedger(fs, file) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Temp-file + rename, exactly as the app's store writes them, so a crash never tears a ledger. */
+async function writeLedger(fs, file, data) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+  await fs.rename(tmp, file);
+}
+
 function yamlLine(key, value) {
   return `${key}: ${quoteValue(value)}`;
 }
@@ -375,6 +405,11 @@ function quoteValue(value) {
   return /^[A-Za-z0-9 .:/_#@+-]+$/.test(text) ? text : JSON.stringify(text);
 }
 
+/**
+ * Writes the same frontmatter subset src/shared/knowledge.ts parses. Used for both a queued
+ * proposal and a page promoted by repeated evidence; the only difference is `target_page`, which a
+ * page does not carry because it *is* the target.
+ */
 export function serializeProposal(meta, body) {
   const lines = ['---', yamlLine('id', meta.id), yamlLine('title', meta.title), `kind: ${meta.kind}`, 'status: proposed', `scope: ${meta.scope}`];
   if (meta.branch) lines.push(yamlLine('branch', meta.branch));
@@ -395,7 +430,9 @@ export function serializeProposal(meta, body) {
       if (a.symbol) lines.push(`    symbol: ${/^[A-Za-z0-9 .:/_#@+-]+$/.test(a.symbol) ? a.symbol : JSON.stringify(a.symbol)}`);
     }
   }
-  lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.createdAt}`, `updated_by: ${meta.origin}`, '---', '');
+  lines.push(`created_at: ${meta.createdAt}`, `updated_at: ${meta.createdAt}`, `updated_by: ${meta.origin}`);
+  if (meta.evidenceCount) lines.push(`evidence_count: ${meta.evidenceCount}`);
+  lines.push('---', '');
   return `${lines.join('\n')}${String(body).replace(/\s+$/, '')}\n`;
 }
 
@@ -481,7 +518,7 @@ function errorResult(message) {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-export function createMemoryTools({ root, branchRoot, branch, userData = null, projectRoot = null }) {
+export function createMemoryTools({ root, branchRoot, branch, userData = null, projectRoot = null, sessionId = null }) {
   let searchDb = undefined;
   let searchError = null;
   /** Opens search.db read-only on first use; the app's index is the only source of session history. */
@@ -561,27 +598,75 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const body = typeof args.body === 'string' ? args.body.trim() : '';
       if (!title || !claim || !body) return errorResult('knowledge_propose needs a title, a claim and a body.');
       const kind = KINDS.includes(args.kind) ? args.kind : 'concept';
-      const targetPageId = typeof args.page_id === 'string' && args.page_id.trim() ? args.page_id.trim() : `${kind}/${slugify(title)}`;
+      const requested = typeof args.page_id === 'string' ? args.page_id.trim() : '';
+      // The target id is also the page's path once accepted, so an id from the model is validated
+      // before it can reach the filesystem.
+      const targetPageId = requested && isKnowledgeId(requested) ? requested : `${kind}/${slugify(title)}`;
       const id = `${slugify(title).slice(0, 40)}-${claimKey(claim)}`;
+      const key = claimKey(claim);
       const existing = pages.find((p) => p.id === targetPageId);
+      const proposalsDir = path.join(root, '_proposals');
+
+      // Rejections are remembered: a tombstoned claim is refused here, not merely when a human next
+      // opens the panel, so an agent cannot refile it every session.
+      const rejected = await readLedger(fs, path.join(root, '_rejected.json'));
+      if (rejected[key]) {
+        await fs.rm(path.join(proposalsDir, `${id}.md`), { force: true });
+        return textResult({
+          id,
+          targetPageId,
+          status: 'rejected',
+          note: 'This exact claim was reviewed and rejected before, so it was not refiled. Propose it again only with new evidence and a different claim.'
+        });
+      }
+
+      // One sighting per distinct session; two independent sessions promote the claim to a page.
+      const evidenceFile = path.join(root, '_evidence.json');
+      const evidence = await readLedger(fs, evidenceFile);
+      const now = new Date().toISOString();
+      const entry = evidence[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
+      const sessions = sessionId && !entry.sessions.includes(sessionId) ? [...entry.sessions, sessionId] : entry.sessions;
+      const evidenceCount = sessions.length;
+      await fs.mkdir(root, { recursive: true });
+      await writeLedger(fs, evidenceFile, { ...evidence, [key]: { count: evidenceCount, sessions, firstAt: entry.firstAt, lastAt: now } });
+
       const meta = {
         id,
         title,
         kind,
-        scope: existing ? existing.scope : branchRoot ? 'branch' : 'repo',
-        ...(existing ? {} : branchRoot ? { branch } : {}),
+        // Knowledge belongs to the project, not the checkout it was found in: a worktree dies with
+        // its session. Branch scope is only inherited from a page that already declared it.
+        scope: existing ? existing.scope : 'repo',
+        ...(existing && existing.scope === 'branch' && existing.branch ? { branch: existing.branch } : {}),
         claim,
         targetPageId,
         keywords: list(args.keywords, 12),
         sources: sourcesOf({ sources: Array.isArray(args.sources) ? args.sources : [] }),
         anchors: anchorsOf({ anchors: Array.isArray(args.anchors) ? args.anchors : [] }),
-        createdAt: new Date().toISOString(),
-        origin: `agent:mcp`
+        createdAt: now,
+        origin: `agent:mcp`,
+        evidenceCount
       };
-      const dir = path.join(root, '_proposals');
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, `${id}.md`), serializeProposal(meta, body), 'utf8');
-      return textResult({ id, targetPageId, status: 'proposed', note: 'Recorded as a proposal; a human reviews it in the Knowledge panel. Nothing was changed in the wiki.' });
+
+      // A page promoted by repeated evidence is still `status: proposed` — not servable, never
+      // published — so this cannot put unreviewed knowledge in front of another agent.
+      if (!existing && evidenceCount >= 2 && meta.scope === 'repo' && isKnowledgeId(targetPageId)) {
+        const pageFile = path.join(root, `${targetPageId}.md`);
+        await fs.mkdir(path.dirname(pageFile), { recursive: true });
+        await fs.writeFile(pageFile, serializeProposal({ ...meta, id: targetPageId, targetPageId: null }, body), 'utf8');
+        await fs.rm(path.join(proposalsDir, `${id}.md`), { force: true });
+        return textResult({
+          id: targetPageId,
+          targetPageId,
+          status: 'promoted',
+          evidenceCount,
+          note: `This claim has now been seen in ${evidenceCount} independent sessions, so it was promoted to a proposed page awaiting review. It is not served as current knowledge until a human accepts it.`
+        });
+      }
+
+      await fs.mkdir(proposalsDir, { recursive: true });
+      await fs.writeFile(path.join(proposalsDir, `${id}.md`), serializeProposal(meta, body), 'utf8');
+      return textResult({ id, targetPageId, status: 'proposed', evidenceCount, note: 'Recorded as a proposal; a human reviews it in the Knowledge panel. Nothing was changed in the wiki.' });
     }
     if (name === 'knowledge_status') {
       const fs = await import('node:fs/promises');
@@ -596,6 +681,7 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       return textResult({
         wikiDir: root,
         branchWikiDir: branchRoot ?? null,
+        branch: branch ?? null,
         pages: pages.length,
         servable: servableCount,
         awaitingReview: proposalCount,
@@ -606,6 +692,9 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const query = typeof args.query === 'string' ? args.query : '';
       const match = ftsQuery(query);
       if (!match) return errorResult('session_history_search needs a query of at least two letters.');
+      // A privacy boundary fails closed: with no project root there is no way to tell this
+      // project's sessions from every other project's, so nothing is served.
+      if (!projectRoot) return textResult({ available: false, reason: 'Session history is unavailable (the app did not say which project this session belongs to).' });
       const db = await ensureSearchDb();
       if (!db) return textResult({ available: false, reason: `Session history is unavailable (${searchError ?? 'no index'}).` });
       const scope = new Map();
@@ -613,7 +702,7 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
         if (!session || typeof session.id !== 'string') continue;
         const root = session.config && typeof session.config.projectRoot === 'string' ? session.config.projectRoot : null;
         // The same project boundary every other memory surface uses: no cross-project recall.
-        if (projectRoot && root !== projectRoot) continue;
+        if (root !== projectRoot) continue;
         if (session.archived === true && args.include_archived !== true) continue;
         scope.set(session.id, { title: typeof session.title === 'string' ? session.title : session.id });
       }
@@ -664,10 +753,10 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
 
 /* ────────────────────────────── MCP loop ───────────────────────────────── */
 
-export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, userData = null, projectRoot = null, log = () => {} } = {}) {
+export async function runMemoryServer({ input, output, root, branchRoot = null, branch = null, userData = null, projectRoot = null, sessionId = null, log = () => {} } = {}) {
   if (!input || !output) throw new Error('runMemoryServer: input and output streams are required');
   if (!root) throw new Error('runMemoryServer: a wiki root is required');
-  const call = createMemoryTools({ root, branchRoot, branch, userData, projectRoot });
+  const call = createMemoryTools({ root, branchRoot, branch, userData, projectRoot, sessionId });
   let buffer = '';
   const write = (message) => {
     try {
@@ -758,6 +847,7 @@ if (isMain) {
     branch: process.env.VOCS_MEMORY_BRANCH || null,
     userData: process.env.VOCS_MEMORY_USER_DATA || null,
     projectRoot: process.env.VOCS_MEMORY_PROJECT_ROOT || null,
+    sessionId: process.env.VOCS_MEMORY_SESSION_ID || null,
     log: (message) => console.error(`vocs-memory: ${message}`)
   });
 }

@@ -23,6 +23,7 @@ import type {
 } from '../shared/types';
 import { autoCompactionThresholdLabel, hasReachedAutoCompactionThreshold } from '../shared/compaction';
 import { HARNESS_BY_ID } from '../shared/harness-meta';
+import { knowledgePreamble } from '../shared/knowledge';
 import { modelName } from '../shared/model-names';
 import { createAdapter } from './harness/registry';
 import { renderForkContext } from './fork-context';
@@ -346,11 +347,13 @@ export class SessionManager {
       queued: 0
     };
     // Layer 2: prime the session with the project's curated knowledge digest. The digest names
-    // pages rather than pasting them, and never outranks the project's own instruction files.
+    // pages rather than pasting them, and never outranks the project's own instruction files. It is
+    // stored beside the config, not merged into it: `config` is copied wholesale when a session is
+    // reused (New session on branch, Review PR), and a copied digest would be appended twice.
     if (this.deps.knowledgeDigest && this.settings().knowledge?.prime !== false) {
       try {
         const digest = await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch });
-        if (digest) meta.config = { ...meta.config, appendSystemPrompt: [cfg.appendSystemPrompt?.trim(), digest].filter(Boolean).join('\n\n') };
+        if (digest) meta.knowledgeDigest = digest;
       } catch (e) {
         this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
       }
@@ -551,7 +554,7 @@ export class SessionManager {
       mcpServers: () => {
         const m = this.get(id) ?? meta;
         return resolveForSession(
-          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch },
+          { settings: this.settings(), cwd: m.cwd, projectRoot: m.config.projectRoot, harness: m.config.harness, branch: m.worktreeBranch, sessionId: id },
           {
             getSecret: this.deps.getSecret,
             sharedGitnexus: this.deps.sharedGitnexus,
@@ -709,8 +712,30 @@ export class SessionManager {
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
     if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(await this.withForkContext(id, input));
+    await active.adapter.send(await this.withKnowledgePreamble(id, await this.withForkContext(id, input)));
     await this.clearForkContext(id);
+    await this.markKnowledgePrimed(id);
+  }
+
+  /**
+   * Layer 2 push for harnesses with no system-prompt hook: the digest rides the session's first
+   * dispatched message. The transcript item was already recorded from the user's own text, so this
+   * never shows up as something they typed.
+   */
+  private async withKnowledgePreamble(id: string, input: UserInput): Promise<UserInput> {
+    const meta = this.get(id);
+    if (!meta?.knowledgeDigest || meta.knowledgePrimed) return input;
+    if (HARNESS_BY_ID[meta.config.harness]?.capabilities.systemPrompt) return input;
+    return { ...input, text: `${knowledgePreamble(meta.knowledgeDigest)}\n\n${input.text}` };
+  }
+
+  /** Only after the harness accepted the message, so a failed send retries with the preamble. */
+  private async markKnowledgePrimed(id: string): Promise<void> {
+    const meta = this.get(id);
+    if (!meta?.knowledgeDigest || meta.knowledgePrimed) return;
+    if (HARNESS_BY_ID[meta.config.harness]?.capabilities.systemPrompt) return;
+    meta.knowledgePrimed = true;
+    await this.deps.store.upsert(meta);
   }
 
   /** Prefixes the first message after a cross-harness fork with the handed-off transcript. */

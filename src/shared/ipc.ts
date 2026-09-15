@@ -277,6 +277,8 @@ export interface IpcContract {
 
   /** Layer 2 project knowledge for one session's project: pages, proposals and review state. */
   'knowledge:view': [{ sessionId: string }, KnowledgeView];
+  /** Create the project's wiki directory, which is what switches the MCP server and episodes on. */
+  'knowledge:init': [{ sessionId: string }, KnowledgeView];
   /** One page with its provenance, related pages and staleness. */
   'knowledge:read': [{ sessionId: string; id: string }, KnowledgePageDetail | null];
   /** Scored search over the project's pages (accepted pages only unless asked otherwise). */

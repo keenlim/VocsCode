@@ -28,8 +28,13 @@ export interface GitnexusAnchorDeps {
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
   /** How long a resolution stays fresh. Default 5 minutes. */
   ttlMs?: number;
+  /** Total wall-clock budget for one `resolve()` call, however many anchors it covers. Default 8s. */
+  budgetMs?: number;
   now?: () => number;
 }
+
+/** How many `context` calls are in flight at once; a wiki page names a handful of symbols. */
+const ANCHOR_CONCURRENCY = 4;
 
 interface ContextReply {
   status?: string;
@@ -87,22 +92,35 @@ export function createGitnexusAnchorResolver(deps: GitnexusAnchorDeps): AnchorRe
       }
 
       if (pending.length) {
+        // One overall deadline, not one per anchor: a page naming a dozen symbols against a wedged
+        // server used to hold the detail view for minutes, since every call had its own 10s budget.
+        const deadline = Date.now() + (deps.budgetMs ?? 8_000);
+        const queue = [...pending];
         let client: ConnectedMcpServer | null = null;
         try {
-          client = await connectServer({ id: 'gitnexus', transport: 'http', url });
-          for (const anchor of pending) {
-            const result = await client.call('context', { repo, name: anchor.symbol, file: anchor.file }, { timeoutMs: 10_000 });
-            const value = parseContextReply(result.output, anchor);
-            resolved.set(anchorKey(anchor), value);
-            cache.set(cacheKey(repo, anchor), { at: now, value });
-          }
+          // The connect is inside the budget too; a hanging handshake is the slowest failure here.
+          client = await connectServer({ id: 'gitnexus', transport: 'http', url }, { timeoutMs: Math.max(500, deadline - Date.now()) });
+          const worker = async (): Promise<void> => {
+            for (;;) {
+              const anchor = queue.shift();
+              if (!anchor) return;
+              const left = deadline - Date.now();
+              if (left <= 0) return; // the fallback below answers whatever is left
+              const result = await client!.call('context', { repo, name: anchor.symbol, file: anchor.file }, { timeoutMs: Math.min(10_000, left) });
+              const value = parseContextReply(result.output, anchor);
+              resolved.set(anchorKey(anchor), value);
+              cache.set(cacheKey(repo, anchor), { at: now, value });
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(ANCHOR_CONCURRENCY, queue.length) }, worker));
         } catch (e) {
           deps.log('warn', `knowledge: anchor resolution failed: ${errorMessage(e)}`);
-          for (const anchor of pending) {
-            if (!resolved.has(anchorKey(anchor))) resolved.set(anchorKey(anchor), { ...anchor, status: 'unavailable', note: 'GitNexus did not answer.' });
-          }
         } finally {
           await client?.close();
+        }
+        // Anything the budget or a failure left over is reported as unchecked, never cached.
+        for (const anchor of pending) {
+          if (!resolved.has(anchorKey(anchor))) resolved.set(anchorKey(anchor), { ...anchor, status: 'unavailable', note: 'GitNexus did not answer in time.' });
         }
       }
 

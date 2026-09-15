@@ -5,6 +5,7 @@ import type { ChildProcess } from 'node:child_process';
 import type { EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, SubagentCompletion, SubagentCost, SubagentRunUpdate, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { EFFORT_LEVELS, isEffortLevel } from '../../shared/harness-meta';
 import { modelName } from '../../shared/model-names';
+import { appendedSystemPrompt } from '../../shared/knowledge';
 import { LineSplitter, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { shutdownChild, spawnTool, usesWindowsCommandShim } from './spawn';
 import type { HarnessAdapter, HarnessContext } from './types';
@@ -253,8 +254,10 @@ export class PiAdapter implements HarnessAdapter {
     }
     const level = piThinkingLevel(intendedEffort);
     if (level) args.push('--thinking', level);
-    if (meta.config.appendSystemPrompt) {
-      await appendSystemPrompt(args, meta.config.appendSystemPrompt, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
+    // The user's own addition plus the Layer 2 knowledge digest; subagent children inherit it.
+    const append = appendedSystemPrompt(meta);
+    if (append) {
+      await appendSystemPrompt(args, append, bin.path, path.join(sessionDir, 'append-system-prompt.txt'));
     }
     await appendSystemPrompt(args, PI_TOOL_PROMPT, bin.path, path.join(sessionDir, 'tool-system-prompt.txt'));
     args.push(...(s.pi.extraArgs ?? []));

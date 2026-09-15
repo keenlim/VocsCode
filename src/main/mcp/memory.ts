@@ -2,7 +2,7 @@
  * The Layer 2 built-in MCP server: one stdio process per session serving the project wiki.
  *
  * Like GitNexus, the app owns the definition and injects it through the normal resolver, so every
- * harness with `inject`/`client` support gets the same five tools with no adapter code. Unlike
+ * harness with `inject`/`client` support gets the same six tools with no adapter code. Unlike
  * GitNexus there is no shared process and no cross-repo surface: the wiki lives in the project
  * root, and a worktree session additionally sees its own checkout's wiki root for branch-scope
  * pages. A project with no wiki gets no server at all rather than a tool that answers nothing.
@@ -56,7 +56,11 @@ interface MemoryHostDeps {
  * GitNexus proxy does) plus the two wiki roots. Null when the repo has no wiki yet, or the app was
  * built without the script.
  */
-export function memoryServerDef(scope: { projectRoot: string; cwd: string; branch?: string }, def: McpServerDef, deps: MemoryHostDeps): McpServerDef | null {
+export function memoryServerDef(
+  scope: { projectRoot: string; cwd: string; branch?: string; sessionId?: string },
+  def: McpServerDef,
+  deps: MemoryHostDeps
+): McpServerDef | null {
   if (!deps.memoryServerPath) return null;
   const node = which('node');
   const branchRoot = memoryBranchRoot(scope);
@@ -71,7 +75,10 @@ export function memoryServerDef(scope: { projectRoot: string; cwd: string; branc
       VOCS_MEMORY_PROJECT_ROOT: scope.projectRoot,
       ...(branchRoot ? { VOCS_MEMORY_BRANCH_ROOT: branchRoot } : {}),
       ...(scope.branch ? { VOCS_MEMORY_BRANCH: scope.branch } : {}),
-      ...(deps.memoryUserData ? { VOCS_MEMORY_USER_DATA: deps.memoryUserData } : {})
+      ...(deps.memoryUserData ? { VOCS_MEMORY_USER_DATA: deps.memoryUserData } : {}),
+      // The promotion rule counts *independent* sessions, so a proposal has to say which one it
+      // came from; without this every sighting would look like the same session.
+      ...(scope.sessionId ? { VOCS_MEMORY_SESSION_ID: scope.sessionId } : {})
     }
   };
 }

@@ -43,7 +43,7 @@ function view(over: Partial<KnowledgeView> = {}): KnowledgeView {
     projectRoot: 'G:/repo',
     cwd: 'G:/repo',
     wikiDir: 'G:/repo/.vocs-code/wiki',
-    status: { hasWiki: true, pages: 2, needsReview: 1, proposals: 1, stale: 0, indexed: false },
+    status: { hasWiki: true, pages: 2, needsReview: 1, proposals: 1, stale: 0 },
     pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', status: 'proposed', authority: 5 })],
     proposals: [summary({ id: 'pty-guard-1a2b3c4d', title: 'PTY guard', status: 'proposed', authority: 5, targetPageId: 'gotchas/pty', evidenceCount: 2 })],
     rejectedClaims: [],
@@ -82,7 +82,7 @@ describe('Project knowledge panel', () => {
   it('accepts a proposal only through the explicit button', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:review') return view({ proposals: [], status: { hasWiki: true, pages: 2, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+      if (channel === 'knowledge:review') return view({ proposals: [], status: { hasWiki: true, pages: 2, needsReview: 0, proposals: 0, stale: 0 } });
       return undefined;
     });
     await act(async () => {
@@ -231,7 +231,7 @@ describe('Project knowledge panel', () => {
 
   it('offers generation when the project has no wiki yet', async () => {
     invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+      if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0 } });
       return undefined;
     });
     await act(async () => {
@@ -251,7 +251,6 @@ describe('Project knowledge panel', () => {
             needsReview: 0,
             proposals: 0,
             stale: 0,
-            indexed: false,
             job: { mode: 'bootstrap', state: 'failed', at: new Date().toISOString(), model: 'deepseek/deepseek-flash', error: 'The background model (deepseek/deepseek-flash) did not answer.' }
           }
         });

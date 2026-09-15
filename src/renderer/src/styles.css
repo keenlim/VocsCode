@@ -5860,6 +5860,16 @@ body.resizing {
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+.knowledge-rejected summary {
+  cursor: pointer;
+}
+.knowledge-rejected ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 
 /* ---- Web shell + small screens (docs/REMOTE-ACCESS.md P1) ---- */
 

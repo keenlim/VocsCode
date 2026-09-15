@@ -15,6 +15,7 @@ import {
   KNOWLEDGE_PUBLISH_DIR,
   authorityOf,
   claimKey,
+  isPendingStatus,
   isSameClaim,
   isServable,
   knowledgeSlug,
@@ -63,7 +64,6 @@ export interface KnowledgeProposeResult {
 }
 
 const DEFAULT_SETTINGS: KnowledgeSettings = { prime: true, autoDistill: true };
-const MAX_PAGES = 500;
 
 export class KnowledgeService {
   readonly store: KnowledgeStore;
@@ -115,7 +115,6 @@ export class KnowledgeService {
       needsReview: pages.filter((p) => p.meta.status !== 'deprecated' && p.meta.status !== 'superseded' && (!p.meta.review || p.meta.review.state !== 'reviewed')).length,
       proposals: proposals.length,
       stale,
-      indexed: false,
       ...(updated ? { lastUpdated: updated } : {}),
       ...(running ? { generating: true } : {}),
       ...(job ? { job } : {})
@@ -143,8 +142,14 @@ export class KnowledgeService {
     return (await this.store.load(scope)).map((p) => this.summarize(p)).sort(byKindThenUpdated);
   }
 
+  /**
+   * One page, or — when the id belongs to nothing in the wiki — the queued proposal with that id.
+   * The panel's Preview button on a review card passes a proposal id, and proposals deliberately
+   * live outside the page tree, so without the fallback Preview could only ever render nothing.
+   */
   async detail(scope: KnowledgeScope, id: string): Promise<KnowledgePageDetail | null> {
-    const page = await this.store.read(scope, id);
+    const stored = await this.store.read(scope, id);
+    const page: KnowledgePage | null = stored ? toPage(stored) : ((await this.store.proposals(scope)).find((p) => p.meta.id === id) ?? null);
     if (!page) return null;
     const all = await this.store.load(scope);
     const relatedIds = new Set(page.meta.related);
@@ -154,7 +159,7 @@ export class KnowledgeService {
     const related = all.filter((p) => relatedIds.has(p.meta.id) && p.meta.id !== id).map((p) => this.summarize(p));
     const { stale, reasons } = await this.store.staleness(scope, page);
     const anchors = this.deps.anchors ? await this.deps.anchors.resolve(scope, page.meta.anchors) : page.meta.anchors.map((a) => ({ ...a, status: 'unavailable' as const, note: 'Anchor resolution is unavailable.' }));
-    return { page: toPage(page), related, anchors, stale, staleReasons: reasons };
+    return { page, related, anchors, stale, staleReasons: reasons };
   }
 
   /**
@@ -316,7 +321,9 @@ export class KnowledgeService {
     if (!page) return null;
     const claim = page.meta.claim ?? page.meta.title;
     if (action === 'reject') {
-      await this.store.deletePage(scope, id);
+      // Tombstone only what was really removed: a claim refused for a page still on disk would be
+      // un-refileable *and* still served, and the panel would have said "Discarded".
+      if (!(await this.store.deletePage(scope, id))) throw new Error(`Could not discard "${id}": its file could not be removed from this project's wiki.`);
       await this.store.reject(scope, claim, opts.by);
       this.deps.log('info', `knowledge: page discarded (${id})`);
       return null;
@@ -334,8 +341,9 @@ export class KnowledgeService {
 
   /**
    * Accepts every candidate at once: proposals through the normal review path (supersession and
-   * evidence handling still apply), then every non-current page in place. Historical pages are left
-   * alone — accepting everything must not resurrect a deprecated or superseded one.
+   * evidence handling still apply), then every pending page in place. Only `draft` and `proposed`
+   * count as pending — deprecated and superseded pages are history (accepting everything must not
+   * resurrect them), and `uncertain` is a deliberate judgement a bulk action must not overwrite.
    */
   async acceptAll(scope: KnowledgeScope, opts: { by?: string } = {}): Promise<{ accepted: number }> {
     let accepted = 0;
@@ -343,16 +351,28 @@ export class KnowledgeService {
       if (await this.reviewProposal(scope, proposal, 'accept', { by: opts.by })) accepted++;
     }
     for (const page of await this.store.load(scope)) {
-      if (page.meta.status === 'current' || page.meta.status === 'deprecated' || page.meta.status === 'superseded') continue;
+      if (!isPendingStatus(page.meta.status)) continue;
       if (await this.reviewPage(scope, page.meta.id, 'accept', { by: opts.by })) accepted++;
     }
     this.deps.log('info', `knowledge: accepted ${accepted} item(s)`);
     return { accepted };
   }
 
-  /** Copies reviewed pages into the tracked `docs/wiki/` path; committing them stays the user's act. */
+  /** Creates the wiki directory for a project that has none, so the pull/push seams switch on. */
+  async createWiki(scope: KnowledgeScope): Promise<KnowledgeView> {
+    await this.store.createWiki(scope);
+    this.deps.log('info', `knowledge: wiki created at ${this.store.repoDir(scope)}`);
+    return this.view(scope);
+  }
+
+  /**
+   * Copies reviewed pages into the tracked `docs/wiki/` path; committing them stays the user's act.
+   * The destination is the session's own checkout, not the project root: publishing from a worktree
+   * must not drop untracked files into the main checkout on whatever branch it happens to be on,
+   * where the user cannot commit them alongside the work that produced them.
+   */
   async publish(scope: KnowledgeScope, ids: string[]): Promise<{ ok: boolean; dir: string; written: string[]; error?: string }> {
-    const dir = path.join(scope.projectRoot, KNOWLEDGE_PUBLISH_DIR);
+    const dir = path.join(scope.cwd, KNOWLEDGE_PUBLISH_DIR);
     const written: string[] = [];
     try {
       for (const id of ids.slice(0, 50)) {
@@ -362,7 +382,7 @@ export class KnowledgeService {
         await fs.mkdir(path.dirname(dest), { recursive: true });
         const text = `${serializeForPublish(page)}\n`;
         await writeFileAtomic(dest, text);
-        written.push(path.relative(scope.projectRoot, dest).replace(/\\/g, '/'));
+        written.push(path.relative(scope.cwd, dest).replace(/\\/g, '/'));
       }
       this.deps.log('info', `knowledge: published ${written.length} page(s) to ${KNOWLEDGE_PUBLISH_DIR}`);
       return { ok: true, dir, written };

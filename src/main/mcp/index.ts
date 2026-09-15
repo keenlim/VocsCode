@@ -44,6 +44,8 @@ export interface SessionScope {
   harness: HarnessId;
   /** The worktree's branch name, when the session runs in one (branch-scope wiki pages). */
   branch?: string;
+  /** Which session this is; `vocs-memory` counts evidence per distinct session. */
+  sessionId?: string;
 }
 
 function stateFor(settings: AppSettings, projectRoot: string): McpProjectState {

@@ -76,10 +76,8 @@ function isInside(parent: string, child: string): boolean {
 export class KnowledgeStore {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly ignored = new Set<string>();
-  private evidence: Record<string, EvidenceEntry> | null = null;
-  private rejected: Record<string, RejectedEntry> | null = null;
-  private evidenceFile: string | null = null;
-  private rejectedFile: string | null = null;
+  /** `_evidence.json` / `_rejected.json` by path, with the stat stamp they were read at. */
+  private readonly ledgers = new Map<string, { stamp: string; data: Record<string, unknown> }>();
 
   /** The project's shared wiki; every session of the project writes and reads here. */
   repoDir(scope: KnowledgeScope): string {
@@ -106,6 +104,18 @@ export class KnowledgeStore {
 
   async hasWiki(scope: KnowledgeScope): Promise<boolean> {
     return exists(this.repoDir(scope));
+  }
+
+  /**
+   * Creates the project's wiki directory. Until it exists the `vocs-memory` MCP server is not
+   * injected and episodes are not recorded, so a project whose docs are too thin for bootstrap
+   * needs a way to opt in that does not depend on a model.
+   */
+  async createWiki(scope: KnowledgeScope): Promise<string> {
+    const dir = this.repoDir(scope);
+    await this.ensureIgnored(scope);
+    await ensureDir(dir);
+    return dir;
   }
 
   /** Repo pages, then branch pages overriding same-id entries: the merged view a session sees. */
@@ -152,7 +162,11 @@ export class KnowledgeStore {
     return this.write(scope, { ...page.meta, ...patch, id: page.meta.id }, page.body);
   }
 
-  /** Removes one page from whichever scope holds it; used when a draft is discarded. */
+  /**
+   * Removes one page from whichever scope holds it; used when a draft is discarded. The unlink must
+   * actually remove a file for the scope to count as the owner — `rm({ force: true })` resolves for
+   * a missing path, which on a branch session reported success before the repo wiki was ever tried.
+   */
   async deletePage(scope: KnowledgeScope, id: string): Promise<boolean> {
     if (!isKnowledgeId(id)) return false;
     for (const dir of [this.branchDir(scope), this.repoDir(scope)]) {
@@ -160,12 +174,12 @@ export class KnowledgeStore {
       const file = path.join(dir, `${id}.md`);
       if (!isInside(dir, file)) continue;
       try {
-        await fs.rm(file, { force: true });
-        this.cache.delete(file);
-        return true;
+        await fs.unlink(file);
       } catch {
-        /* try the next scope */
+        continue; // not in this scope (or unreadable): try the next one
       }
+      this.cache.delete(file);
+      return true;
     }
     return false;
   }
@@ -174,9 +188,8 @@ export class KnowledgeStore {
     const dir = this.proposalsDir(scope);
     const out: KnowledgePage[] = [];
     for (const abs of await this.mdFiles(dir)) {
-      const rel = path.relative(dir, abs).replace(/\\/g, '/');
-      const page = await this.readFile(abs);
-      if (page) out.push({ meta: page.meta, body: page.body, path: rel });
+      const page = await this.readFile(abs, dir);
+      if (page) out.push({ meta: page.meta, body: page.body, path: page.path });
     }
     return out.sort((a, b) => (b.meta.updatedAt ?? b.meta.createdAt ?? '').localeCompare(a.meta.updatedAt ?? a.meta.createdAt ?? ''));
   }
@@ -201,57 +214,69 @@ export class KnowledgeStore {
   /* Claim ledger: evidence + rejection memory                          */
   /* ------------------------------------------------------------------ */
 
-  private async ledgerFiles(scope: KnowledgeScope): Promise<{ evidence: string; rejected: string }> {
-    const dir = this.repoDir(scope);
-    return { evidence: path.join(dir, '_evidence.json'), rejected: path.join(dir, '_rejected.json') };
+  private evidenceFileFor(scope: KnowledgeScope): string {
+    return path.join(this.repoDir(scope), '_evidence.json');
   }
 
-  private async loadLedgers(scope: KnowledgeScope): Promise<void> {
-    const { evidence, rejected } = await this.ledgerFiles(scope);
-    if (this.evidenceFile !== evidence) {
-      this.evidence = await readJson<Record<string, EvidenceEntry>>(evidence, {});
-      this.evidenceFile = evidence;
+  private rejectedFileFor(scope: KnowledgeScope): string {
+    return path.join(this.repoDir(scope), '_rejected.json');
+  }
+
+  /**
+   * Both ledgers are re-read whenever the file on disk changed. The `vocs-memory` MCP server is a
+   * separate process writing the same two files, so a cache keyed only by path would let the app
+   * overwrite an agent's evidence (or miss a tombstone it just recorded).
+   */
+  private async ledger<T>(file: string): Promise<Record<string, T>> {
+    let stamp = 'absent';
+    try {
+      const stat = await fs.stat(file);
+      stamp = `${stat.mtimeMs}:${stat.size}`;
+    } catch {
+      /* no ledger written yet */
     }
-    if (this.rejectedFile !== rejected) {
-      this.rejected = await readJson<Record<string, RejectedEntry>>(rejected, {});
-      this.rejectedFile = rejected;
-    }
+    const cached = this.ledgers.get(file);
+    if (cached && cached.stamp === stamp) return cached.data as Record<string, T>;
+    const data = await readJson<Record<string, T>>(file, {});
+    this.ledgers.set(file, { stamp, data: data as Record<string, unknown> });
+    return data;
+  }
+
+  private async writeLedger(scope: KnowledgeScope, file: string, data: Record<string, unknown>): Promise<void> {
+    await ensureDir(this.repoDir(scope));
+    await writeFileAtomic(file, JSON.stringify(data, null, 2));
+    this.ledgers.delete(file); // the next read re-stats rather than trusting our own write
   }
 
   /** Records one sighting of a claim; returns the number of distinct sessions that have seen it. */
   async recordEvidence(scope: KnowledgeScope, claim: string, sessionId?: string): Promise<number> {
-    await this.loadLedgers(scope);
+    const file = this.evidenceFileFor(scope);
+    const evidence = await this.ledger<EvidenceEntry>(file);
     const key = claimKey(claim);
     const now = new Date().toISOString();
-    const entry = this.evidence?.[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
+    const entry = evidence[key] ?? { count: 0, sessions: [], firstAt: now, lastAt: now };
     const sessions = sessionId && !entry.sessions.includes(sessionId) ? [...entry.sessions, sessionId] : entry.sessions;
     const next: EvidenceEntry = { count: sessions.length, sessions, firstAt: entry.firstAt, lastAt: now };
-    this.evidence = { ...(this.evidence ?? {}), [key]: next };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.evidenceFile!, JSON.stringify(this.evidence, null, 2));
+    await this.writeLedger(scope, file, { ...evidence, [key]: next });
     return next.count;
   }
 
   async evidenceFor(scope: KnowledgeScope, claim: string): Promise<number> {
-    await this.loadLedgers(scope);
-    return this.evidence?.[claimKey(claim)]?.count ?? 0;
+    return (await this.ledger<EvidenceEntry>(this.evidenceFileFor(scope)))[claimKey(claim)]?.count ?? 0;
   }
 
   async reject(scope: KnowledgeScope, claim: string, by?: string): Promise<void> {
-    await this.loadLedgers(scope);
-    this.rejected = { ...(this.rejected ?? {}), [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } };
-    await ensureDir(this.repoDir(scope));
-    await writeFileAtomic(this.rejectedFile!, JSON.stringify(this.rejected, null, 2));
+    const file = this.rejectedFileFor(scope);
+    const rejected = await this.ledger<RejectedEntry>(file);
+    await this.writeLedger(scope, file, { ...rejected, [claimKey(claim)]: { claim, at: new Date().toISOString(), ...(by ? { by } : {}) } });
   }
 
   async rejectedClaims(scope: KnowledgeScope): Promise<string[]> {
-    await this.loadLedgers(scope);
-    return Object.values(this.rejected ?? {}).map((r) => r.claim);
+    return Object.values(await this.ledger<RejectedEntry>(this.rejectedFileFor(scope))).map((r) => r.claim);
   }
 
   async isRejected(scope: KnowledgeScope, claim: string): Promise<boolean> {
-    await this.loadLedgers(scope);
-    return !!this.rejected?.[claimKey(claim)];
+    return !!(await this.ledger<RejectedEntry>(this.rejectedFileFor(scope)))[claimKey(claim)];
   }
 
   /* ------------------------------------------------------------------ */
@@ -266,25 +291,35 @@ export class KnowledgeStore {
     await fs.appendFile(file, `${JSON.stringify(episode)}\n`, 'utf8');
   }
 
+  /**
+   * Newest episode first. Both orderings matter: the daily files are read newest day first, and the
+   * rows *inside* a file are reversed because episodes are appended oldest-first. Distillation reads
+   * `[0]` as "the most recent outcome", so getting this backwards made it reason about the first
+   * commit of the day for the rest of it.
+   */
   async readEpisodes(scope: KnowledgeScope, limit = 40): Promise<KnowledgeEpisode[]> {
     const dir = this.observationsDir(scope);
     if (!(await exists(dir))) return [];
     const files = (await fs.readdir(dir)).filter((f) => f.endsWith('.jsonl')).sort().reverse();
     const out: KnowledgeEpisode[] = [];
     for (const file of files) {
-      const rows = (await fs.readFile(path.join(dir, file), 'utf8')).split('\n');
-      for (const row of rows) {
+      const rows: KnowledgeEpisode[] = [];
+      for (const row of (await fs.readFile(path.join(dir, file), 'utf8')).split('\n')) {
         if (!row.trim()) continue;
         try {
           const parsed = JSON.parse(row) as KnowledgeEpisode;
-          if (parsed && typeof parsed === 'object' && typeof parsed.kind === 'string') out.push(parsed);
+          if (parsed && typeof parsed === 'object' && typeof parsed.kind === 'string') rows.push(parsed);
         } catch {
           /* a torn line is not worth failing a distillation over */
         }
-        if (out.length >= limit) return out;
+      }
+      rows.reverse();
+      for (const episode of rows) {
+        out.push(episode);
+        if (out.length >= limit) return sortEpisodes(out);
       }
     }
-    return out;
+    return sortEpisodes(out);
   }
 
   /* ------------------------------------------------------------------ */
@@ -334,20 +369,10 @@ export class KnowledgeStore {
     }
   }
 
-  /** Deletes the in-memory snapshot for one project; callers use it after an external edit. */
-  invalidate(scope: KnowledgeScope): void {
-    const dirs = [this.repoDir(scope), this.branchDir(scope)].filter((d): d is string => !!d);
-    for (const key of [...this.cache.keys()]) if (dirs.some((d) => isInside(d, key) || key.startsWith(d))) this.cache.delete(key);
-    this.evidence = null;
-    this.rejected = null;
-    this.evidenceFile = null;
-    this.rejectedFile = null;
-  }
-
   private async walkDir(dir: string): Promise<StoredPage[]> {
     const out: StoredPage[] = [];
     for (const abs of await this.mdFiles(dir)) {
-      const page = await this.readFile(abs);
+      const page = await this.readFile(abs, dir);
       if (page) out.push(page);
     }
     return out;
@@ -376,7 +401,8 @@ export class KnowledgeStore {
     return out;
   }
 
-  private async readFile(abs: string): Promise<StoredPage | null> {
+  /** `scopeDir` is the wiki root the file was found under, so `path` stays the id-relative one. */
+  private async readFile(abs: string, scopeDir: string): Promise<StoredPage | null> {
     let stat: import('node:fs').Stats;
     try {
       stat = await fs.stat(abs);
@@ -388,14 +414,19 @@ export class KnowledgeStore {
     let page: StoredPage | null = null;
     try {
       const text = await fs.readFile(abs, 'utf8');
-      const parsed = parseKnowledgeDocument(text, path.basename(abs));
-      if (parsed) page = { ...parsed, abs, scopeDir: path.dirname(abs), mtimeMs: stat.mtimeMs };
+      const parsed = parseKnowledgeDocument(text, path.relative(scopeDir, abs).replace(/\\/g, '/'));
+      if (parsed) page = { ...parsed, abs, scopeDir, mtimeMs: stat.mtimeMs };
     } catch {
       page = null;
     }
     this.cache.set(abs, { mtimeMs: stat.mtimeMs, size: stat.size, page });
     return page;
   }
+}
+
+/** Newest first, by the episode's own timestamp; a torn or back-dated row cannot reorder the list. */
+function sortEpisodes(episodes: KnowledgeEpisode[]): KnowledgeEpisode[] {
+  return [...episodes].sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''));
 }
 
 /** Serializes only the pages the caller asked for, from a summary list; shared with publish. */

@@ -777,6 +777,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     return k.view(knowledgeScopeOf(sessionId));
   });
+  handle('knowledge:init', ({ sessionId }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    return k.createWiki(knowledgeScopeOf(sessionId));
+  });
   handle('knowledge:read', ({ sessionId, id }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');

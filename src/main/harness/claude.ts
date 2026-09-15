@@ -16,6 +16,7 @@ import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, Permiss
 import { toClaude } from '../mcp/effective';
 import { findContextWindow } from '../models/static-models';
 import { anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
+import { appendedSystemPrompt } from '../../shared/knowledge';
 import { AsyncQueue, deferred, errorMessage, shortId, truncate, withTimeout, type Deferred } from '../util/async';
 import { makeFileChange } from '../util/file-changes';
 import { TurnUsageTracker } from '../util/turn-usage';
@@ -148,6 +149,8 @@ export class ClaudeAdapter implements HarnessAdapter {
     const meta = this.ctx.session();
     const cfg = meta.config;
     const mode = this.ctx.permissionMode();
+    // The user's own addition plus the Layer 2 knowledge digest (src/shared/knowledge.ts).
+    const append = appendedSystemPrompt(meta);
     const bin = this.ctx.runtime.resolve('claude');
     const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
     // Never let this app's own Claude Code host variables leak into a nested session.
@@ -165,8 +168,8 @@ export class ClaudeAdapter implements HarnessAdapter {
       env,
       abortController: this.abort,
       settingSources: s.claude.settingSources,
-      systemPrompt: cfg.appendSystemPrompt
-        ? { type: 'preset', preset: 'claude_code', append: cfg.appendSystemPrompt }
+      systemPrompt: append
+        ? { type: 'preset', preset: 'claude_code', append }
         : { type: 'preset', preset: 'claude_code' },
       maxBudgetUsd: cfg.maxBudgetUsd,
       enableFileCheckpointing: true,

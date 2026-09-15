@@ -23,6 +23,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      // --append-system-prompt, written to a file when the CLI is a Windows shim.
+      systemPrompt: true,
       // Injected through the bundled vocs-code-mcp extension, which registers each MCP tool with pi.
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
@@ -51,6 +53,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      // systemPrompt: { type: 'preset', preset: 'claude_code', append }
+      systemPrompt: true,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -78,6 +82,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: false,
+      // turn/start takes no instruction field; the digest rides the first turn instead.
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -105,6 +111,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: false,
       costReporting: false,
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -132,6 +139,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      systemPrompt: false,
       mcp: 'inherit',
       permissionModes: ['plan', 'auto', 'full-auto'],
       modelSource: 'harness'
@@ -159,6 +167,8 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: false,
       plan: true,
       costReporting: false,
+      // session/new carries cwd and MCP servers only.
+      systemPrompt: false,
       mcp: 'inject',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'acp-config'
@@ -185,6 +195,7 @@ export const HARNESSES: HarnessDescriptor[] = [
       fork: true,
       plan: true,
       costReporting: true,
+      systemPrompt: true,
       mcp: 'client',
       permissionModes: ['ask', 'accept-edits', 'plan', 'auto', 'full-auto'],
       modelSource: 'providers'
