@@ -495,6 +495,8 @@ export interface UsageDayDimensions {
   harness: Record<string, UsageSlice>;
   /** Keyed `provider/model`, attributed to the model active when the usage was reported. */
   model: Record<string, UsageSlice>;
+  /** Keyed `harness|provider/model`, attributed to both when the usage was reported. */
+  harnessModel: Record<string, UsageSlice>;
   project: Record<string, UsageSlice>;
   tool: Record<string, ToolUsage>;
   /** Per-tool call counts keyed by model (`provider/model`), attributed to the model active when the call ran. */
@@ -631,6 +633,8 @@ export interface AnalyticsSummary {
   previous?: UsageCounters;
   byHarness: UsageBucket[];
   byModel: UsageBucket[];
+  /** Keyed `harness|provider/model`; all time this attributes each session to its last model. */
+  byHarnessModel: UsageBucket[];
   byProject: UsageBucket[];
   /** Effective $/M tokens and $/call per model, sorted by spend. */
   modelRates: ModelRateRow[];
