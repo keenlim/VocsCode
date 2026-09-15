@@ -42,6 +42,48 @@ function pageMeta(over: Partial<KnowledgePageMeta>): KnowledgePageMeta {
   };
 }
 
+/** Boots the built app against a seeded userData, with every provider key stripped. */
+async function launch(userData: string): Promise<Page> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
+    if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
+    env[k] = v;
+  }
+  env.VOCS_CODE_USER_DATA = userData;
+
+  const packaged = process.env.HARNESS_E2E_EXE;
+  app = await electron.launch({
+    executablePath: packaged || (require('electron') as string),
+    args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')],
+    env,
+    timeout: 60_000
+  });
+  const win: Page = await app.firstWindow();
+  await win.waitForSelector('.brand', { timeout: 60_000 });
+  return win;
+}
+
+/** Writes the sessions index and an empty transcript for one seeded session. */
+async function seedSession(userData: string, sid: string, project: string): Promise<void> {
+  const session = {
+    id: sid,
+    title: 'Knowledge panel',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
+    cwd: project,
+    status: 'idle',
+    harnessRef: {},
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
+    queued: 0
+  } as SessionMeta;
+  await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
+  await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
+  await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), '');
+}
+
 describe.runIf(enabled)('project knowledge panel', () => {
   it('shows the wiki, accepts a proposal on click, and writes it back as reviewed markdown', async () => {
     const tmp = path.join(os.tmpdir(), `vocs-code-knowledge-${Date.now()}`);
@@ -76,43 +118,20 @@ describe.runIf(enabled)('project knowledge panel', () => {
         'The renderer stays sandboxed.'
       )
     );
+    // A deliberate `uncertain` page: a recorded judgement, which Accept all must leave alone.
+    await fs.writeFile(
+      path.join(wiki, 'conventions', 'maybe.md'),
+      serializeKnowledgeDocument(
+        pageMeta({ id: 'conventions/maybe', title: 'Maybe', status: 'uncertain', claim: 'We are not sure this still holds.', review: { state: 'unreviewed' } }),
+        'Unverified.'
+      )
+    );
     await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
 
     const sid = 's_knowledge_e2e';
-    const session = {
-      id: sid,
-      title: 'Knowledge panel',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      config: { harness: 'native', projectRoot: project, permissionMode: 'ask' },
-      cwd: project,
-      status: 'idle',
-      harnessRef: {},
-      usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0, turns: 0 },
-      queued: 0
-    } as SessionMeta;
-    await fs.writeFile(path.join(userData, 'sessions.json'), JSON.stringify([session]));
-    await fs.mkdir(path.join(userData, 'sessions', sid), { recursive: true });
-    await fs.writeFile(path.join(userData, 'sessions', sid, 'transcript.jsonl'), '');
+    await seedSession(userData, sid, project);
 
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v === undefined) continue;
-      if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
-      if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
-      env[k] = v;
-    }
-    env.VOCS_CODE_USER_DATA = userData;
-
-    const packaged = process.env.HARNESS_E2E_EXE;
-    app = await electron.launch({
-      executablePath: packaged || (require('electron') as string),
-      args: packaged ? [`--user-data-dir=${userData}`] : [path.join(root, 'out', 'main', 'index.js')],
-      env,
-      timeout: 60_000
-    });
-    const win: Page = await app.firstWindow();
-    await win.waitForSelector('.brand', { timeout: 60_000 });
+    const win = await launch(userData);
 
     // Select the seeded session, then open the Knowledge tab in the panel's lower half.
     await win.locator('[data-testid="session-row"]').first().click();
@@ -130,6 +149,15 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(await proposal.innerText()).toContain('Renderer reconnects can duplicate a PTY.');
     const proposalFile = path.join(wiki, '_proposals', 'pty-guard.md');
     expect(await fs.readFile(proposalFile, 'utf8')).toContain('status: proposed');
+
+    // Preview reads a *proposal*, which lives outside the page tree — it used to resolve to
+    // nothing at all and leave the panel unchanged.
+    await win.getByTestId('knowledge-preview-pty-guard').click();
+    const preview = win.getByTestId('knowledge-detail');
+    await preview.waitFor({ timeout: 10_000 });
+    expect(await preview.innerText()).toContain('Reconnects must stay in the main process.');
+    await win.getByTestId('knowledge-detail').getByTitle('Back to the list').click();
+    await preview.waitFor({ state: 'detached', timeout: 10_000 });
 
     // A draft is accepted straight from its row, without opening it.
     const draftFile = path.join(wiki, 'architecture', 'process-split.md');
@@ -150,6 +178,22 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(stored).not.toContain('target_page:');
     expect(stored).toContain('Reconnects must stay in the main process.');
 
+    // Accept all is for unreviewed candidates only: `uncertain` is a judgement about the claim, so
+    // a bulk action must not promote it to current truth behind the user's back.
+    expect(await fs.readFile(path.join(wiki, 'conventions', 'maybe.md'), 'utf8')).toContain('status: uncertain');
+
+    // Discarding from the detail view deletes the page and tombstones its claim, and the panel
+    // lists the tombstone — the rule an agent silently hits has to be inspectable.
+    await win.getByTestId('knowledge-page-conventions/maybe').click();
+    await win.getByTestId('knowledge-detail').waitFor({ timeout: 10_000 });
+    await win.getByTestId('knowledge-page-discard').click();
+    const rejected = win.getByTestId('knowledge-rejected');
+    await rejected.waitFor({ timeout: 10_000 });
+    expect(await rejected.innerText()).toContain('1 rejected claim');
+    await expect(fs.stat(path.join(wiki, 'conventions', 'maybe.md'))).rejects.toThrow();
+    const tombstones = JSON.parse(await fs.readFile(path.join(wiki, '_rejected.json'), 'utf8')) as Record<string, { claim: string }>;
+    expect(Object.values(tombstones).map((t) => t.claim)).toEqual(['We are not sure this still holds.']);
+
     // The built-in MCP server for the wiki is injected and shown on the MCP tab.
     await win.getByTestId('panel-bottom-mcp').click();
     const builtin = win.getByTestId('builtin-vocs-memory');
@@ -169,7 +213,47 @@ describe.runIf(enabled)('project knowledge panel', () => {
     expect(detail).toContain('not checked');
     expect(detail).toContain('This project is not indexed by GitNexus.');
 
-    await app.close();
+    await app?.close();
+    app = null;
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it('starts a wiki for a project with no docs, which is what switches the memory server on', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-knowledge-init-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(project, { recursive: true });
+    await fs.mkdir(userData, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project));
+    const sid = 's_knowledge_init_e2e';
+    await seedSession(userData, sid, project);
+
+    const win = await launch(userData);
+    await win.locator('[data-testid="session-row"]').first().click();
+    await win.getByTestId('panel-bottom-knowledge').click();
+    await win.getByTestId('knowledge-tab').waitFor({ timeout: 30_000 });
+
+    // Bootstrap needs both docs to read and a configured utility model; this project has neither,
+    // and without a wiki directory there is no MCP server and no episode capture at all.
+    const memoryOff = win.getByTestId('builtin-vocs-memory');
+    await win.getByTestId('panel-bottom-mcp').click();
+    await memoryOff.waitFor({ timeout: 10_000 });
+    expect(await memoryOff.innerText()).toContain('No project wiki yet');
+    await win.getByTestId('panel-bottom-knowledge').click();
+
+    const start = win.getByTestId('knowledge-start-wiki');
+    await start.waitFor({ timeout: 10_000 });
+    await start.click();
+    await start.waitFor({ state: 'detached', timeout: 10_000 });
+    expect((await fs.stat(path.join(project, '.vocs-code', 'wiki'))).isDirectory()).toBe(true);
+
+    // With a wiki on disk the pull seam switches on for the next session start.
+    await win.getByTestId('panel-bottom-mcp').click();
+    const memoryOn = win.getByTestId('builtin-vocs-memory');
+    await memoryOn.waitFor({ timeout: 10_000 });
+    expect(await memoryOn.innerText()).toContain('Reads .vocs-code/wiki in this project.');
+
+    await app?.close();
     app = null;
     await fs.rm(tmp, { recursive: true, force: true });
   });

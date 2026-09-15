@@ -22,12 +22,12 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 | Scored retrieval, digest, review, authority, jobs facade | `src/main/knowledge/service.ts` |
 | Bootstrap + distillation prompts (utility model) | `src/main/knowledge/synth.ts`, `knowledge/llm.ts` |
 | Shared schema, frontmatter codec, digest renderer | `src/shared/knowledge.ts` |
-| `vocs-memory` stdio MCP server (5 tools) | `resources/mcp/vocs-memory.mjs` |
+| `vocs-memory` stdio MCP server (6 tools) | `resources/mcp/vocs-memory.mjs` |
 | Built-in server registration + per-repo switches | `src/main/mcp/memory.ts`, `src/main/mcp/index.ts` |
 | Knowledge panel | `src/renderer/src/components/KnowledgeTab.tsx` |
 | Live anchor resolution | `src/main/knowledge/anchors.ts` — each page anchor is checked against GitNexus when the detail view opens |
 | Session history recall (L3) | `session_history_search` in `resources/mcp/vocs-memory.mjs`, scoped to the project and redacted |
-| Session priming | `SessionManager.create` → `appendSystemPrompt` |
+| Session priming | `SessionManager.create` → `SessionMeta.knowledgeDigest`, applied per harness |
 | Git boundaries → episodes → distillation | `src/main/handlers.ts` (`git:commit`, `git:pr`, `git:merge`) |
 
 ## Architecture
@@ -44,7 +44,7 @@ Anything that only makes sense with "in session X we found…" is L3, not L2.
 ┌────────────────────────▼───┐   ┌──────▼──────────┐  ┌──▼───────────────────┐
 │ vocs-memory (stdio MCP)    │   │  Knowledge panel │  │ bootstrap: docs →    │
 │ search · read · related ·  │   │  review queue    │  │ draft pages          │
-│ propose · status           │   │  publish         │  │ distill: episodes →  │
+│ propose · status · history │   │  publish         │  │ distill: episodes →  │
 └────────────────────────────┘   └─────────────────┘  │ proposals            │
                                                       └──┬───────────────────┘
 ┌──────────────────────┐   anchors (resolved live)        │ episodes
@@ -63,10 +63,23 @@ Four seams:
    MCP capability is `inject` or `client`. Cursor does not get it (inherit-only, file export); pi
    subagent children do, over the parent's connections, unless their agent definition sets
    `mcp: false` — which the shipped Explore and Plan templates do. A project with no wiki gets no server at all.
-2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session's
-   `appendSystemPrompt` gains a bounded `<digest>` naming the most useful pages. It never contains
-   page bodies, never outranks AGENTS.md, and reaches pi subagent children for free (they inherit
-   the parent system prompt).
+2. **Push.** When a wiki exists and `knowledge.prime` is on (default), a new session is primed with
+   a bounded digest naming the most useful pages. It never contains page bodies and never outranks
+   AGENTS.md. The digest is stored on `SessionMeta.knowledgeDigest`, *not* merged into
+   `config.appendSystemPrompt`: the config is copied wholesale when a session is reused ("New
+   session on branch", "Review PR"), and a copied digest would be appended a second time and go
+   stale. How it is delivered depends on the harness, which `capabilities.systemPrompt` records:
+
+   | Harness | Surface |
+   | --- | --- |
+   | pi, claude, native | appended to the system prompt (`appendedSystemPrompt`); pi subagent children inherit it for free |
+   | codex, codex-exec, acp, cursor | a once-per-session preamble on the first dispatched turn (`knowledgePreamble`), the same mechanism a cross-harness fork uses |
+
+   None of the four SDKs exposes a system-prompt hook — `turn/start`, `startThread` and
+   `session/new` take no instruction field — so a `systemPrompt: false` harness would otherwise get
+   no always-on surface at all. For Cursor, which also gets no MCP server, the preamble is the only
+   memory surface there is. The preamble is delivered to the harness only; the transcript records
+   what the user typed.
 3. **App surface.** The Knowledge panel and Vesta read the same service, so the panel, the tools and
    the jobs can never disagree about what the wiki says.
 4. **Jobs.** One background completion at a time per project, on the `utilityModel`. A job may write
@@ -84,7 +97,8 @@ Local-first, under the project, git-excluded by the existing `.vocs-code/` conve
   _observations/*.jsonl       commit / PR / merge outcomes waiting for distillation
   _evidence.json              claim key → distinct sessions that have seen it
   _rejected.json              claim tombstones, so agents stop refiling a rejection
-docs/wiki/                    written only by the explicit Publish action (tracked, committed by the user)
+docs/wiki/                    written only by the explicit Publish action, into the *session's own*
+                              checkout (tracked, committed by the user)
 ```
 
 Decisions behind this layout:
@@ -92,8 +106,9 @@ Decisions behind this layout:
 - **One wiki per project, always in the project root checkout.** Knowledge must never live in a
   session's worktree: a worktree is deleted with its session, and a page written there would be
   lost. Every session — worktree or not — reads and writes `<projectRoot>/.vocs-code/wiki`.
-- **Repo scope is the default, branch scope is opt-in.** A discovery made on a feature branch is
-  filed against the project (scope `repo`) so every session and every branch sees it; a proposal
+- **Repo scope is the default on both write paths, branch scope is opt-in.** A discovery made on a
+  feature branch is filed against the project (scope `repo`) so every session and every branch sees
+  it — a worktree session's proposal included, whichever write path files it; a proposal
   that explicitly says `scope: branch` lands under `branches/<branch>/` and only overlays for
   sessions working that branch. A migration under development can say so without rewriting the
   project's shared understanding — and without its knowledge dying with the worktree.
@@ -158,7 +173,9 @@ Rules that keep it honest:
 - **Anchors are checked live, never stored.** The detail view asks GitNexus about every symbol the
   page names and shows `resolved` (with the current line range and a "Now in …" note when the symbol
   moved files), `unresolved`, or `not checked` when GitNexus is off or the repo is unindexed. A
-  file-only anchor is answered from disk. Results are cached for five minutes; the page itself still
+  file-only anchor is answered from disk. One `resolve()` call has a single wall-clock budget (8s)
+  and bounded parallelism, not a timeout per anchor — a page naming a dozen symbols must not be able
+  to hold the panel open for minutes. Results are cached for five minutes; the page itself still
   holds nothing but the pointer. Agents resolve anchors the same way they resolve anything else — by
   calling GitNexus themselves.
 
@@ -166,19 +183,30 @@ Rules that keep it honest:
 
 The wiki is easy to generate; keeping it true is the product. The rules:
 
-- **Agents propose, humans decide.** Every harness gets `knowledge_propose`; it writes a file under
-  `_proposals/` and nothing else. The panel's Accept/Reject is the only path to `current`.
+- **Agents propose, humans decide.** Every harness gets `knowledge_propose`; it never marks anything
+  current. The panel's Accept/Reject is the only path to `current`.
+- **The rules live on both write paths.** `KnowledgeService.propose` and the standalone
+  `vocs-memory` server enforce the same three rules below. They have to: the service is what the
+  panel, Vesta and distillation use, and the MCP server is what every *agent* uses. A rule
+  implemented only in the service would hold everywhere except the path that matters most.
 - **Repeated evidence promotes.** A claim independently seen in ≥ 2 sessions becomes a *proposed
-  page* (still not current, still never published). One session's finding waits in the queue.
-- **Rejections are remembered.** A rejected claim is tombstoned; the same claim is refused on sight,
-  so agents cannot refile it every session.
+  page* (still not current, still never published, still not servable). One session's finding waits
+  in the queue. "Independent" means a distinct session id, so the same session proposing twice is
+  one sighting — which is why the MCP server is given `VOCS_MEMORY_SESSION_ID`.
+- **Rejections are remembered.** A rejected claim is tombstoned in `_rejected.json`; the same claim
+  is refused on sight by both write paths, so agents cannot refile it every session. The panel lists
+  the tombstones, because a rule an agent silently hits should be inspectable.
+- **A proposal's target id is never trusted.** `page_id` becomes a path when the proposal is
+  accepted, so it is validated against the same identity rule as any page id before it is written.
 - **Bootstrap drafts for review.** `Generate from docs` reads README, `docs/*.md`, AGENTS.md and the
   top-level layout, and asks the utility model for at most 12 `status: draft` pages grounded in
   those files. Nothing in the draft state is ever served to an agent: every row carries an
   **Accept** button, opening one offers **Accept as current** / **Discard**, and **Accept all**
   beside Publish takes every pending draft and proposal in one action (deprecated and superseded
-  pages are left alone — accepting everything must not resurrect history). Discarding deletes the
-  file and tombstones the claim, so the same draft is not regenerated every run.
+  pages are left alone — accepting everything must not resurrect history — and so is `uncertain`,
+  which is a recorded judgement about a claim rather than an unreviewed candidate). Discarding
+  deletes the file and tombstones the claim, so the same draft is not regenerated every run; a
+  claim is only tombstoned once its page is really gone.
 - **Distillation runs at git boundaries.** Commits, PR opens and merges append an episode; with
   `autoDistill` on (default) the newest episode plus its transcript slice is distilled into up to
   three proposals, which go through the same rules above.
@@ -208,15 +236,15 @@ wiki that rewrites itself after every edit turns into noise nobody reviews.
 
 ## Retrieval
 
-Five tools, all pull-based and cheap enough to call without thinking:
+Six tools, all pull-based and cheap enough to call without thinking:
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `knowledge_search` | `query`, `limit?`, `include_historical?` | ranked page summaries: id, title, kind, status, authority, claim, keywords, snippet |
 | `knowledge_read` | `page` | full markdown + provenance (sources, anchors, status, authority, evidence) |
 | `knowledge_related` | `page` or `path` | related pages by link or shared anchor |
-| `knowledge_propose` | `title`, `claim`, `body`, `kind?`, `page_id?`, `keywords?`, `sources?`, `anchors?` | writes a proposal; explains that a human reviews it |
-| `knowledge_status` | — | page/servable/proposal counts and the wiki path |
+| `knowledge_propose` | `title`, `claim`, `body`, `kind?`, `page_id?`, `keywords?`, `sources?`, `anchors?` | `proposed` (queued for review), `promoted` (second independent sighting → a proposed page) or `rejected` (tombstoned claim, refused); always says a human decides |
+| `knowledge_status` | — | page/servable/proposal counts, the branch, and the wiki path |
 | `session_history_search` | `query`, `limit?`, `include_archived?` | **L3 recall**: earlier attempts, failures and outcomes from this project's past sessions, with redacted snippets. Read-only over the app's `search.db`; degrades to an explanation when the index is absent. |
 
 Every query term must match somewhere (title, keywords, claim, body) — the right default for a
@@ -270,7 +298,9 @@ paths. The wiki itself costs nothing until an agent asks a question.
 ## Open questions
 
 - Should `vocs-memory` be injected even in projects with no wiki, so `session_history_search` (L3)
-  works everywhere rather than only where a wiki exists?
+  works everywhere rather than only where a wiki exists? Partially answered: the panel's **Start a
+  wiki** creates the directory without needing docs or a utility model, so opting in no longer
+  depends on bootstrap succeeding — but a project that never opts in still gets no L3 recall.
 - Should the digest prime every new session by default even on a project with a large wiki (cost of
   ~500 tokens/turn), or only when the wiki is small?
 - Should distillation run on session end and archive, or only on git outcomes?

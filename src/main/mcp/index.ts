@@ -174,7 +174,7 @@ export async function projectInfo(scope: SessionScope): Promise<McpProjectInfo> 
         shared: false,
         indexed: wiki,
         claimed: canClaimBuiltins(scope.harness),
-        note: wiki ? 'Reads .vocs-code/wiki in this project.' : 'No project wiki yet — generate one from the Knowledge panel.'
+        note: wiki ? 'Reads .vocs-code/wiki in this project.' : 'No project wiki yet — start or generate one from the Knowledge panel.'
       };
     }
     return {
