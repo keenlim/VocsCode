@@ -1,5 +1,5 @@
 /**
- * The model each Claude subagent type runs on.
+ * The model each Claude subagent type runs on, and the project definitions behind them.
  *
  * Claude's default here is the session's own model, applied for the whole session by the adapter, so
  * this list is mostly an account of what already happens. The exception is a definition the project
@@ -7,15 +7,17 @@
  * the adapter forcing the session model on everything else — which is worth saying out loud, because
  * on a provider that is not Anthropic the unforced built-ins ask for Anthropic ids and are refused.
  *
- * Only an existing definition is editable. Writing one would not *adjust* a built-in but *replace*
- * it, instructions and all, so the app leaves that to whoever writes the file.
+ * The panel creates a definition, but only a genuinely new one: writing a name a built-in or an
+ * existing file already has would *replace* it, instructions and all, not adjust it. Everything else
+ * about an existing definition stays its author's — the panel rewrites the `model:` line alone.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { SessionMeta } from '../../../shared/types';
 import type { ClaudeAgentTypesInfo } from '../../../shared/ipc';
+import { isClaudeBuiltinAgentType } from '../../../shared/claude-agent-files';
 import { useSessionModels } from '../models';
 import { invoke } from '../api';
-import { Badge, Icon, Spinner } from './ui';
+import { Badge, Button, Field, Icon, Spinner } from './ui';
 
 interface Row {
   name: string;
@@ -23,10 +25,20 @@ interface Row {
   file?: ClaudeAgentTypesInfo['files'][number];
 }
 
+interface Draft {
+  name: string;
+  description: string;
+  prompt: string;
+}
+
+const emptyDraft = (): Draft => ({ name: '', description: '', prompt: '' });
+
 export function ClaudeAgentModels({ session }: { session: SessionMeta }) {
   const [info, setInfo] = useState<ClaudeAgentTypesInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const [saving, setSaving] = useState(false);
   const { models } = useSessionModels(session);
 
   const load = useCallback(() => {
@@ -64,6 +76,25 @@ export function ClaudeAgentModels({ session }: { session: SessionMeta }) {
       });
   };
 
+  const create = () => {
+    if (!draft) return;
+    setSaving(true);
+    setError(null);
+    void invoke('claude-agents:create', { id: session.id, name: draft.name.trim(), description: draft.description.trim(), prompt: draft.prompt })
+      .then((result) => {
+        setSaving(false);
+        if (!result.ok) setError(result.error ?? 'Could not create the definition.');
+        else {
+          setDraft(null);
+          load();
+        }
+      })
+      .catch((e: unknown) => {
+        setSaving(false);
+        setError(e instanceof Error ? e.message : String(e));
+      });
+  };
+
   if (!info) {
     return (
       <div className="subagents">
@@ -81,6 +112,9 @@ export function ClaudeAgentModels({ session }: { session: SessionMeta }) {
   // A session that has named no model yet has no provider to narrow by, and an empty select would
   // be worse than a wide one: "Same as session" is still the default and the honest answer.
   const choices = offered.length ? offered : models;
+  const taken = new Set((info.files ?? []).map((file) => file.name.toLowerCase()));
+  const draftName = draft?.name.trim().toLowerCase() ?? '';
+  const draftBuiltin = draft ? isClaudeBuiltinAgentType(draft.name) || (info.types ?? []).some((type) => type.name.toLowerCase() === draftName) : false;
 
   return (
     <div className="subagents">
@@ -94,52 +128,135 @@ export function ClaudeAgentModels({ session }: { session: SessionMeta }) {
           types. Those will ask this endpoint for Anthropic models and be refused; pin them here too, or clear the pin.
         </div>
       )}
-      {rows.length === 0 ? (
-        <div className="panel-empty">
-          <Icon name="fork" size={20} />
-          <p>This project defines no Claude agents.</p>
-          <p className="muted small">
-            Add one as <code>.claude/agents/&lt;Name&gt;.md</code> — by hand or by asking the agent — and its model can be set here.
-          </p>
-        </div>
+      {draft ? (
+        <ClaudeAgentEditor
+          draft={draft}
+          onChange={setDraft}
+          onCancel={() => setDraft(null)}
+          onSave={create}
+          busy={saving}
+          taken={taken.has(draftName)}
+          builtin={draftBuiltin}
+        />
       ) : (
-        <ul className="agent-grid" data-testid="claude-agent-types">
-          {rows.map((row) => (
-            <li key={row.name}>
-              <div className="agent-tile" data-testid={`claude-agent-${row.name}`}>
-                <span className="agent-tile-head">
-                  <Icon name="fork" size={12} />
-                  <span className="subagent-agent">{row.name}</span>
-                  <span className="spacer" />
-                  {busy === row.name ? <Spinner size={11} /> : <Badge tone={row.file ? 'blue' : 'neutral'}>{row.file ? 'project' : 'built-in'}</Badge>}
-                </span>
-                <span className="subagent-desc">{row.description || 'No description'}</span>
-                {row.file ? (
-                  <select
-                    className="agent-model-select"
-                    value={row.file.model ?? ''}
-                    disabled={busy === row.name}
-                    data-testid={`claude-agent-model-${row.name}`}
-                    aria-label={`Model for ${row.name}`}
-                    onChange={(e) => save(row.name, e.target.value)}
-                  >
-                    <option value="">Same as session</option>
-                    {choices.map((m) => (
-                      <option key={`${m.provider}/${m.id}`} value={m.id}>
-                        {m.displayName || m.id}
-                      </option>
-                    ))}
-                    {/* A pin the catalog no longer offers still has to be visible, or saving would drop it. */}
-                    {row.file.model && !choices.some((m) => m.id === row.file?.model) && <option value={row.file.model}>{row.file.model}</option>}
-                  </select>
-                ) : (
-                  <span className="subagent-meta muted small">Runs on the session model · define it in the project to pin a model</span>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
+        <>
+          <div className="agent-section-head">
+            <span>Definitions in this project</span>
+            <span className="spacer" />
+            <Button size="sm" variant="ghost" icon="plus" data-testid="claude-agent-new" onClick={() => setDraft(emptyDraft())}>
+              New
+            </Button>
+          </div>
+          {rows.length === 0 ? (
+            <div className="panel-empty">
+              <Icon name="fork" size={20} />
+              <p>This project defines no Claude agents.</p>
+              <p className="muted small">
+                Create one above, or add <code>.claude/agents/&lt;Name&gt;.md</code> by hand. A definition adds a type the session can delegate to, and
+                its model can be set here.
+              </p>
+            </div>
+          ) : (
+            <ul className="agent-grid" data-testid="claude-agent-types">
+              {rows.map((row) => (
+                <li key={row.name}>
+                  <div className="agent-tile" data-testid={`claude-agent-${row.name}`}>
+                    <span className="agent-tile-head">
+                      <Icon name="fork" size={12} />
+                      <span className="subagent-agent">{row.name}</span>
+                      <span className="spacer" />
+                      {busy === row.name ? <Spinner size={11} /> : <Badge tone={row.file ? 'blue' : 'neutral'}>{row.file ? 'project' : 'built-in'}</Badge>}
+                    </span>
+                    <span className="subagent-desc">{row.description || 'No description'}</span>
+                    {row.file ? (
+                      <select
+                        className="agent-model-select"
+                        value={row.file.model ?? ''}
+                        disabled={busy === row.name}
+                        data-testid={`claude-agent-model-${row.name}`}
+                        aria-label={`Model for ${row.name}`}
+                        onChange={(e) => save(row.name, e.target.value)}
+                      >
+                        <option value="">Same as session</option>
+                        {choices.map((m) => (
+                          <option key={`${m.provider}/${m.id}`} value={m.id}>
+                            {m.displayName || m.id}
+                          </option>
+                        ))}
+                        {/* A pin the catalog no longer offers still has to be visible, or saving would drop it. */}
+                        {row.file.model && !choices.some((m) => m.id === row.file?.model) && <option value={row.file.model}>{row.file.model}</option>}
+                      </select>
+                    ) : (
+                      <span className="subagent-meta muted small">Runs on the session model · define it in the project to pin a model</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
+    </div>
+  );
+}
+
+/** The name, description and instructions of a definition the panel is about to write. */
+function ClaudeAgentEditor({
+  draft,
+  onChange,
+  onCancel,
+  onSave,
+  busy,
+  taken,
+  builtin
+}: {
+  draft: Draft;
+  onChange: (draft: Draft) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  busy: boolean;
+  /** The project already has a definition with this name; saving would overwrite it. */
+  taken: boolean;
+  /** The name belongs to a built-in, which the definition would replace rather than extend. */
+  builtin: boolean;
+}) {
+  const patch = (next: Partial<Draft>) => onChange({ ...draft, ...next });
+  const blocked = taken || builtin;
+  return (
+    <div className="agent-editor">
+      <Field label="Name" hint="The type the subagent tool uses, e.g. reviewer">
+        <input value={draft.name} placeholder="reviewer" data-testid="claude-agent-new-name" onChange={(e) => patch({ name: e.target.value })} />
+      </Field>
+      {builtin && (
+        <div className="callout warn small" data-testid="claude-agent-new-builtin">
+          {draft.name.trim()} is one of Claude Code&rsquo;s built-in types: a definition named after it replaces it. Pick another name, or write that file by hand.
+        </div>
+      )}
+      {taken && !builtin && (
+        <div className="callout warn small" data-testid="claude-agent-new-taken">
+          This project already defines {draft.name.trim()}. Edit it in the list instead.
+        </div>
+      )}
+      <Field label="Description" hint="Claude Code picks a subagent from this line, so say when to use it.">
+        <input value={draft.description} placeholder="Reviews a diff against the repo rules" data-testid="claude-agent-new-description" onChange={(e) => patch({ description: e.target.value })} />
+      </Field>
+      <Field label="Instructions">
+        <textarea
+          rows={8}
+          value={draft.prompt}
+          placeholder="You review diffs and report findings…"
+          data-testid="claude-agent-new-prompt"
+          onChange={(e) => patch({ prompt: e.target.value })}
+        />
+      </Field>
+      <div className="agent-editor-actions">
+        <Button size="sm" disabled={busy || blocked || !draft.name.trim() || !draft.description.trim()} onClick={onSave} data-testid="claude-agent-new-save">
+          Create
+        </Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }

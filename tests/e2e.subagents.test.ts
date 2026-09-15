@@ -235,6 +235,34 @@ describe.runIf(enabled)('electron e2e: subagents panel', () => {
       const stopped = await invoke(win, 'subagents:stop', { id: SEED_SESSION_ID, runId: 'agent_seed1' });
       expect(stopped).toMatchObject({ ok: false });
       expect(stopped.ok === false && stopped.error).toMatch(/not available for the claude harness/);
+
+      // The panel's own New flow writes a genuinely new definition, which is the one file this
+      // screen creates — the name is checked so it can never replace a built-in.
+      await win.getByTestId('claude-agent-new').click();
+      await win.getByTestId('claude-agent-new-name').fill('reviewer');
+      await win.getByTestId('claude-agent-new-description').fill('Reviews a diff against the repo rules');
+      await win.getByTestId('claude-agent-new-prompt').fill('You review diffs and report findings.');
+      await win.getByTestId('claude-agent-new-save').click();
+
+      const wrote = path.join(project, '.claude', 'agents', 'reviewer.md');
+      await expect.poll(() => fs.readFile(wrote, 'utf8').then(() => true).catch(() => false), { timeout: 20_000 }).toBe(true);
+      const created = await fs.readFile(wrote, 'utf8');
+      expect(created).toContain('name: reviewer');
+      expect(created).toContain('Reviews a diff against the repo rules');
+      // No `model:` line: a new definition inherits the session model until one is pinned here.
+      expect(created).not.toContain('model:');
+      // The definition is a row the panel lists, with the model control it can take a pin from.
+      await win.locator('[data-testid="claude-agent-reviewer"]').waitFor({ timeout: 20_000 });
+      expect(await win.locator('[data-testid="claude-agent-model-reviewer"]').count()).toBe(1);
+
+      // The built-in rule holds over IPC too, not merely in the form's own check.
+      const replaced = await invoke(win, 'claude-agents:create', { id: SEED_SESSION_ID, name: 'Plan', description: 'Replaces the built-in', prompt: 'x' });
+      expect(replaced).toMatchObject({ ok: false });
+      expect(replaced.ok === false && replaced.error).toContain('Plan');
+      expect(await fs.readdir(path.join(project, '.claude', 'agents'))).toEqual(['reviewer.md']);
+
+      await fs.mkdir(shots, { recursive: true });
+      await win.screenshot({ path: path.join(shots, 'subagents-panel-claude-new-agent.png') });
     } finally {
       await app?.close().catch(() => undefined);
       app = null;
