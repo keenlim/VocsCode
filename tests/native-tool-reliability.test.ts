@@ -41,7 +41,7 @@ const call = (name: string, args: Record<string, unknown>, id = name): Call => (
 function harness(mode: PermissionMode = 'full-auto') {
   const settings = defaultSettings();
   settings.providers = [{ id: 'local', name: 'Local', kind: 'ollama', enabled: true, hasApiKey: false, models: [{ id: 'test', displayName: 'Test', provider: 'local' }] }];
-  const meta = { cwd, usage: emptyUsage(), config: { harness: 'native', model: { provider: 'local', model: 'test' } }, harnessRef: {} } as SessionMeta;
+  const meta = { id: 'native-s1', cwd, usage: emptyUsage(), config: { harness: 'native', model: { provider: 'local', model: 'test' } }, harnessRef: {} } as SessionMeta;
   const events: SessionEvent[] = [];
   let saved: unknown = null;
   const approval = vi.fn<HarnessContext['requestApproval']>(async () => ({ optionId: 'allow' }));
@@ -76,6 +76,12 @@ function harness(mode: PermissionMode = 'full-auto') {
 }
 
 describe('native model-visible mutation reliability', () => {
+  it('hands each provider step the session id, for gateways that route or cache by conversation', async () => {
+    const h = harness();
+    await h.run([call('bash', { command: 'echo ok' })]);
+    expect(mocks.step.mock.calls.at(-1)?.[0].sessionId).toBe('native-s1');
+  });
+
   it('keeps valid Unicode when shell truncation cuts through astral characters', async () => {
     await fs.writeFile(path.join(cwd, 'unicode.cjs'), "require('node:fs').writeSync(1, 'a'.repeat(14999) + '\\u{1F600}' + 'b'.repeat(40000) + '\\u{1F600}' + 'z'.repeat(14999));");
     const result = await runBash(cwd, 'node unicode.cjs', 10_000, signal());

@@ -45,6 +45,8 @@ export interface StepParams {
   tools: NativeToolDef[];
   effort?: EffortLevel;
   signal: AbortSignal;
+  /** Stable id for this conversation, forwarded to gateways that route or cache by session. */
+  sessionId?: string;
   onText: (delta: string) => void;
   onReasoning: (delta: string) => void;
 }
@@ -180,8 +182,18 @@ function toOpenAIMessages(history: NativeMessage[], includeReasoning: boolean): 
   return out;
 }
 
+/**
+ * OpenCode Go asks every client to name itself and to keep one stable id per conversation so the
+ * gateway can route requests and reuse prompt prefixes; without it the traffic looks like generic
+ * SDK calls. Other providers get exactly the headers the user configured.
+ */
+function openaiHeaders(p: StepParams): Record<string, string> | undefined {
+  if (p.provider.kind !== 'opencode-go') return p.provider.headers;
+  return { ...p.provider.headers, 'x-opencode-client': 'vocs-code', ...(p.sessionId ? { 'x-opencode-session': p.sessionId } : {}) };
+}
+
 export async function openaiStep(p: StepParams): Promise<StepResult> {
-  const client = new OpenAI({ apiKey: p.apiKey || 'not-needed', baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: p.provider.headers });
+  const client = new OpenAI({ apiKey: p.apiKey || 'not-needed', baseURL: p.provider.baseUrl, maxRetries: 2, defaultHeaders: openaiHeaders(p) });
   const isDeepSeek = p.provider.kind === 'deepseek' || /deepseek/i.test(p.model);
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [{ role: 'system', content: p.system }, ...toOpenAIMessages(p.history, isDeepSeek)];
   const tools: OpenAI.Chat.ChatCompletionTool[] = p.tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));

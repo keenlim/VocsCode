@@ -484,6 +484,59 @@ describe('OpenRouter reasoning effort', () => {
   });
 });
 
+describe('OpenCode Go session headers', () => {
+  /** Captures the headers the OpenAI client actually put on the wire for one step. */
+  async function stepHeaders(over: Partial<ProviderConfig>, sessionId?: string): Promise<IncomingMessage['headers']> {
+    let headers: IncomingMessage['headers'] = {};
+    const server = await listenOnce((req, res) => {
+      headers = req.headers;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta: Record<string, unknown>, finish: string | null) =>
+        `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', created: 0, model: 'kimi-k2.6', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+      res.write(chunk({ content: 'hi' }, null));
+      res.write(chunk({}, 'stop'));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const provider: ProviderConfig = { id: 'opencode-go', kind: 'opencode-go', name: 'OpenCode Go', baseUrl: server.url, hasApiKey: true, models: [], enabled: true, ...over };
+      await openaiStep({
+        provider,
+        apiKey: 'sk-test',
+        model: 'kimi-k2.6',
+        system: '',
+        history: [],
+        tools: [],
+        signal: AbortSignal.timeout(5_000),
+        sessionId,
+        onText: () => undefined,
+        onReasoning: () => undefined
+      });
+      return headers;
+    } finally {
+      await server.close();
+    }
+  }
+
+  it('identifies the client and the conversation, which OpenCode Go routes and caches by', async () => {
+    const headers = await stepHeaders({}, 'sess-42');
+    expect(headers['x-opencode-session']).toBe('sess-42');
+    expect(headers['x-opencode-client']).toBe('vocs-code');
+  });
+
+  it('drops the session header instead of sending an empty one', async () => {
+    const headers = await stepHeaders({});
+    expect(headers['x-opencode-session']).toBeUndefined();
+    expect(headers['x-opencode-client']).toBe('vocs-code');
+  });
+
+  it('leaves every other provider on exactly the headers it configured', async () => {
+    const headers = await stepHeaders({ id: 'openrouter', kind: 'openrouter' }, 'sess-42');
+    expect(headers['x-opencode-session']).toBeUndefined();
+    expect(headers['x-opencode-client']).toBeUndefined();
+  });
+});
+
 describe('model capability overrides', () => {
   const models: ModelInfo[] = [
     { id: 'deepseek-v4.1-flash-expires-on-0910', provider: 'deepseek', displayName: 'DeepSeek V4.1 Flash', supportsImages: false },

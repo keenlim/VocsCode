@@ -75,6 +75,7 @@ export type ProviderKind =
   | 'cursor'
   | 'deepseek'
   | 'openrouter'
+  | 'opencode-go'
   | 'ollama'
   | 'lmstudio'
   | 'groq'

@@ -10,6 +10,7 @@ const OPENAI_WIRE_KINDS: readonly ProviderKind[] = [
   'openai-compatible',
   'deepseek',
   'openrouter',
+  'opencode-go',
   'ollama',
   'lmstudio',
   'groq',
@@ -37,7 +38,8 @@ export const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com';
  */
 const ANTHROPIC_ENDPOINTS: Partial<Record<ProviderKind, string>> = {
   openrouter: 'https://openrouter.ai/api',
-  deepseek: 'https://api.deepseek.com/anthropic'
+  deepseek: 'https://api.deepseek.com/anthropic',
+  'opencode-go': 'https://opencode.ai/zen/go'
 };
 
 function normalizeBaseUrl(baseUrl: string | undefined): string {
