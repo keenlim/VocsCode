@@ -127,6 +127,28 @@ export function McpTab({ session }: { session: SessionMeta }) {
           <span className="spacer" />
           <Badge tone="neutral">shared server</Badge>
         </div>
+        <div className="mcp-card mcp-guide" data-testid="memory-guide">
+          <button type="button" className="mcp-guide-toggle" aria-expanded={guideOpen} data-testid="memory-guide-toggle" onClick={() => setGuideOpen((v) => !v)}>
+            <Icon name={guideOpen ? 'chevron' : 'chevronRight'} size={12} />
+            <Icon name="brain" size={12} />
+            <span className="mcp-name">Teach your agents to use these</span>
+            <span className="spacer" />
+            <span className="muted small">AGENTS.md snippet</span>
+          </button>
+          {guideOpen && (
+            <>
+              <div className="muted small">
+                Agents reach for these servers far more often when the project tells them to. Paste this into your <code>AGENTS.md</code> (or <code>CLAUDE.md</code>) so every
+                session checks the code graph, the wiki and past sessions before falling back to grep.
+              </div>
+              <div className="mcp-index-row">
+                <span className="muted small">Markdown, ready to paste.</span>
+                <Button size="sm" icon="copy" data-testid="memory-guide-copy" onClick={copyGuide}>Copy snippet</Button>
+              </div>
+              <pre className="mcp-guide-body mono" data-testid="memory-guide-text">{MEMORY_GUIDE_MARKDOWN}</pre>
+            </>
+          )}
+        </div>
         {builtin && (
           <div className="mcp-card" data-testid="gitnexus-card">
             <div className="mcp-row-head">
@@ -168,29 +190,6 @@ export function McpTab({ session }: { session: SessionMeta }) {
               </div>
             </div>
           ))}
-
-        <div className="mcp-card mcp-guide" data-testid="memory-guide">
-          <button type="button" className="mcp-guide-toggle" aria-expanded={guideOpen} data-testid="memory-guide-toggle" onClick={() => setGuideOpen((v) => !v)}>
-            <Icon name={guideOpen ? 'chevron' : 'chevronRight'} size={12} />
-            <Icon name="brain" size={12} />
-            <span className="mcp-name">Teach your agents to use these</span>
-            <span className="spacer" />
-            <span className="muted small">AGENTS.md snippet</span>
-          </button>
-          {guideOpen && (
-            <>
-              <div className="muted small">
-                Agents reach for these servers far more often when the project tells them to. Paste this into your <code>AGENTS.md</code> (or <code>CLAUDE.md</code>) so every
-                session checks the code graph, the wiki and past sessions before falling back to grep.
-              </div>
-              <pre className="mcp-guide-body mono" data-testid="memory-guide-text">{MEMORY_GUIDE_MARKDOWN}</pre>
-              <div className="mcp-index-row">
-                <span className="muted small">Markdown, ready to paste.</span>
-                <Button size="sm" icon="copy" data-testid="memory-guide-copy" onClick={copyGuide}>Copy snippet</Button>
-              </div>
-            </>
-          )}
-        </div>
       </section>
 
       <section className="mcp-section" data-testid="mcp-repo-section">
