@@ -216,6 +216,7 @@ export class NativeAdapter implements HarnessAdapter {
           tools: this.ctx.permissionMode() === 'plan' ? this.allTools().filter((t) => !t.mutating) : this.allTools(),
           effort: this.effort,
           signal,
+          sessionId: this.ctx.session().id,
           onText: (d: string) => {
             ensure();
             assistant.text += d;

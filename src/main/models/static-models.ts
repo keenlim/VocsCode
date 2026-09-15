@@ -53,10 +53,64 @@ export const DEEPSEEK_STATIC_MODELS: ModelInfo[] = [
   { ...m('deepseek', 'deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision (exp)', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }), supportsImages: true }
 ];
 
+/**
+ * OpenCode Go's catalog: the low-cost plan's open coding models, used offline until
+ * `/zen/go/v1/models` answers. Context windows come from models.dev; prices are the plan's
+ * published per-1M-token rates (the off-peak rate for the DeepSeek models, which the plan bills
+ * higher during weekday peak).
+ */
+export const OPENCODE_GO_STATIC_MODELS: ModelInfo[] = [
+  go('grok-4.6', 'Grok 4.6', 500_000, { input: 2, output: 6, cacheRead: 0.5 }, { images: true }),
+  go('gpt-5.6-luna', 'GPT-5.6 Luna', 1_050_000, { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, { images: true }),
+  go('glm-5.3-flash', 'GLM-5.3-Flash', 1_000_000, { input: 0.15, output: 0.5, cacheRead: 0.03 }, { images: true }),
+  go('glm-5.3', 'GLM-5.3', 1_000_000, { input: 1.4, output: 4.4, cacheRead: 0.26 }),
+  go('glm-5.2', 'GLM-5.2', 1_000_000, { input: 1.4, output: 4.4, cacheRead: 0.26 }),
+  go('glm-5.1', 'GLM-5.1', 202_752, { input: 1.4, output: 4.4, cacheRead: 0.26 }),
+  go('kimi-k3', 'Kimi K3', 1_048_576, { input: 3, output: 15, cacheRead: 0.3 }, { images: true }),
+  go('kimi-k2.7-code', 'Kimi K2.7 Code', 262_144, { input: 0.95, output: 4, cacheRead: 0.19 }, { images: true }),
+  // pi's own default model for this provider.
+  go('kimi-k2.6', 'Kimi K2.6', 262_144, { input: 0.95, output: 4, cacheRead: 0.16 }, { images: true, isDefault: true }),
+  go('longcat-2.0', 'LongCat-2.0', 1_000_000, { input: 0.3, output: 1.2, cacheRead: 0.006 }),
+  go('mimo-v2.5', 'MiMo V2.5', 1_000_000, { input: 0.14, output: 0.28, cacheRead: 0.0028 }, { images: true }),
+  go('mimo-v2.5-pro', 'MiMo V2.5 Pro', 1_048_576, { input: 0.435, output: 0.87, cacheRead: 0.003625 }),
+  go('minimax-m3', 'MiniMax M3', 1_000_000, { input: 0.3, output: 1.2, cacheRead: 0.06 }, { images: true }),
+  go('minimax-m2.7', 'MiniMax M2.7', 204_800, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 }),
+  go('minimax-m2.5', 'MiniMax M2.5', 204_800, { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 }),
+  go('muse-spark-1.3-contributor', 'Muse Spark 1.3 Contributor', 1_048_576, { input: 0.1, output: 0.2, cacheRead: 0.002 }, { images: true }),
+  go('muse-spark-1.2-contributor', 'Muse Spark 1.2 Contributor', 1_048_576, { input: 0.1, output: 0.2, cacheRead: 0.002 }, { images: true }),
+  go('qwen3.8-max', 'Qwen3.8 Max', 1_000_000, { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, { images: true }),
+  go('qwen3.8-flash', 'Qwen3.8 Flash', 1_000_000, { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 }, { images: true }),
+  go('qwen3.7-max', 'Qwen3.7 Max', 1_000_000, { input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.125 }),
+  go('qwen3.7-plus', 'Qwen3.7 Plus', 1_000_000, { input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 }, { images: true }),
+  go('qwen3.6-plus', 'Qwen3.6 Plus', 1_000_000, { input: 0.5, output: 3, cacheRead: 0.05, cacheWrite: 0.625 }, { images: true }),
+  go('deepseek-v4.1-flash', 'DeepSeek V4.1 Flash', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }, { images: true }),
+  go('deepseek-v4-pro', 'DeepSeek V4 Pro', 1_000_000, { input: 0.66, output: 1.98, cacheRead: 0.022 }),
+  go('deepseek-v4-flash', 'DeepSeek V4 Flash', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }),
+  go('deepseek-v4-flash-vision-exp', 'DeepSeek V4 Flash Vision Exp', 1_000_000, { input: 0.15, output: 0.6, cacheRead: 0.003 }, { images: true }),
+  go('hy4-preview', 'Hy4 preview', 1_024_000, { input: 0.834, output: 2.501, cacheRead: 0.042 }),
+  go('hy3', 'Hy3', 256_000, { input: 0.14, output: 0.58, cacheRead: 0.035 })
+];
+
+/** One OpenCode Go entry; the plan mixes text-only and vision models, so image input is per model. */
+function go(id: string, displayName: string, contextWindow: number, pricing: ModelInfo['pricing'], opts: { images?: boolean; isDefault?: boolean } = {}): ModelInfo {
+  return {
+    id,
+    provider: 'opencode-go',
+    displayName,
+    contextWindow,
+    pricing,
+    isDefault: opts.isDefault,
+    supportsImages: !!opts.images,
+    supportsReasoning: true,
+    supportedEfforts: ['minimal', 'low', 'medium', 'high', 'xhigh']
+  };
+}
+
 export const STATIC_MODELS_BY_PROVIDER: Record<string, ModelInfo[]> = {
   anthropic: ANTHROPIC_STATIC_MODELS,
   openai: OPENAI_STATIC_MODELS,
-  deepseek: DEEPSEEK_STATIC_MODELS
+  deepseek: DEEPSEEK_STATIC_MODELS,
+  'opencode-go': OPENCODE_GO_STATIC_MODELS
 };
 
 function m(provider: string, id: string, displayName: string, contextWindow: number, pricing: ModelInfo['pricing'], isDefault = false): ModelInfo {
