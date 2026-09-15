@@ -32,6 +32,13 @@ export interface SimpleSocket {
 
 const CREDS_KEY = 'vocs-web-credentials';
 
+/** The relay base a page should talk to. The web app and the relay share one origin (the landing
+ *  Worker forwards `/app`, `/v1` and `/ws` to the relay), so the default is the page's own origin;
+ *  `override` is the `?relay=` escape hatch for pointing a build at another deployment. */
+export function relayBaseFor(origin: string, override?: string | null): string {
+  return (override?.trim() || origin).replace(/\/$/, '');
+}
+
 interface InnerFrame {
   type: 'result' | 'push' | 'mirror.key';
   id?: number;

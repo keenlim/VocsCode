@@ -15,8 +15,10 @@ npx wrangler secret put ENROLL_TOKEN   # generate once, e.g. openssl rand -base6
 
 Put the same secret in the desktop app (Settings → Remote access → Enrollment secret) and the
 relay URL (e.g. `https://vocs-relay.<account>.workers.dev`) in the desktop's Relay URL field.
-The web client (this directory's `public/`) is served by the same Worker at the root path —
-users pair by entering the code their desktop shows.
+The web client (this directory's `public/`) is served by the same Worker at `/app` —
+users pair by entering the code their desktop shows. Under the production layout the landing
+Worker at `code.vocs.io` owns the hostname and forwards `/app`, `/v1` and `/ws` here, so the app
+and the relay share one origin.
 
 ## Layout
 
@@ -25,8 +27,8 @@ users pair by entering the code their desktop shows.
 - `src/rate.ts` — in-memory fixed-window rate limiter for the public pairing endpoints
 - `src/worker.ts` — the Worker + Hub Durable Object (REST + WebSocket glue)
 - `src/web-client.ts` — the browser-side pairing + e2e transport (DOM-free, unit-tested)
-- `src/page.ts` — the web page logic (bundled to `public/app.js` via `npm run relay:page` at the repo root)
-- `public/` — the static web client (pairing screen, sessions, transcripts, approvals)
+- `src/page.ts` — the web page logic (bundled to `app/app.js` via `npm run relay:page` at the repo root)
+- `public/app/` — the static web client, served at `/app` (pairing screen, sessions, transcripts, approvals)
 
 ## Local development
 
