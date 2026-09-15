@@ -296,4 +296,53 @@ describe('codex-exec adapter', () => {
     expect(turnItems(items).at(-1)?.status).toBe('interrupted');
     await a.dispose();
   });
+
+  it('prices a completed turn from the model catalog instead of reporting no spend', async () => {
+    const { ctx, events, items } = makeCtx({ config: { harness: 'codex-exec', projectRoot: '.', permissionMode: 'auto', model: { provider: 'openai', model: 'gpt-5.6-luna' } } });
+    scriptThreads([
+      {
+        id: 't1',
+        events: [
+          { type: 'thread.started', thread_id: 't1' },
+          { type: 'turn.completed', usage: { input_tokens: 1000, output_tokens: 200, cached_input_tokens: 400, cache_write_input_tokens: 100, reasoning_output_tokens: 50 } }
+        ]
+      }
+    ]);
+    const a = new CodexExecAdapter(ctx);
+    await a.start();
+    await a.send({ text: 'go' });
+    await vi.waitFor(() => expect(a.busy).toBe(false));
+
+    // 600 uncached in @ $0.20/M + 200 out @ $1.20/M + 400 cache read @ $0.02/M + 100 cache write @ $0.25/M.
+    const expected = (600 * 0.2 + 200 * 1.2 + 400 * 0.02 + 100 * 0.25) / 1_000_000;
+    const turn = turnItems(items).at(-1);
+    expect(turn?.costUsd).toBeCloseTo(expected, 10);
+    expect(turn?.usage?.costUsd).toBeCloseTo(expected, 10);
+    // The spend the session header and the analytics rollup read is the running total, not the row.
+    expect(usageEvent(events)?.totals.costUsd).toBeCloseTo(expected, 10);
+    await a.dispose();
+  });
+
+  it('prices a turn at the rates of the model in use when the model changes mid-session', async () => {
+    const { ctx, items } = makeCtx({ config: { harness: 'codex-exec', projectRoot: '.', permissionMode: 'auto', model: { provider: 'openai', model: 'gpt-5.6-luna' } } });
+    const usage = { input_tokens: 100, output_tokens: 100, cached_input_tokens: 0, cache_write_input_tokens: 0, reasoning_output_tokens: 0 };
+    scriptThreads([
+      { id: 't1', events: [{ type: 'thread.started', thread_id: 't1' }, { type: 'turn.completed', usage }] },
+      { id: 't1', events: [{ type: 'turn.completed', usage }] }
+    ]);
+    const a = new CodexExecAdapter(ctx);
+    await a.start();
+    await a.send({ text: 'one' });
+    await vi.waitFor(() => expect(a.busy).toBe(false));
+
+    await a.setModel({ provider: 'openai', model: 'gpt-5.6-sol' });
+    await a.send({ text: 'two' });
+    await vi.waitFor(() => expect(a.busy).toBe(false));
+
+    // Luna is $0.20/$1.20 per M, Sol $5/$30: the second turn must not keep billing at the old rate.
+    const costs = turnItems(items).map((t) => t.costUsd ?? 0);
+    expect(costs[0]).toBeCloseTo((100 * 0.2 + 100 * 1.2) / 1_000_000, 10);
+    expect(costs[1]).toBeCloseTo((100 * 5 + 100 * 30) / 1_000_000, 10);
+    await a.dispose();
+  });
 });
