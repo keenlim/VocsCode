@@ -40,9 +40,19 @@ function pinRank(s: SessionMeta): number {
   return s.pinned ? (s.pinnedAt ?? s.createdAt) : Number.POSITIVE_INFINITY;
 }
 
+/**
+ * What a row's recency is measured from: the user's own last message here. Agent activity keeps
+ * `updatedAt` moving, so ordering by that let a long turn in the background pull a session the user
+ * was not working in over the one they were. Rows written before the stamp existed (or never sent a
+ * prompt) fall back to `updatedAt`, so the upgrade does not reshuffle every folder at once.
+ */
+function recencyAt(s: SessionMeta): number {
+  return s.lastUserMessageAt ?? s.updatedAt;
+}
+
 /** Canonical display order for one folder's session list. */
 export function sortSessionRows(list: SessionMeta[]): SessionMeta[] {
-  return [...list].sort((a, b) => pinRank(a) - pinRank(b) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+  return [...list].sort((a, b) => pinRank(a) - pinRank(b) || recencyAt(b) - recencyAt(a) || a.id.localeCompare(b.id));
 }
 
 /** One folder in sidebar display order, with its non-archived session ids in row order. */
@@ -248,9 +258,14 @@ export function Sidebar() {
           <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
-        {running > 0 && (
-          <div className="sidebar-running">
-            <Badge tone="blue">{running} running</Badge>
+        {(running > 0 || awaiting > 0) && (
+          <div className="sidebar-status">
+            {running > 0 && <Badge tone="blue">{running} running</Badge>}
+            {awaiting > 0 && (
+              <Badge tone="red" title={`${awaiting} ${awaiting === 1 ? 'session' : 'sessions'} awaiting approval`}>
+                {awaiting} awaiting
+              </Badge>
+            )}
           </div>
         )}
         <div className="sidebar-top-actions">
@@ -258,11 +273,6 @@ export function Sidebar() {
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
         </div>
       </div>
-      {awaiting > 0 && (
-        <div className="sidebar-summary">
-          <Badge tone="red">{awaiting} awaiting approval</Badge>
-        </div>
-      )}
       <div
         className="sidebar-list"
         onDragOver={(e) => {

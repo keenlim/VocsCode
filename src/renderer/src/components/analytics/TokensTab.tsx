@@ -1,14 +1,36 @@
 /** Tokens: the mix of input, output and cache, the cache hit rate, and how each model uses tokens. */
 import React, { useState } from 'react';
-import type { AnalyticsSummary } from '../../../../shared/types';
+import type { AnalyticsSummary, UsageBucket } from '../../../../shared/types';
 import { totalTokens } from '../../../../shared/usage-rollup';
-import { fmtTokens } from '../../format';
+import { fmtTokens, harnessShort } from '../../format';
+import { Button } from '../ui';
 import { ChartCard, ColumnChart, Legend, Meter, Segmented, seriesTable, StackedBar } from './charts';
-import { cacheHitRate, delta, entityColor, fmtPct, METRICS, SPLITS, splitSeries, TOKEN_KINDS, tokenKindSeries, type Scope, type Split } from './model';
+import { cacheHitRate, delta, entityColor, fmtPct, harnessColor, harnessIndex, harnessModelBuckets, harnessModelLabel, harnessModelPair, METRICS, promptTokens, SPLITS, splitSeries, TOKEN_KINDS, tokenKindSeries, type Scope, type Split } from './model';
 import { Footnotes, KpiGrid, StatTile } from './tiles';
+
+/** Rate buckets of one entity, in the order the caller ranked them, keeping what has a rate to show. */
+function rated(buckets: UsageBucket[]): { bucket: UsageBucket; rate: number; prompt: number }[] {
+  return buckets.flatMap((bucket) => {
+    const rate = cacheHitRate(bucket.usage);
+    return rate === null ? [] : [{ bucket, rate, prompt: promptTokens(bucket.usage) }];
+  });
+}
+
+/** One meter per rated entity; `sub` always shows the numerator and denominator behind the rate. */
+function RateMeters({ rows, label, color, empty }: { rows: { bucket: UsageBucket; rate: number; prompt: number }[]; label: (bucket: UsageBucket) => string; color: (bucket: UsageBucket) => string; empty: string }) {
+  if (rows.length === 0) return <div className="chart-empty">{empty}</div>;
+  return (
+    <div className="meterlist">
+      {rows.map(({ bucket, rate, prompt }) => (
+        <Meter key={bucket.key} value={rate} label={label(bucket)} color={color(bucket)} sub={`${fmtTokens(bucket.usage.cacheReadTokens)} of ${fmtTokens(prompt)} prompt tokens`} title={bucket.key} />
+      ))}
+    </div>
+  );
+}
 
 export function TokensTab({ scope, summary }: { scope: Scope; summary: AnalyticsSummary }) {
   const [split, setSplit] = useState<Split>('model');
+  const [allPairs, setAllPairs] = useState(false);
   const t = scope.totals;
   const p = scope.previous;
   const total = totalTokens(t);
@@ -19,11 +41,13 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
   const share = (n: number) => (total > 0 ? `${fmtPct(n / total)} of tokens` : undefined);
   const spark = (key: (typeof TOKEN_KINDS)[number]['key']) => scope.days.map((d) => d.usage[key]);
   const kindLegend = TOKEN_KINDS.map((k) => ({ key: k.key, label: k.label, color: k.color }));
+  /** Harnesses in slot order that counted prompt tokens; the rest have no rate to show. */
+  const harnessRates = rated([...scope.byHarness].sort((a, b) => harnessIndex(a.key) - harnessIndex(b.key)));
   /** Models in spend order that counted prompt tokens; the rest have no rate to show. */
-  const modelRates = scope.byModel
-    .map((bucket) => ({ bucket, rate: cacheHitRate(bucket.usage), prompt: bucket.usage.inputTokens + bucket.usage.cacheReadTokens + bucket.usage.cacheWriteTokens }))
-    .filter((r) => r.rate !== null)
-    .slice(0, 8);
+  const modelRates = rated(scope.byModel).slice(0, 8);
+  /** The controlled comparison: one pair per row, grouped by harness, spend order within each. */
+  const pairRates = rated(harnessModelBuckets(scope));
+  const shownPairs = allPairs ? pairRates : pairRates.slice(0, 12);
   return (
     <>
       <KpiGrid caption={scope.previousLabel ? `Change is against the ${scope.previousLabel}.` : undefined}>
@@ -44,23 +68,23 @@ export function TokensTab({ scope, summary }: { scope: Scope; summary: Analytics
         </ChartCard>
       </div>
 
-      <ChartCard title="Cache hit rate by model" subtitle={`Share of each model's prompt tokens served from cache · ${scope.label}`}>
-        {modelRates.length === 0 ? (
-          <div className="chart-empty">No model usage recorded yet.</div>
-        ) : (
-          <div className="meterlist">
-            {modelRates.map(({ bucket, rate, prompt }) => (
-              <Meter
-                key={bucket.key}
-                value={rate}
-                label={bucket.label}
-                color={entityColor(scope, 'model', bucket.key)}
-                sub={`${fmtTokens(bucket.usage.cacheReadTokens)} of ${fmtTokens(prompt)} prompt tokens`}
-                title={bucket.key}
-              />
-            ))}
-          </div>
-        )}
+      <div className="agrid agrid-2">
+        <ChartCard title="Cache hit rate by harness" subtitle={`Share of each harness's prompt tokens served from cache · ${scope.label}`}>
+          <RateMeters rows={harnessRates} label={(b) => harnessShort(b.key)} color={(b) => harnessColor(b.key)} empty="No harness usage recorded yet." />
+        </ChartCard>
+        <ChartCard title="Cache hit rate by model" subtitle={`Share of each model's prompt tokens served from cache · ${scope.label}`}>
+          <RateMeters rows={modelRates} label={(b) => b.label} color={(b) => entityColor(scope, 'model', b.key)} empty="No model usage recorded yet." />
+        </ChartCard>
+      </div>
+
+      <ChartCard
+        title="Cache hit rate by harness × model"
+        subtitle={`One pair per row, the controlled comparison · ${scope.label}`}
+        actions={pairRates.length > 12 ? <Button variant="ghost" size="sm" onClick={() => setAllPairs((v) => !v)}>{allPairs ? 'Show top 12' : `Show all ${pairRates.length}`}</Button> : undefined}
+        wide
+      >
+        <RateMeters rows={shownPairs} label={(b) => harnessModelLabel(b.key)} color={(b) => harnessColor(harnessModelPair(b.key).harness)} empty="No harness × model usage recorded yet." />
+        {pairRates.length > 0 && <p className="muted small">Recorded since update; older days a harness split across several models have no pair to show. The pair is the controlled comparison: a harness across its own models, or two harnesses on the same one.</p>}
       </ChartCard>
 
       <ChartCard title="Tokens per day by kind" subtitle="Click a legend entry to hide a kind — cache reads usually dwarf the rest" table={seriesTable(dates, kinds, fmtTokens)} wide>

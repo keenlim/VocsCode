@@ -46,7 +46,7 @@ function view(over: Partial<KnowledgeView> = {}): KnowledgeView {
     projectRoot: 'G:/repo',
     cwd: 'G:/repo',
     wikiDir: 'G:/repo/.vocs-code/wiki',
-    status: { hasWiki: true, pages: 1, needsReview: 0, proposals: 0, stale: 0, indexed: false },
+    status: { hasWiki: true, pages: 1, needsReview: 0, proposals: 0, stale: 0 },
     pages: [summary()],
     proposals: [],
     rejectedClaims: [],
@@ -151,7 +151,7 @@ describe('Project knowledge panel', () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return current;
       if (channel === 'knowledge:review') {
-        current = view({ pages: [], status: { hasWiki: true, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+        current = view({ pages: [], status: { hasWiki: true, pages: 0, needsReview: 0, proposals: 0, stale: 0 } });
         return current;
       }
       return undefined;
@@ -324,7 +324,7 @@ describe('Project knowledge panel', () => {
 
   it('offers generation when the project has no wiki yet', async () => {
     invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+      if (channel === 'knowledge:view') return view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0 } });
       return undefined;
     });
     await act(async () => {
@@ -332,6 +332,71 @@ describe('Project knowledge panel', () => {
     });
     expect(screen.getByText('No project wiki yet')).toBeTruthy();
     expect(screen.getByTestId('knowledge-generate')).toBeTruthy();
+    expect(screen.getByTestId('knowledge-create')).toBeTruthy();
+  });
+
+  it('starts an empty wiki for a project whose docs are too thin to generate from', async () => {
+    const empty = view({ pages: [], proposals: [], status: { hasWiki: false, pages: 0, needsReview: 0, proposals: 0, stale: 0 } });
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return empty;
+      // The wiki now exists, so the panel leaves the empty state and reaches the switches.
+      if (channel === 'knowledge:create') return view({ pages: [] });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-create'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:create', { sessionId: 's1' });
+    expect(screen.queryByText('No project wiki yet')).toBeNull();
+  });
+
+  it('lists the rejected claims the tools refuse to file again', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view({ rejectedClaims: ['Harnesses share one event stream.', 'The relay never stores provider keys.'] });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    const ledger = screen.getByTestId('knowledge-rejected');
+    expect(ledger.textContent).toContain('2 rejected claims');
+    expect(ledger.textContent).toContain('The relay never stores provider keys.');
+  });
+
+  it('hides the rejection ledger when nothing has been rejected', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    expect(screen.queryByTestId('knowledge-rejected')).toBeNull();
+  });
+
+  it('marks a page waiting on a decision apart from an uncertain claim', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view')
+        return view({
+          pages: [
+            summary({ id: 'conventions/pending', title: 'Pending', status: 'proposed' }),
+            summary({ id: 'gotchas/doubtful', title: 'Doubtful', status: 'uncertain' })
+          ]
+        });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    // Amber means "not decided yet"; a page recorded as uncertain is judged, and must not read
+    // like one still queued for review.
+    expect(screen.getByTestId('knowledge-page-conventions/pending').querySelector('.badge-amber')).toBeTruthy();
+    const uncertain = screen.getByTestId('knowledge-page-gotchas/doubtful');
+    expect(uncertain.querySelector('.badge-amber')).toBeNull();
+    expect(uncertain.textContent).toContain('uncertain');
   });
 
   it('shows the last job outcome instead of leaving a silent no-op', async () => {
@@ -344,7 +409,6 @@ describe('Project knowledge panel', () => {
             needsReview: 0,
             proposals: 0,
             stale: 0,
-            indexed: false,
             job: { mode: 'bootstrap', state: 'failed', at: new Date().toISOString(), model: 'deepseek/deepseek-flash', error: 'The background model (deepseek/deepseek-flash) did not answer.' }
           }
         });

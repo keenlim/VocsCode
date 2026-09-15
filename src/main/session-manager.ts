@@ -356,8 +356,13 @@ export class SessionManager {
     // pages rather than pasting them, and never outranks the project's own instruction files.
     if (this.deps.knowledgeDigest && this.settings().knowledge?.prime !== false) {
       try {
-        const digest = await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch });
-        if (digest) meta.config = { ...meta.config, appendSystemPrompt: [cfg.appendSystemPrompt?.trim(), digest].filter(Boolean).join('\n\n') };
+        const digest = (await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch }))?.trim();
+        if (digest) {
+          meta.knowledgeDigest = digest;
+          // A harness with no system prompt of its own is primed through its first message instead,
+          // the same way a cross-harness fork hands over a transcript.
+          if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
+        }
       } catch (e) {
         this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
       }
@@ -400,7 +405,7 @@ export class SessionManager {
       const prompt = meta.goal && promptText ? `${promptText}\n\nActive goal: ${meta.goal.objective}` : promptText;
       void this.send(id, { text: prompt, images: initialImages }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     } else if (meta.goal) {
-      void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+      void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
     }
     return meta;
   }
@@ -690,19 +695,31 @@ export class SessionManager {
   }
 
   async send(id: string, input: UserInput): Promise<void> {
+    return this.sendAs(id, input, 'user');
+  }
+
+  /**
+   * `source` names who wrote the prompt. A goal kickoff or continuation writes its own prompt and
+   * runs unattended, so it is not a message the user sent: counting it would float a background
+   * session over the one the user is actually working in.
+   */
+  private async sendAs(id: string, input: UserInput, source: 'user' | 'goal'): Promise<void> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
     // Size and shape only: the prompt itself belongs to the transcript, not the log.
     this.deps.log('debug', `[${id}] user input: ${input.text.length} chars${input.images?.length ? `, ${input.images.length} image(s)` : ''}${input.mode ? `, mode=${input.mode}` : ''}`);
     const userItem: TranscriptItem = { id: shortId('u_'), kind: 'user', ts: Date.now(), text: input.text, images: input.images, queuedAs: input.mode };
     this.emit(id, { type: 'item.upsert', item: userItem });
+    // The sidebar orders rows by the user's own last message: stamp it before the harness even
+    // starts, so the row moves up on the send rather than on whatever the turn does next.
+    if (source === 'user') meta.lastUserMessageAt = userItem.ts;
     if (meta.title === 'New session' && input.text.trim()) {
       const placeholder = titleFromPrompt(input.text);
       meta.title = placeholder;
-      this.schedulePersist(meta);
-      this.pushSessions();
       this.scheduleLlmTitle(id, placeholder, input.text);
     }
+    this.schedulePersist(meta);
+    this.pushSessions();
     await this.dispatchInput(id, { ...input, transcriptItemId: userItem.id });
   }
 
@@ -734,6 +751,10 @@ export class SessionManager {
     active.dirty.clear();
     active.lastAssistantText = '';
     await this.deps.store.rewriteTranscript(id, [...items.slice(0, index), revised]);
+    // A re-sent prompt is a user message too, so the sidebar treats this as its latest one.
+    meta.lastUserMessageAt = Date.now();
+    this.schedulePersist(meta);
+    this.pushSessions();
     await this.dispatchInput(id, { text: revised.text, images: revised.images, mode: 'now', transcriptItemId: userItemId });
     return this.transcript(id);
   }
@@ -744,28 +765,38 @@ export class SessionManager {
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
     if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(await this.withForkContext(id, input));
-    await this.clearForkContext(id);
+    await active.adapter.send(await this.withSessionPreamble(id, input));
+    await this.clearSessionPreamble(id);
   }
 
-  /** Prefixes the first message after a cross-harness fork with the handed-off transcript. */
-  private async withForkContext(id: string, input: UserInput): Promise<UserInput> {
+  /**
+   * Prefixes the first message of a session with the context its harness could not be given up
+   * front: the transcript of a cross-harness fork, and the knowledge digest for a harness with no
+   * system prompt of its own. Prefixing the user's message — rather than sending a turn of our own —
+   * keeps the transcript showing only what the user typed.
+   */
+  private async withSessionPreamble(id: string, input: UserInput): Promise<UserInput> {
     const meta = this.get(id);
-    if (!meta?.pendingForkContext) return input;
-    let context: string | null = null;
-    try {
-      context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
-    } catch {
-      context = null;
+    if (!meta) return input;
+    const parts: string[] = [];
+    if (meta.pendingForkContext) {
+      try {
+        const context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
+        if (context) parts.push(context);
+      } catch {
+        // The blob is written before the flag is set; a read failure only means we have no context.
+      }
     }
-    return context ? { ...input, text: `${context}\n\n${input.text}` } : input;
+    if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
+    return parts.length ? { ...input, text: `${parts.join('\n\n')}\n\n${input.text}` } : input;
   }
 
   /** Cleared only after the harness accepted the seeded message, so a failed start retries with it. */
-  private async clearForkContext(id: string): Promise<void> {
+  private async clearSessionPreamble(id: string): Promise<void> {
     const meta = this.get(id);
-    if (!meta?.pendingForkContext) return;
+    if (!meta?.pendingForkContext && !meta?.pendingKnowledgeDigest) return;
     meta.pendingForkContext = undefined;
+    meta.pendingKnowledgeDigest = undefined;
     await this.deps.store.upsert(meta);
   }
 
@@ -1259,7 +1290,7 @@ export class SessionManager {
     setTimeout(() => {
       const m = this.get(meta.id);
       if (!m || m.goal?.status !== 'active' || m.status === 'running' || m.status === 'awaiting') return;
-      void this.send(meta.id, { text: prompt }).catch((e) => this.deps.log('warn', `[${meta.id}] goal continue failed: ${errorMessage(e)}`));
+      void this.sendAs(meta.id, { text: prompt }, 'goal').catch((e) => this.deps.log('warn', `[${meta.id}] goal continue failed: ${errorMessage(e)}`));
     }, 1500);
   }
 
@@ -1280,7 +1311,7 @@ export class SessionManager {
           autoContinue: opts.autoContinue ?? s.goalDefaults.autoContinue
         };
         this.emit(id, { type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level: 'info', text: `Goal set: ${meta.goal.objective}` } });
-        if (meta.status === 'idle') void this.send(id, { text: this.goalKickoffPrompt(meta.goal) }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+        if (meta.status === 'idle') void this.sendAs(id, { text: this.goalKickoffPrompt(meta.goal) }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         break;
       }
       case 'pause':
@@ -1289,7 +1320,7 @@ export class SessionManager {
       case 'resume':
         if (meta.goal) {
           meta.goal.status = 'active';
-          if (meta.status === 'idle') void this.send(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` }).catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
+          if (meta.status === 'idle') void this.sendAs(id, { text: `Resuming the goal: ${meta.goal.objective}\nContinue where you left off.` }, 'goal').catch((e) => this.emit(id, { type: 'error', message: errorMessage(e) }));
         }
         break;
       case 'clear':
@@ -1411,6 +1442,7 @@ export class SessionManager {
       queued: 0,
       harnessRef: {},
       pendingForkContext: undefined,
+      pendingKnowledgeDigest: undefined,
       goal: undefined,
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
@@ -1445,6 +1477,9 @@ export class SessionManager {
         meta.harnessRef = { nativeHistory: true };
       }
     }
+    // The fork keeps the project's digest (same project, same directory) but hands it over the way
+    // its own harness can: in the system prompt, or on the first message.
+    if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
     if (cross) {
       // The target cannot resume the source's provider session, so hand it the prior conversation

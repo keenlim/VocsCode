@@ -257,9 +257,10 @@ describe('sidebar session pin visibility', () => {
 });
 
 describe('sidebar header row', () => {
-  // jsdom never applies styles.css, so the spacing that keeps the live-session count off the
-  // wordmark — and the truncation that keeps the row from overflowing at 200px — is only reachable
-  // as text. Placement in the DOM is covered by tests/sidebar-running-badge.test.tsx.
+  // jsdom never applies styles.css, so the spacing that keeps the status counts off the wordmark —
+  // the wrapping that keeps them on one readable row at the default width, and the truncation that
+  // keeps the row from overflowing at 200px — is only reachable as text. Placement in the DOM is
+  // covered by tests/sidebar-status-badges.test.tsx.
   const styles = fs.readFileSync(path.join(process.cwd(), 'src', 'renderer', 'src', 'styles.css'), 'utf8');
   const rule = (selector: string): string => {
     const start = styles.indexOf(`\n${selector} {`);
@@ -276,12 +277,22 @@ describe('sidebar header row', () => {
     return Number.parseFloat(/margin-left:\s*([\d.]+)px/.exec(declarations)?.[1] ?? '0');
   };
 
-  it('keeps a margin between the wordmark and the running count', () => {
-    expect(rule('.sidebar-running'), 'the running badge rule moved; keep this test with it').not.toBe('');
-    expect(leftMargin(rule('.sidebar-running'))).toBeGreaterThan(0);
+  it('keeps a margin between the wordmark and the status counts', () => {
+    expect(rule('.sidebar-status'), 'the status badge rule moved; keep this test with it').not.toBe('');
+    expect(leftMargin(rule('.sidebar-status'))).toBeGreaterThan(0);
   });
 
-  it('lets the wordmark truncate instead of pushing the running count off the row', () => {
+  it('lets the badges wrap onto a second line rather than overflow the header', () => {
+    // Two badges side by side need ~125px; the wordmark, the header actions and the padding take
+    // the rest of the 280px default. Wrapping is what keeps the counts visible beside an untruncated
+    // title there, and a `min-content` basis is what stops the cluster claiming the wordmark's room
+    // before it has wrapped. Measured at 280px: title whole, badges stacked, no horizontal overflow.
+    const cluster = rule('.sidebar-status');
+    expect(cluster).toMatch(/flex-wrap:\s*wrap/);
+    expect(cluster).toMatch(/flex:\s*\d+\s+\d+\s+min-content/);
+  });
+
+  it('lets the wordmark truncate instead of pushing the counts off the row', () => {
     expect(rule('.brand')).toMatch(/min-width:\s*0/);
     expect(rule('.brand > span')).toMatch(/overflow:\s*hidden/);
     expect(rule('.brand > span')).toMatch(/white-space:\s*nowrap/);

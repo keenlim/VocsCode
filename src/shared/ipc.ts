@@ -287,6 +287,8 @@ export interface IpcContract {
   'knowledge:read': [{ sessionId: string; id: string }, KnowledgePageDetail | null];
   /** Scored search over the project's pages (accepted pages only unless asked otherwise). */
   'knowledge:search': [{ sessionId: string; q: string; limit?: number; includeHistorical?: boolean }, KnowledgeSearchResult[]];
+  /** Start an empty wiki for the project, for a project whose docs are too thin to bootstrap from. */
+  'knowledge:create': [{ sessionId: string }, KnowledgeView];
   /** Accept or reject one proposal; rejecting remembers the claim. */
   'knowledge:review': [{ sessionId: string; id: string; action: 'accept' | 'reject'; note?: string }, KnowledgeView];
   /** Accept every proposal and draft at once; deprecated and superseded pages are left alone. */
