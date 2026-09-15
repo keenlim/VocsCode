@@ -248,15 +248,19 @@ export function Sidebar() {
           <Icon name="logo" size={22} />
           <span>Vocs Code</span>
         </div>
+        {running > 0 && (
+          <div className="sidebar-running">
+            <Badge tone="blue">{running} running</Badge>
+          </div>
+        )}
         <div className="sidebar-top-actions">
           <Button variant="ghost" size="sm" icon="search" className="btn-icon" onClick={() => useStore.getState().openSearch(true)} title="Search sessions (Ctrl+Shift+F)" aria-label="Search sessions" />
           <Button variant="ghost" size="sm" icon="plus" className="btn-icon" onClick={() => void startNewSession()} title="New folder (Ctrl+N)" aria-label="New folder" />
         </div>
       </div>
-      {(awaiting > 0 || running > 0) && (
+      {awaiting > 0 && (
         <div className="sidebar-summary">
-          {awaiting > 0 && <Badge tone="red">{awaiting} awaiting approval</Badge>}
-          {running > 0 && <Badge tone="blue">{running} running</Badge>}
+          <Badge tone="red">{awaiting} awaiting approval</Badge>
         </div>
       )}
       <div
