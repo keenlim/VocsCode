@@ -79,6 +79,12 @@ interface State {
   panelOpen: boolean;
   panelTab: PanelTab;
   panelBottomTab: PanelBottomTab;
+  /**
+   * Bottom-half tabs that have been opened this app run. The half mounts a tab the first time it is
+   * opened (MCP probes servers, Subagents lists run files), so this has to outlive the panel — which
+   * unmounts whenever the user leaves the chat view, e.g. for Settings.
+   */
+  panelBottomOpened: PanelBottomTab[];
   /** One-shot request to show a file in the Files tab, set by transcript file links. */
   fileReveal: FileReveal | null;
   /** One-shot request to open one subagent run, set by a subagent tool card. */
@@ -227,6 +233,11 @@ async function applyNav(set: Setter, get: Getter, entry: NavEntry, index: number
   }
 }
 
+/** Adds a bottom-half tab to the opened set, keeping the array identity when it is already there. */
+function markPanelBottomOpened(list: PanelBottomTab[], tab: PanelBottomTab): PanelBottomTab[] {
+  return list.includes(tab) ? list : [...list, tab];
+}
+
 export const useStore = create<State>((set, get) => ({
   booted: false,
   bootError: null,
@@ -254,6 +265,7 @@ export const useStore = create<State>((set, get) => ({
   panelOpen: true,
   panelTab: 'changes',
   panelBottomTab: 'mcp',
+  panelBottomOpened: [],
   fileReveal: null,
   subagentReveal: null,
   newSessionOpen: false,
@@ -556,11 +568,11 @@ export const useStore = create<State>((set, get) => ({
   },
   setPanelTab(tab) {
     // MCP moved to the lower half; asking for that tab opens the half instead of an empty top pane.
-    if (tab === 'mcp') set({ panelBottomTab: 'mcp', panelOpen: true });
+    if (tab === 'mcp') set((s) => ({ panelBottomTab: 'mcp', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'mcp'), panelOpen: true }));
     else set({ panelTab: tab, panelOpen: true });
   },
   setPanelBottomTab(panelBottomTab) {
-    set({ panelBottomTab, panelOpen: true });
+    set((s) => ({ panelBottomTab, panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, panelBottomTab), panelOpen: true }));
   },
   revealFile(sessionId, path, line) {
     set({ fileReveal: line ? { sessionId, path, line } : { sessionId, path }, panelTab: 'files', panelOpen: true });
@@ -569,7 +581,7 @@ export const useStore = create<State>((set, get) => ({
     set((s) => (s.fileReveal ? { fileReveal: null } : {}));
   },
   revealSubagentRun(sessionId, runId) {
-    set({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelOpen: true });
+    set((s) => ({ subagentReveal: { sessionId, runId }, panelBottomTab: 'subagents', panelBottomOpened: markPanelBottomOpened(s.panelBottomOpened, 'subagents'), panelOpen: true }));
   },
   consumeSubagentReveal() {
     set((s) => (s.subagentReveal ? { subagentReveal: null } : {}));

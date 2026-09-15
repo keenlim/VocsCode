@@ -39,19 +39,13 @@ export function RightPanel({ session }: { session: SessionMeta }) {
   const tab = useStore((s) => s.panelTab);
   const setTab = useStore((s) => s.setPanelTab);
   const bottomTab = useStore((s) => s.panelBottomTab);
-  const setBottomTab = useStore((s) => s.setPanelBottomTab);
-  const reveal = useStore((s) => s.subagentReveal);
+  const openBottom = useStore((s) => s.setPanelBottomTab);
   const togglePanel = useStore((s) => s.togglePanel);
   // The lower half loads a tab the first time it is opened: MCP probes servers, and the Subagents tab
-  // lists run files, neither of which should happen for a half the user may never look at.
-  const [opened, setOpened] = useState<PanelBottomTab[]>([]);
-  const openBottom = (next: PanelBottomTab) => {
-    setBottomTab(next);
-    setOpened((prev) => (prev.includes(next) ? prev : [...prev, next]));
-  };
-  useEffect(() => {
-    if (reveal) setOpened((prev) => (prev.includes('subagents') ? prev : [...prev, 'subagents']));
-  }, [reveal]);
+  // lists run files, neither of which should happen for a half the user may never look at. The set of
+  // already-opened tabs lives in the store so leaving the chat view (which unmounts this panel) and
+  // coming back does not blank the half's still-selected tab.
+  const opened = useStore((s) => s.panelBottomOpened);
   return (
     <aside className="panel">
       <div className="panel-section panel-top">
