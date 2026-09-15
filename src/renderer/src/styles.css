@@ -969,9 +969,23 @@ h4 {
   gap: 8px;
   font-weight: 700;
   font-size: 17px;
+  /* The live-session badge keeps its width; the wordmark gives up room first (see .brand > span). */
+  min-width: 0;
 }
 .brand > .icon {
   color: var(--accent);
+}
+.brand > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The count of live sessions sits on the title's row, not on a row of its own: the margin keeps it
+   off the wordmark, and margin-right keeps the header actions pinned to the right edge. */
+.sidebar-running {
+  display: flex;
+  align-items: center;
+  margin: 0 auto 0 10px;
 }
 .sidebar-summary {
   display: flex;
