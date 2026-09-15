@@ -66,6 +66,14 @@ export interface HarnessAdapter {
   setPermissionMode(mode: PermissionMode): Promise<void>;
   /** False means the adapter accepted the request but had too little context to reduce. */
   compact?(): Promise<boolean | void>;
+  /**
+   * Engines that compact on their own: the app hands over the token window instead of asking for a
+   * compaction. Presence of this method opts the adapter out of app-requested automatic compaction,
+   * because such an engine can only be reached between turns — the one moment it has nothing to
+   * compact — while it reduces context from inside a turn by itself. `undefined` restores the
+   * engine's own default, so a threshold the user clears leaves no trace.
+   */
+  setAutoCompactionWindow?(tokens: number | undefined): Promise<void>;
   /** Restores context to immediately before a persisted user message. Only supported by adapters with durable checkpoints. */
   rewindToUserMessage?(itemId: string): Promise<boolean>;
   listModels?(): Promise<ModelInfo[]>;

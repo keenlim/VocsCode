@@ -50,6 +50,12 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
+Context reduction differs the same way. Most engines take an app-requested `compact()` at an idle
+boundary between turns. Claude's CLI instead reduces context from inside the turn that needs it, so
+its adapter exposes `setAutoCompactionWindow(tokens)`: the app hands over the token window that the
+auto-compaction setting resolves to and the engine decides when to use it. An adapter that offers
+that method is never sent compaction requests, and `undefined` restores the engine's own default.
+
 `/goal` has a per-session driver (`src/shared/goal-driver.ts`): the Claude adapter reports the slash
 commands its CLI accepts (`supportedCommands()` on init, refreshed on `commands_changed`), and when
 that list — or, before the harness has started, a `goal` skill on disk — names `goal`, the composer
