@@ -701,6 +701,17 @@ export interface SessionMeta {
    * to the next user message so the new harness starts with the prior conversation, then cleared.
    */
   pendingForkContext?: boolean;
+  /**
+   * The project's knowledge digest for this session, kept beside the config rather than folded into
+   * `config.appendSystemPrompt`: a fork copies the source's config, and a digest baked into it would
+   * be duplicated by the copy's own priming. Read through `sessionAppendPrompt`.
+   */
+  knowledgeDigest?: string;
+  /**
+   * Set when the harness has no system prompt to add to (`capabilities.systemPrompt` false), so the
+   * digest has to be prefixed to the first message instead. Cleared once the harness accepts it.
+   */
+  pendingKnowledgeDigest?: boolean;
   usage: UsageTotals;
   lastError?: string;
   /** Current model as reported by the harness (may differ from config after live switch). */
@@ -957,6 +968,12 @@ export interface HarnessCapabilities {
    * harness reads its own store and we only import/export. `none`: no way in.
    */
   mcp: McpSupport;
+  /**
+   * Whether we can add to the harness's own system prompt for the whole session
+   * (`SessionConfig.appendSystemPrompt`). A harness without it is not unprimable: session context
+   * that is not the user's words is prefixed to the first message instead.
+   */
+  systemPrompt: boolean;
   /** Which app-level permission modes are meaningful. */
   permissionModes: PermissionMode[];
   /** Whether model selection is provider-scoped (native) or harness-provided list. */

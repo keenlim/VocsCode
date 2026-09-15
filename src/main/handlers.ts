@@ -814,6 +814,11 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     return k.view(knowledgeScopeOf(sessionId));
   });
+  handle('knowledge:create', ({ sessionId }) => {
+    const k = knowledgeOf();
+    if (!k) throw new Error('Project knowledge is unavailable in this run');
+    return k.createWiki(knowledgeScopeOf(sessionId));
+  });
   handle('knowledge:read', ({ sessionId, id }) => {
     const k = knowledgeOf();
     if (!k) throw new Error('Project knowledge is unavailable in this run');
@@ -860,7 +865,9 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!k) throw new Error('Project knowledge is unavailable in this run');
     if (typeof id !== 'string' || !id) throw new Error('A page id is required');
     const scope = knowledgeScopeOf(sessionId);
-    await k.remove(scope, id);
+    // A delete that found nothing must not report success: the panel would claim a page is gone
+    // while it is still served to every agent.
+    if (!(await k.remove(scope, id))) throw new Error(`Nothing to delete: ${id} is not in this project's wiki.`);
     return k.view(scope);
   });
 

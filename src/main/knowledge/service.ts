@@ -17,6 +17,7 @@ import {
   buildKnowledgeGraph,
   expandKnowledgeQuery,
   graphNeighbours,
+  isPendingStatus,
   isServable,
   pathForProposal,
   renderKnowledgeDigest,
@@ -64,7 +65,6 @@ export interface KnowledgeProposeResult {
 }
 
 const DEFAULT_SETTINGS: KnowledgeSettings = { prime: true, autoDistill: true };
-const MAX_PAGES = 500;
 
 export class KnowledgeService {
   readonly store: KnowledgeStore;
@@ -115,11 +115,10 @@ export class KnowledgeService {
       hasWiki: await this.store.hasWiki(scope),
       pages: pages.length,
       // A deprecated or superseded page is history, not a pending decision. With ingestion
-      // automated, only pages still in a pre-current state are pending at all.
-      needsReview: pages.filter((p) => p.meta.status === 'draft' || p.meta.status === 'proposed').length,
+      // automated, only pages still in the legacy queue are pending at all.
+      needsReview: pages.filter((p) => isPendingStatus(p.meta.status)).length,
       proposals: proposals.length,
       stale,
-      indexed: false,
       ...(updated ? { lastUpdated: updated } : {}),
       ...(running ? { generating: true } : {}),
       ...(job ? { job } : {})
@@ -130,6 +129,20 @@ export class KnowledgeService {
     // Opening the panel is a passive trigger, and anything left in the old review queue is accepted
     // on sight: ingestion is automatic now.
     void this.ensureSeeded(scope);
+    return this.render(scope);
+  }
+
+  /**
+   * Starts an empty wiki for a project: the directory, no pages, no model needed. It deliberately
+   * does not run the passive seed — the point of this button is a wiki that starts empty.
+   */
+  async createWiki(scope: KnowledgeScope): Promise<KnowledgeView> {
+    await this.store.createWiki(scope);
+    this.deps.log('info', `knowledge: wiki created at ${this.store.repoDir(scope)}`);
+    return this.render(scope);
+  }
+
+  private async render(scope: KnowledgeScope): Promise<KnowledgeView> {
     await this.autoAcceptLegacy(scope);
     const [pages, proposals, rejectedClaims] = await Promise.all([this.store.load(scope), this.store.proposals(scope), this.store.rejectedClaims(scope)]);
     const summaries = pages.map((p) => this.summarize(p)).sort(byKindThenUpdated);
@@ -326,7 +339,9 @@ export class KnowledgeService {
     if (!page) return null;
     const claim = page.meta.claim ?? page.meta.title;
     if (action === 'reject') {
-      await this.store.deletePage(scope, id);
+      // Tombstoning is what makes a rejection stick; a claim whose page survived on disk must not be
+      // remembered as removed, or the panel reports a delete that did not happen.
+      if (!(await this.store.deletePage(scope, id))) throw new Error(`Could not remove ${id}, so its claim was not tombstoned.`);
       await this.store.reject(scope, claim, opts.by);
       this.deps.log('info', `knowledge: page discarded (${id})`);
       return null;
@@ -343,9 +358,10 @@ export class KnowledgeService {
   }
 
   /**
-   * Accepts every candidate at once: proposals through the normal review path (supersession and
-   * evidence handling still apply), then every non-current page in place. Historical pages are left
-   * alone — accepting everything must not resurrect a deprecated or superseded one.
+   * Accepts every pending candidate at once: proposals through the normal review path
+   * (supersession and evidence handling still apply), then the pages still in the legacy queue.
+   * Everything else is left alone — accepting in bulk must not resurrect a deprecated or
+   * superseded page, and `uncertain` is a recorded judgement about a claim, not an unreviewed one.
    */
   async acceptAll(scope: KnowledgeScope, opts: { by?: string } = {}): Promise<{ accepted: number }> {
     let accepted = 0;
@@ -353,16 +369,20 @@ export class KnowledgeService {
       if (await this.reviewProposal(scope, proposal, 'accept', { by: opts.by })) accepted++;
     }
     for (const page of await this.store.load(scope)) {
-      if (page.meta.status === 'current' || page.meta.status === 'deprecated' || page.meta.status === 'superseded') continue;
+      if (!isPendingStatus(page.meta.status)) continue;
       if (await this.reviewPage(scope, page.meta.id, 'accept', { by: opts.by })) accepted++;
     }
     this.deps.log('info', `knowledge: accepted ${accepted} item(s)`);
     return { accepted };
   }
 
-  /** Copies reviewed pages into the tracked `docs/wiki/` path; committing them stays the user's act. */
+  /**
+   * Copies reviewed pages into the tracked `docs/wiki/` path; committing them stays the user's act.
+   * The destination is the session's own checkout: publishing from a worktree session must drop the
+   * copies next to the work that produced them, not into the main checkout's working tree.
+   */
   async publish(scope: KnowledgeScope, ids: string[]): Promise<{ ok: boolean; dir: string; written: string[]; error?: string }> {
-    const dir = path.join(scope.projectRoot, KNOWLEDGE_PUBLISH_DIR);
+    const dir = path.join(scope.cwd, KNOWLEDGE_PUBLISH_DIR);
     const written: string[] = [];
     try {
       for (const id of ids.slice(0, 50)) {
@@ -372,7 +392,7 @@ export class KnowledgeService {
         await fs.mkdir(path.dirname(dest), { recursive: true });
         const text = `${serializeForPublish(page)}\n`;
         await writeFileAtomic(dest, text);
-        written.push(path.relative(scope.projectRoot, dest).replace(/\\/g, '/'));
+        written.push(path.relative(scope.cwd, dest).replace(/\\/g, '/'));
       }
       this.deps.log('info', `knowledge: published ${written.length} page(s) to ${KNOWLEDGE_PUBLISH_DIR}`);
       return { ok: true, dir, written };
@@ -480,7 +500,7 @@ export class KnowledgeService {
     }
     for (const page of await this.store.load(scope)) {
       // Only the legacy queue is promoted; `uncertain` is a deliberate state a page keeps.
-      if (page.meta.status !== 'draft' && page.meta.status !== 'proposed') continue;
+      if (!isPendingStatus(page.meta.status)) continue;
       try {
         const meta: KnowledgePageMeta = { ...page.meta, status: 'current', updatedBy: 'auto:accept' };
         delete meta.targetPageId;

@@ -349,8 +349,13 @@ export class SessionManager {
     // pages rather than pasting them, and never outranks the project's own instruction files.
     if (this.deps.knowledgeDigest && this.settings().knowledge?.prime !== false) {
       try {
-        const digest = await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch });
-        if (digest) meta.config = { ...meta.config, appendSystemPrompt: [cfg.appendSystemPrompt?.trim(), digest].filter(Boolean).join('\n\n') };
+        const digest = (await this.deps.knowledgeDigest({ projectRoot: cfg.projectRoot, cwd, branch: worktreeBranch }))?.trim();
+        if (digest) {
+          meta.knowledgeDigest = digest;
+          // A harness with no system prompt of its own is primed through its first message instead,
+          // the same way a cross-harness fork hands over a transcript.
+          if (!HARNESS_BY_ID[cfg.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
+        }
       } catch (e) {
         this.deps.log('debug', `[${id}] knowledge digest unavailable: ${errorMessage(e)}`);
       }
@@ -709,28 +714,38 @@ export class SessionManager {
     // mutating its context until that operation has settled.
     if (active.compactionInFlight) await active.compactionInFlight.catch(() => undefined);
     if (this.active.get(id) !== active) throw new Error('Session stopped before the message could be sent.');
-    await active.adapter.send(await this.withForkContext(id, input));
-    await this.clearForkContext(id);
+    await active.adapter.send(await this.withSessionPreamble(id, input));
+    await this.clearSessionPreamble(id);
   }
 
-  /** Prefixes the first message after a cross-harness fork with the handed-off transcript. */
-  private async withForkContext(id: string, input: UserInput): Promise<UserInput> {
+  /**
+   * Prefixes the first message of a session with the context its harness could not be given up
+   * front: the transcript of a cross-harness fork, and the knowledge digest for a harness with no
+   * system prompt of its own. Prefixing the user's message — rather than sending a turn of our own —
+   * keeps the transcript showing only what the user typed.
+   */
+  private async withSessionPreamble(id: string, input: UserInput): Promise<UserInput> {
     const meta = this.get(id);
-    if (!meta?.pendingForkContext) return input;
-    let context: string | null = null;
-    try {
-      context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
-    } catch {
-      context = null;
+    if (!meta) return input;
+    const parts: string[] = [];
+    if (meta.pendingForkContext) {
+      try {
+        const context = await this.deps.store.readBlob(id, FORK_CONTEXT_FILE);
+        if (context) parts.push(context);
+      } catch {
+        // The blob is written before the flag is set; a read failure only means we have no context.
+      }
     }
-    return context ? { ...input, text: `${context}\n\n${input.text}` } : input;
+    if (meta.pendingKnowledgeDigest && meta.knowledgeDigest) parts.push(meta.knowledgeDigest);
+    return parts.length ? { ...input, text: `${parts.join('\n\n')}\n\n${input.text}` } : input;
   }
 
   /** Cleared only after the harness accepted the seeded message, so a failed start retries with it. */
-  private async clearForkContext(id: string): Promise<void> {
+  private async clearSessionPreamble(id: string): Promise<void> {
     const meta = this.get(id);
-    if (!meta?.pendingForkContext) return;
+    if (!meta?.pendingForkContext && !meta?.pendingKnowledgeDigest) return;
     meta.pendingForkContext = undefined;
+    meta.pendingKnowledgeDigest = undefined;
     await this.deps.store.upsert(meta);
   }
 
@@ -1331,6 +1346,7 @@ export class SessionManager {
       queued: 0,
       harnessRef: {},
       pendingForkContext: undefined,
+      pendingKnowledgeDigest: undefined,
       goal: undefined,
       // A fresh fork starts unpinned and active, never in the archive.
       pinned: undefined,
@@ -1365,6 +1381,9 @@ export class SessionManager {
         meta.harnessRef = { nativeHistory: true };
       }
     }
+    // The fork keeps the project's digest (same project, same directory) but hands it over the way
+    // its own harness can: in the system prompt, or on the first message.
+    if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
     const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
     if (cross) {
       // The target cannot resume the source's provider session, so hand it the prior conversation

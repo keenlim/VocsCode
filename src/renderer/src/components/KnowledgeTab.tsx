@@ -5,7 +5,7 @@
  * but nothing waits on a human to become servable.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { KnowledgeGraph, KnowledgeJobState, KnowledgePageDetail, KnowledgePageSummary, KnowledgeView } from '../../../shared/knowledge';
+import { isPendingStatus, type KnowledgeGraph, type KnowledgeJobState, type KnowledgePageDetail, type KnowledgePageSummary, type KnowledgeView } from '../../../shared/knowledge';
 import type { SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { renderMarkdown } from '../markdown';
@@ -14,7 +14,7 @@ import { Badge, Button, EmptyState, Icon, Spinner, Toggle } from './ui';
 
 function statusTone(status: KnowledgePageSummary['status']): 'green' | 'amber' | 'red' | 'neutral' | 'blue' {
   if (status === 'current') return 'green';
-  if (status === 'proposed' || status === 'draft') return 'amber';
+  if (isPendingStatus(status)) return 'amber';
   if (status === 'superseded' || status === 'deprecated') return 'red';
   if (status === 'uncertain') return 'blue';
   return 'neutral';
@@ -170,6 +170,19 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
     else await load();
   };
 
+  /** Starts an empty wiki, for a project whose docs are too thin to bootstrap a first set of pages. */
+  const createWiki = async () => {
+    setBusy(true);
+    try {
+      await applyView(await invoke('knowledge:create', { sessionId: session.id }));
+      toast('Wiki created — pages are recorded here as you work', 'success');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Tombstones the claim so an agent cannot refile it, and removes the page. */
   const rejectPage = async (id: string) => {
     setBusy(true);
@@ -285,7 +298,10 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
 
       {!status.hasWiki && !status.pages && (
         <EmptyState icon="book" title="No project wiki yet">
-          <p>Knowledge is ingested automatically as you work. Generate a first set of pages from this project's README, docs and instructions.</p>
+          <p>Knowledge is ingested automatically as you work. Generate a first set of pages from this project's README, docs and instructions, or start an empty wiki and let it fill in from there.</p>
+          <Button size="sm" disabled={busy} data-testid="knowledge-create" onClick={() => void createWiki()}>
+            Start an empty wiki
+          </Button>
         </EmptyState>
       )}
 
@@ -420,6 +436,22 @@ export function KnowledgeTab({ session }: { session: SessionMeta }) {
             </div>
           ))}
         </section>
+      )}
+
+      {view.rejectedClaims.length > 0 && (
+        // Rejecting is only accountable if the user can see what is being kept out: this is the
+        // ledger the agent tools read to refuse a refiled claim.
+        <details className="knowledge-rejected" data-testid="knowledge-rejected">
+          <summary>
+            {view.rejectedClaims.length} rejected claim{view.rejectedClaims.length === 1 ? '' : 's'}
+          </summary>
+          <div className="muted small">Remembered so no agent files them again. Deleting a page does not add one; rejecting does.</div>
+          <ul>
+            {view.rejectedClaims.map((claim) => (
+              <li key={claim}>{claim}</li>
+            ))}
+          </ul>
+        </details>
       )}
 
       <section className="knowledge-switches">

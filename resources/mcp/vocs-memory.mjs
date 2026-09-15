@@ -789,13 +789,22 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       const kind = KINDS.includes(args.kind) ? args.kind : existing ? existing.kind : 'concept';
       const targetPageId = requestedId && isValidPageId(requestedId) ? requestedId : existing ? existing.id : `${kind}/${slugify(title)}`;
       if (!isValidPageId(targetPageId)) return errorResult(`"${targetPageId}" is not a usable page id.`);
+      // Knowledge belongs to the project, not to the checkout it was discovered in. A worktree
+      // session is the app's default, and a page filed into its branch slice would be invisible to
+      // every other session of the project — so branch scope is only ever inherited from a page that
+      // already declared it, never inferred from the presence of a branch root.
+      const scope = existing ? existing.scope : 'repo';
+      const pageBranch = scope === 'branch' ? existing?.branch ?? branch ?? undefined : undefined;
+      // An inherited branch page must be rewritten in its own slice, or the update would leave the
+      // old copy behind and drop a repo-scope twin of it.
+      const targetRoot = pageBranch && branchRoot ? branchRoot : root;
       const now = new Date().toISOString();
       const meta = {
         id: targetPageId,
         title,
         kind,
-        scope: existing ? existing.scope : branchRoot ? 'branch' : 'repo',
-        ...(existing || !branchRoot || !branch ? {} : { branch }),
+        scope,
+        ...(pageBranch ? { branch: pageBranch } : {}),
         claim,
         keywords: list(args.keywords, 12),
         labels: normalizeLabels([...(existing?.labels ?? []), ...list(args.labels, 24)]),
@@ -808,10 +817,17 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
         updatedAt: now,
         updatedBy: 'agent:mcp'
       };
-      const file = path.join(root, `${targetPageId}.md`);
+      const file = path.join(targetRoot, `${targetPageId}.md`);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, serializePage(meta, body), 'utf8');
-      return textResult({ id: targetPageId, targetPageId, status: 'current', saved: true, note: 'Recorded in the project wiki automatically.' });
+      return textResult({
+        id: targetPageId,
+        targetPageId,
+        status: 'current',
+        saved: true,
+        scope,
+        note: scope === 'branch' ? `Recorded in the project wiki, on branch ${pageBranch}.` : 'Recorded in the project wiki automatically.'
+      });
     }
     if (name === 'knowledge_status') {
       const fs = await import('node:fs/promises');
@@ -844,12 +860,15 @@ export function createMemoryTools({ root, branchRoot, branch, userData = null, p
       if (!match) return errorResult('session_history_search needs a query of at least two letters.');
       const db = await ensureSearchDb();
       if (!db) return textResult({ available: false, reason: `Session history is unavailable (${searchError ?? 'no index'}).` });
+      // Fail closed: without a project to scope to, transcript recall from *every* project is
+      // exactly the privacy boundary this tool exists to hold, so it serves nothing instead.
+      if (!projectRoot) return textResult({ available: false, reason: 'Session history needs a project scope, which the app did not provide.' });
       const scope = new Map();
       for (const session of await sessionsIndex()) {
         if (!session || typeof session.id !== 'string') continue;
         const root = session.config && typeof session.config.projectRoot === 'string' ? session.config.projectRoot : null;
         // The same project boundary every other memory surface uses: no cross-project recall.
-        if (projectRoot && root !== projectRoot) continue;
+        if (root !== projectRoot) continue;
         if (session.archived === true && args.include_archived !== true) continue;
         scope.set(session.id, { title: typeof session.title === 'string' ? session.title : session.id });
       }

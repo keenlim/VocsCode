@@ -16,19 +16,31 @@ const fixture = path.resolve('tests/fixtures/mcp-graph-server.mjs');
 let root: string;
 let server: ChildProcess | null = null;
 let calls = 0;
+/** How many lookups the fixture had in flight at once, at their peak. */
+let inFlight = 0;
+let peakInFlight = 0;
 
 /** Starts the graph fixture and waits for the port it announces. */
-async function startGraph(): Promise<string> {
-  const child = spawn(process.execPath, [fixture], { stdio: ['ignore', 'pipe', 'pipe'] });
+async function startGraph(slowMs?: number): Promise<string> {
+  const child = spawn(process.execPath, [fixture], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(slowMs ? { GRAPH_SLOW_MS: String(slowMs) } : {}) } });
   server = child;
   return new Promise<string>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('graph fixture did not start')), 20_000);
     let buffer = '';
     child.stdout!.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
-      for (const line of buffer.split('\n')) {
-        if (line.startsWith('CALL:context:')) calls++;
-        if (line.startsWith('READY:')) {
+      // Consume whole lines only: a chunk boundary must not re-count the lines already seen.
+      let index: number;
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index).trim();
+        buffer = buffer.slice(index + 1);
+        if (line.startsWith('CALL:context:')) {
+          calls++;
+          inFlight++;
+          peakInFlight = Math.max(peakInFlight, inFlight);
+        } else if (line.startsWith('END:context:')) {
+          inFlight--;
+        } else if (line.startsWith('READY:')) {
           clearTimeout(timer);
           resolve(`http://127.0.0.1:${line.slice('READY:'.length).trim()}/mcp`);
         }
@@ -51,6 +63,8 @@ beforeEach(async () => {
   await fs.mkdir(path.join(root, 'src'), { recursive: true });
   await fs.writeFile(path.join(root, 'src', 'present.ts'), 'export const x = 1;\n', 'utf8');
   calls = 0;
+  inFlight = 0;
+  peakInFlight = 0;
 });
 
 afterEach(async () => {
@@ -124,6 +138,48 @@ describe('anchor resolution', () => {
     expect(out[0]).toMatchObject({ status: 'unavailable', note: 'This project is not indexed by GitNexus.' });
     // Starting the server for an unindexed project is the slow path the panel must never wait on.
     expect(urlAsked).toBe(false);
+  });
+
+  it('bounds the whole call, including a slow start, and says it ran out of time', async () => {
+    let urlAsked = false;
+    const resolve = createGitnexusAnchorResolver({
+      url: async () => {
+        urlAsked = true;
+        return 'http://127.0.0.1:1/mcp';
+      },
+      repoName: () => new Promise((r) => setTimeout(() => r('Vocs-Code'), 3_000)),
+      log: () => undefined,
+      budgetMs: 200
+    });
+    const started = Date.now();
+    const out = await resolve.resolve(scope(), [{ file: 'src/main/x.ts', symbol: 'x' }]);
+    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(out[0]).toMatchObject({ status: 'unavailable', note: 'Anchor resolution ran out of time.' });
+    // The budget is spent, so nothing after it is even attempted.
+    expect(urlAsked).toBe(false);
+  });
+
+  it('stops waiting on a wedged lookup instead of holding the detail view', async () => {
+    const url = await startGraph();
+    const resolve = createGitnexusAnchorResolver({ url: async () => url, repoName: async () => 'Vocs-Code', log: () => undefined, budgetMs: 400 });
+    const started = Date.now();
+    // The fixture answers `sleepy` only after 3s; the panel must not wait for it.
+    const out = await resolve.resolve(scope(), [{ file: 'src/main/session-manager.ts', symbol: 'sleepy' }]);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(out[0].status).toBe('unavailable');
+  });
+
+  it('looks symbols up in parallel rather than one after another', async () => {
+    const url = await startGraph(120);
+    const resolve = createGitnexusAnchorResolver({ url: async () => url, repoName: async () => 'Vocs-Code', log: () => undefined, concurrency: 2 });
+    const out = await resolve.resolve(
+      scope(),
+      ['a', 'b', 'c', 'd'].map((n) => ({ file: `src/${n}.ts`, symbol: 'sleepy' }))
+    );
+    expect(out.map((a) => a.status)).toEqual(['resolved', 'resolved', 'resolved', 'resolved']);
+    expect(calls).toBe(4);
+    // Serial workers would never have two lookups waiting at the same time.
+    expect(peakInFlight).toBeGreaterThan(1);
   });
 
   it('keeps the page order when only some anchors resolve', async () => {
