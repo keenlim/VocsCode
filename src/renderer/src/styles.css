@@ -5528,6 +5528,43 @@ body.resizing {
   flex: 1;
   min-width: 0;
 }
+/* The AGENTS.md memory snippet: a disclosure that stays quiet until asked for. */
+.mcp-guide-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mcp-guide-toggle:hover .mcp-name {
+  color: var(--accent);
+}
+.mcp-guide-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.mcp-guide-body {
+  margin: 4px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .mcp-store-head {
   display: flex;
   align-items: center;

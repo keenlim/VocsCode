@@ -3,6 +3,7 @@
  * Repo-defined servers stay inert until explicitly enabled here.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { MEMORY_GUIDE_MARKDOWN } from '../../../shared/memory-guide';
 import type { McpProjectInfo, McpServerDef, SessionMeta } from '../../../shared/types';
 import { invoke } from '../api';
 import { useStore } from '../store';
@@ -16,6 +17,7 @@ export function McpTab({ session }: { session: SessionMeta }) {
   const [editing, setEditing] = useState<McpServerDef | null>(null);
   const [busy, setBusy] = useState(false);
   const [indexing, setIndexing] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
   const liveId = useRef(session.id);
 
   const load = useCallback(async () => {
@@ -72,6 +74,13 @@ export function McpTab({ session }: { session: SessionMeta }) {
     } finally {
       setIndexing(false);
     }
+  };
+
+  const copyGuide = () => {
+    void navigator.clipboard
+      .writeText(MEMORY_GUIDE_MARKDOWN)
+      .then(() => toast('Snippet copied — paste it into AGENTS.md', 'success'))
+      .catch(() => toast('Could not copy the snippet', 'error'));
   };
 
   const saveRepo = async (servers: McpServerDef[]) => {
@@ -159,6 +168,29 @@ export function McpTab({ session }: { session: SessionMeta }) {
               </div>
             </div>
           ))}
+
+        <div className="mcp-card mcp-guide" data-testid="memory-guide">
+          <button type="button" className="mcp-guide-toggle" aria-expanded={guideOpen} data-testid="memory-guide-toggle" onClick={() => setGuideOpen((v) => !v)}>
+            <Icon name={guideOpen ? 'chevron' : 'chevronRight'} size={12} />
+            <Icon name="brain" size={12} />
+            <span className="mcp-name">Teach your agents to use these</span>
+            <span className="spacer" />
+            <span className="muted small">AGENTS.md snippet</span>
+          </button>
+          {guideOpen && (
+            <>
+              <div className="muted small">
+                Agents reach for these servers far more often when the project tells them to. Paste this into your <code>AGENTS.md</code> (or <code>CLAUDE.md</code>) so every
+                session checks the code graph, the wiki and past sessions before falling back to grep.
+              </div>
+              <pre className="mcp-guide-body mono" data-testid="memory-guide-text">{MEMORY_GUIDE_MARKDOWN}</pre>
+              <div className="mcp-index-row">
+                <span className="muted small">Markdown, ready to paste.</span>
+                <Button size="sm" icon="copy" data-testid="memory-guide-copy" onClick={copyGuide}>Copy snippet</Button>
+              </div>
+            </>
+          )}
+        </div>
       </section>
 
       <section className="mcp-section" data-testid="mcp-repo-section">

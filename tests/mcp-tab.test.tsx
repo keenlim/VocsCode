@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { McpTab } from '../src/renderer/src/components/McpTab';
+import { MEMORY_GUIDE_MARKDOWN, MEMORY_GUIDE_TITLE } from '../src/shared/memory-guide';
 import { useStore } from '../src/renderer/src/store';
 import type { McpProjectInfo, SessionMeta } from '../src/shared/types';
 
@@ -73,5 +74,39 @@ describe('MCP panel tab', () => {
     invoke.mockResolvedValue(info({ state: { enabledRepo: ['repo-db'] }, effective: [{ def: repoServer, scope: 'repo', enabled: true }] }));
     await act(async () => { fireEvent.click(screen.getByText('Enable')); });
     expect(invoke).toHaveBeenCalledWith('mcp:project:state', { sessionId: 's1', patch: { enabledRepo: ['repo-db'] } });
+  });
+});
+
+describe('AGENTS.md memory snippet', () => {
+  it('stays collapsed until asked for, then copies the three-layer snippet', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    invoke.mockResolvedValue(info());
+    await act(async () => { render(<McpTab session={session()} />); });
+
+    const toggle = screen.getByTestId('memory-guide-toggle');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId('memory-guide-text')).toBeNull();
+    expect(screen.queryByTestId('memory-guide-copy')).toBeNull();
+
+    await act(async () => { fireEvent.click(toggle); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const shown = screen.getByTestId('memory-guide-text').textContent ?? '';
+    expect(shown).toContain(MEMORY_GUIDE_TITLE);
+    for (const tool of ['query', 'context', 'impact', 'knowledge_search', 'knowledge_propose', 'session_history_search']) {
+      expect(shown).toContain(tool);
+    }
+
+    await act(async () => { fireEvent.click(screen.getByTestId('memory-guide-copy')); });
+    expect(writeText).toHaveBeenCalledWith(MEMORY_GUIDE_MARKDOWN);
+  });
+
+  it('names every layer the app actually serves, and no layer it does not', () => {
+    expect(MEMORY_GUIDE_MARKDOWN).toContain('**L1 — the code graph.**');
+    expect(MEMORY_GUIDE_MARKDOWN).toContain('**L2 — the project wiki.**');
+    expect(MEMORY_GUIDE_MARKDOWN).toContain('**L3 — session history.**');
+    expect(MEMORY_GUIDE_MARKDOWN).not.toContain('L4');
+    // The repo is scoped per session; a pasted snippet must never teach agents to pass `repo`.
+    expect(MEMORY_GUIDE_MARKDOWN).toContain('Never pass `repo`');
   });
 });
