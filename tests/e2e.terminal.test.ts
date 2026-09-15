@@ -249,6 +249,11 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await activeRow.hover();
       await activeRow.locator('[aria-label="Archive session"]').click();
       await expect.poll(async () => win.locator('[data-testid="session-row"]').count(), { timeout: 20_000 }).toBe(0);
+      // Archiving must move the message area off the session that just left the list. It was the
+      // only one here, so there is no neighbour to select and the app returns to its empty state
+      // rather than keeping the archived session's transcript on screen.
+      await win.waitForSelector('.main-empty', { timeout: 20_000 });
+      expect(await win.locator('.main-empty').innerText()).toContain('Welcome to Vocs Code');
       await win.click('.sidebar-link:has-text("Archived")');
       const archivedRow = win.locator('[data-testid="session-row"]').first();
       await archivedRow.waitFor({ timeout: 20_000 });
