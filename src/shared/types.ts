@@ -1179,6 +1179,9 @@ export interface GitBranchOverviewItem {
   upstream?: string;
   upstreamAhead?: number;
   upstreamBehind?: number;
+  /** The upstream branch no longer exists on the server (`%(upstream:track)` = `[gone]`): this branch is local-only.
+   *  Only shows up once remote-tracking refs have been pruned, which is why a refresh re-syncs them. */
+  upstreamGone?: boolean;
   /** Set when the branch is checked out in a worktree. */
   worktreePath?: string;
   /** GitHub PR attached to this branch, when gh is available. */

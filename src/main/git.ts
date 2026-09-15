@@ -862,7 +862,12 @@ export function parseUpstreamTrack(track: string): { ahead?: number; behind?: nu
   };
 }
 
-/** GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding. */
+/**
+ * GitHub-style branch overview for the Branches panel: age, ahead/behind vs base, merged state, worktree binding.
+ * The list is the repo's LOCAL branches (`refs/heads`), which a server-side delete never removes — a branch
+ * deleted on GitHub still exists here. `upstreamGone` is how the panel tells the two apart; it is read from
+ * remote-tracking refs, so it is only accurate as of the last fetch (the panel's refresh runs `fetch --prune`).
+ */
 export async function gitBranchesOverview(cwd: string): Promise<GitBranchOverview> {
   const root = await gitRoot(cwd);
   if (!root) return { isRepo: false, branches: [], worktrees: [] };
@@ -909,6 +914,9 @@ export async function gitBranchesOverview(cwd: string): Promise<GitBranchOvervie
         ...counts,
         ...(up.ahead !== undefined ? { upstreamAhead: up.ahead } : {}),
         ...(up.behind !== undefined ? { upstreamBehind: up.behind } : {}),
+        // A branch deleted on the server keeps its local ref, so the row stays; `[gone]` is the only
+        // sign it is local-only, and it appears once the stale remote-tracking ref has been pruned.
+        ...(up.gone ? { upstreamGone: true } : {}),
         ...(wtByBranch.has(name) ? { worktreePath: wtByBranch.get(name) } : {}),
         ...(pr.prs?.[name] ? { pr: pr.prs[name] } : {})
       };

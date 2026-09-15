@@ -6,6 +6,8 @@
  * The row's New session action confirms first in a dialog carrying the review template, editable
  * before the session starts on the repo; the issue row does the same with the fix template. That
  * turn is not asserted, since no provider key is configured.
+ * The Branches view runs against a real bare remote: a branch pushed and then deleted server-side
+ * reads as live until Refresh re-syncs remote-tracking refs, and says "Deleted on origin" after.
  * The session is seeded on disk so no harness and no provider key is involved. Requires
  * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
@@ -48,9 +50,15 @@ const GH_CMD = [
   'exit /b 0'
 ].join('\r\n');
 
-/** Seeds a repository and session with the fake gh, launches the app and lands on the PR view. */
-async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplication; win: Page }> {
-  const tmp = path.join(os.tmpdir(), `vocs-code-git-${Date.now()}-${panelWidth}`);
+/**
+ * Seeds a repository and session with the fake gh, launches the app and lands on the Git tab.
+ * `seedRepo` runs after the initial commit, still before the app starts, so a test can add a remote
+ * and branches for the panel to read.
+ */
+async function seedAndLaunch(
+  { tag, panelWidth, seedRepo }: { tag: string; panelWidth: number; seedRepo?: (project: string, git: (...args: string[]) => void) => void }
+): Promise<{ app: ElectronApplication; win: Page }> {
+  const tmp = path.join(os.tmpdir(), `vocs-code-git-${Date.now()}-${tag}`);
   const userData = path.join(tmp, 'userData');
   const project = path.join(tmp, 'project');
   const bin = path.join(tmp, 'bin');
@@ -66,6 +74,7 @@ async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplic
   git('init', '-q');
   git('add', '-A');
   git('-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'init');
+  seedRepo?.(project, git);
 
   // A dismissed setup banner keeps the panel to its tables.
   await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { gitSetupSkipped: [project], panelWidth }));
@@ -110,9 +119,43 @@ async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplic
   await expectQuietWindow(app);
 
   await win.locator('.panel-tab', { hasText: 'Git' }).click();
+  return { app, win };
+}
+
+/** Lands on the PR view of a seeded repo. */
+async function launchGitPanel(panelWidth: number): Promise<{ app: ElectronApplication; win: Page }> {
+  const { app, win } = await seedAndLaunch({ tag: `pr-${panelWidth}`, panelWidth });
+  await fs.mkdir(shots, { recursive: true });
   await win.getByTitle('Pull requests on GitHub (via gh)').click();
   await win.getByRole('button', { name: 'Read pull request #7: Ship the widget' }).waitFor({ timeout: 30_000 });
-  await fs.mkdir(shots, { recursive: true });
+  return { app, win };
+}
+
+/**
+ * Lands on the Branches view of a repo whose `feature/ghost` was pushed, then deleted on the server
+ * the way it was in the report. The delete happens in the bare remote rather than through a
+ * `git push --delete` from this checkout, because that command prunes the local remote-tracking ref
+ * as it goes: deleting directly leaves this clone with the stale `origin/feature/ghost` the panel
+ * has to cope with.
+ */
+async function launchBranchesPanel(): Promise<{ app: ElectronApplication; win: Page }> {
+  const { app, win } = await seedAndLaunch({
+    tag: 'branches',
+    // Wide enough that the Status column is on screen: the narrow panel collapses it, and a
+    // collapsed column is exactly where a stale row would go unnoticed.
+    panelWidth: 760,
+    seedRepo: (project, git) => {
+      const origin = path.join(path.dirname(project), 'origin.git');
+      execFileSync('git', ['init', '-q', '--bare', origin], { stdio: 'ignore' });
+      git('remote', 'add', 'origin', origin);
+      git('push', '-q', '-u', 'origin', 'HEAD');
+      git('checkout', '-q', '-b', 'feature/ghost');
+      git('-c', 'user.email=e2e@example.com', '-c', 'user.name=e2e', 'commit', '-qm', 'ghost work', '--allow-empty');
+      git('push', '-q', '-u', 'origin', 'feature/ghost');
+      execFileSync('git', ['--git-dir', origin, 'branch', '-D', 'feature/ghost'], { stdio: 'ignore' });
+    }
+  });
+  await win.locator('.branch-row', { hasText: 'feature/ghost' }).waitFor({ timeout: 30_000 });
   return { app, win };
 }
 
@@ -205,6 +248,28 @@ describe.runIf(enabled)('git panel PR review session', () => {
     // The Git panel re-renders for the new session, so the table is back with the review running.
     await win.waitForSelector('.pr-row', { timeout: 30_000 });
     await win.screenshot({ path: path.join(shots, 'git-panel-03-pr-review-session.png') });
+
+    await app.close();
+  }, 180_000);
+});
+
+describe.runIf(enabled)('git panel branch state', () => {
+  it('re-syncs on refresh and marks a branch deleted on the server', async () => {
+    const { app, win } = await launchBranchesPanel();
+    const ghostRow = win.locator('.branch-row', { hasText: 'feature/ghost' });
+
+    // The report's symptom: the local ref outlives the server's branch, so the stale row reads as live.
+    expect(await ghostRow.innerText()).toContain('synced');
+    expect(await ghostRow.innerText()).not.toContain('Deleted on origin');
+    await fs.mkdir(shots, { recursive: true });
+    await win.screenshot({ path: path.join(shots, 'git-panel-05-branches-stale.png') });
+
+    await win.getByTitle(/^Refresh/).click();
+    await ghostRow.getByText('Deleted on origin').waitFor({ timeout: 30_000 });
+    // The branch is still there — only its server copy is gone, and the panel says so instead of hiding it.
+    expect(await win.locator('.branch-row', { hasText: 'feature/ghost' }).count()).toBe(1);
+    expect(await ghostRow.innerText()).not.toContain('synced');
+    await win.screenshot({ path: path.join(shots, 'git-panel-06-branches-gone.png') });
 
     await app.close();
   }, 180_000);
