@@ -75,7 +75,7 @@ Which suite a change must keep passing — and extend, per **E2E discipline**:
 | Updater, `main/updater*.ts`, update pill, About updates panel | `tests/updater.test.ts`, `tests/update-ui.test.tsx` + `e2e.update` (opt-in, packaged + mock feed) |
 | pi harness (`harness/pi.ts`), `resources/pi/**` | `VOCS_CODE_PI_INTEGRATION=1 vitest run tests/pi-subagents.integration.test.ts tests/e2e.pi-tools.test.ts` + live `HARNESS_SMOKE_ONLY=pi` |
 | Subagents panel, right-panel split | `VOCS_CODE_E2E_UI=1 vitest run tests/e2e.subagents.test.ts` + `e2e.layout`, `e2e.files` |
-| Project knowledge panel, `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
+| Project knowledge (wiki store, docs scan, distillation, PR reflection, relation graph), `src/main/knowledge/**`, `resources/mcp/vocs-memory.mjs` | `e2e.knowledge` |
 | Remote access panel, `src/main/remote/**`, relay `/devices`, audit and view-only policy | `e2e.remote` + `tests/remote-audit.test.ts`, `tests/web-client.test.ts` |
 | Relay routing, auth or rate limiting (`relay/src/routes.ts`, `relay/src/rate.ts`) | `tests/relay-routes.test.ts` + `tests/remote-e2e.test.ts`, `e2e.remote` |
 | Anything else under `src/renderer/**` | `npm run test:e2e:ci` |

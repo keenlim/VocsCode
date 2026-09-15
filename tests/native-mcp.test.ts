@@ -41,6 +41,7 @@ beforeEach(async () => {
     scope: 'repo',
     claim: 'A harness process belongs to exactly one session.',
     keywords: ['harness', 'session'],
+    labels: [],
     sources: [],
     anchors: [],
     related: [],
@@ -169,7 +170,8 @@ describe('native MCP gating', () => {
       expect(h.approval.mock.calls[0][0].toolName).toBe(PROPOSE);
       expect(String(h.approval.mock.calls[0][0].description)).toContain('vocs-memory');
       expect(results[1].item).toMatchObject({ status: 'done' });
-      expect(await fs.readdir(path.join(wiki, '_proposals'))).toHaveLength(1);
+      // Propose now ingests a real page (no review queue): the claim is served immediately.
+      expect(await fs.readFile(path.join(wiki, 'concept', 'pty-guard.md'), 'utf8')).toContain('status: current');
     } finally {
       await h.dispose();
     }

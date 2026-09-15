@@ -1,18 +1,21 @@
 /**
- * The two knowledge jobs. Both are explicit, bounded and cancellable by being one-shot: a single
- * background completion with a hard cap on what it may write.
+ * The knowledge jobs. Each is explicit, bounded and one-shot: a background completion per batch
+ * with a hard cap on what it may write.
  *
- *   bootstrap  docs + project instructions + the repo's own files → draft pages for review
- *   distill    one commit / PR / merge episode plus its transcript slice → proposals
+ *   bootstrap  every changed project document → pages (recursive, batched, incremental)
+ *   distill    one commit / merge episode plus its transcript slice → pages
+ *   reflect    one PR's commits and bounded diff over the whole wiki → page updates
  *
- * Neither job can mark a page current, publish it, or delete anything. The LLM's only write path is
- * `propose`, which applies the same dedupe, evidence and rejection rules a human proposal gets.
+ * No job can publish or delete anything. Every write goes through `propose`, which applies the
+ * same dedupe, evidence and rejection rules any other writer gets.
  */
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   KNOWLEDGE_KINDS,
   isSameClaim,
+  normalizeClaim,
+  normalizeLabels,
   pathForProposal,
   type KnowledgeKind,
   type KnowledgePageMeta,
@@ -45,85 +48,124 @@ export interface KnowledgeSynthDeps {
 
 const MAX_EVIDENCE_CHARS = 40_000;
 const MAX_FILE_CHARS = 5_000;
-const MAX_FILES = 14;
-const MAX_BOOTSTRAP_PAGES = 12;
+const MAX_SCAN_FILES = 600;
+const MAX_PAGES_PER_BATCH = 12;
 const MIN_BODY_CHARS = 80;
 const MAX_DISTILLED_PROPOSALS = 3;
+const MAX_REFLECTED_PAGES = 8;
 const MAX_TRANSCRIPT_CHARS = 6_000;
+const MAX_EPISODE_CHARS = 8_000;
+
+/** Directories that never hold project knowledge; scanning them would only add noise and cost. */
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target', '.vocs-code', '.gitnexus', 'coverage', '.cache', 'vendor']);
+/** Generated or legal files that are not project knowledge. */
+const SKIP_FILES = new Set(['changelog.md', 'license.md', 'license']);
 
 const BOOTSTRAP_SYSTEM = [
   'You maintain a durable project wiki used by coding agents.',
   'You explain what the project means, why it is built this way, and what must stay true: architecture intent, concepts, decisions, conventions, gotchas, testing philosophy.',
   'You do NOT describe current symbols, call graphs or line numbers — another tool owns the current code structure.',
   'Prefer few, high-signal pages over many thin ones. Every page must be justified by the supplied evidence; never invent file paths or facts.',
-  'Reply with JSON only, no prose, matching: {"pages":[{"title":string,"kind":"architecture|component|concept|decision|convention|flow|gotcha|testing|migration","claim":string,"body":string,"keywords":string[],"sources":[{"type":"file|doc|commit|transcript|session|url|human","ref":string,"note":string?}],"anchors":[{"file":string,"symbol":string?}],"related":string[]}]}',
+  'Assign labels: a handful of normalized lowercase tags (e.g. "harness", "pty", "release") that group this page with related pages.',
+  'Reply with JSON only, no prose, matching: {"pages":[{"title":string,"kind":"architecture|component|concept|decision|convention|flow|gotcha|testing|migration","claim":string,"body":string,"labels":string[],"keywords":string[],"sources":[{"type":"file|doc|commit|transcript|session|url|human","ref":string,"note":string?}],"anchors":[{"file":string,"symbol":string?}],"related":string[]}]}',
   'A claim is one sentence. A body is 60-400 words of markdown that would still make sense without the source document.'
 ].join(' ');
 
 const DISTILL_SYSTEM = [
-  'You turn work that just happened into candidate project knowledge for a durable wiki.',
-  'A candidate is only worth proposing when it is durable (true beyond this task), non-obvious and evidenced by the supplied material.',
+  'You turn work that just happened into durable project knowledge for a wiki.',
+  'A candidate is only worth recording when it is durable (true beyond this task), non-obvious and evidenced by the supplied material.',
   'Never propose current implementation details — symbols, call chains, file lists — that the code already answers.',
   'If nothing durable happened, reply with {"proposals":[]}.',
-  'Reply with JSON only, matching: {"proposals":[{"title":string,"kind":"architecture|component|concept|decision|convention|flow|gotcha|testing|migration","claim":string,"body":string,"pageId":string?,"keywords":string[],"sources":[{"type":"file|doc|commit|transcript|session|url|human","ref":string,"note":string?}],"anchors":[{"file":string,"symbol":string?}]}]}'
+  'Assign labels: a handful of normalized lowercase tags that group this page with related pages.',
+  'Reply with JSON only, matching: {"proposals":[{"title":string,"kind":"architecture|component|concept|decision|convention|flow|gotcha|testing|migration","claim":string,"body":string,"pageId":string?,"labels":string[],"keywords":string[],"sources":[{"type":"file|doc|commit|transcript|session|url|human","ref":string,"note":string?}],"anchors":[{"file":string,"symbol":string?}]}]}'
 ].join(' ');
 
+const REFLECT_SYSTEM = [
+  'You reflect a pull request over a durable project wiki used by coding agents.',
+  'Update an existing page when the PR changes what the project means, why it is built this way, or what must stay true; create a new page only when nothing existing fits.',
+  'Return the pageId of an existing page to update it, and prefer updating over creating a near-duplicate.',
+  'Never propose current implementation details — symbols, call chains, file lists — that the code already answers.',
+  'Assign labels: a handful of normalized lowercase tags that group each page with related pages.',
+  'If the PR changes nothing durable, reply with {"proposals":[]}.',
+  'Reply with JSON only, matching: {"proposals":[{"title":string,"kind":"architecture|component|concept|decision|convention|flow|gotcha|testing|migration","claim":string,"body":string,"pageId":string?,"labels":string[],"keywords":string[],"sources":[{"type":"file|doc|commit|transcript|session|url|human","ref":string,"note":string?}],"anchors":[{"file":string,"symbol":string?}]}]}'
+].join(' ');
+
+interface DocumentBlock {
+  rel: string;
+  text: string;
+}
+
 /**
- * Reads the project's own documentation. This is the only evidence bootstrap gets: the wiki must be
- * grounded in what the project already wrote about itself, not in the model's guesses.
+ * Walks the checkout for markdown, skipping vendored and generated trees, and returns only the
+ * documents whose mtime/size changed since the last scan. The returned ledger is the complete new
+ * snapshot; the caller writes it only once the job has finished.
  */
-async function gatherEvidence(scope: KnowledgeScope): Promise<{ text: string; files: string[] }> {
+async function scanDocuments(
+  scope: KnowledgeScope,
+  store: KnowledgeStore
+): Promise<{ blocks: DocumentBlock[]; ledger: Record<string, { mtimeMs: number; size: number }> }> {
   const root = scope.cwd;
-  const candidates: string[] = [];
-  for (const name of ['README.md', 'AGENTS.md', 'CLAUDE.md', 'CONTRIBUTING.md']) {
-    if (await isFile(path.join(root, name))) candidates.push(name);
-  }
-  try {
-    const docs = await fs.readdir(path.join(root, 'docs'));
-    for (const name of docs.filter((n) => n.endsWith('.md')).slice(0, 12)) candidates.push(`docs/${name}`);
-  } catch {
-    /* no docs folder */
-  }
-  const blocks: string[] = [];
-  const files: string[] = [];
-  let total = 0;
-  for (const rel of candidates.slice(0, MAX_FILES)) {
+  const previous = await store.readScan(scope);
+  const ledger: Record<string, { mtimeMs: number; size: number }> = {};
+  const blocks: DocumentBlock[] = [];
+  const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+    if (depth > 8 || blocks.length >= MAX_SCAN_FILES) return;
+    let entries: import('node:fs').Dirent[];
     try {
-      const text = await fs.readFile(path.join(root, rel), 'utf8');
-      const clipped = text.length > MAX_FILE_CHARS ? `${text.slice(0, MAX_FILE_CHARS)}\n…(truncated)` : text;
-      if (total + clipped.length > MAX_EVIDENCE_CHARS) break;
-      total += clipped.length;
-      files.push(rel);
-      blocks.push(`### ${rel}\n\n${clipped}`);
+      entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
-      /* unreadable candidates are simply not evidence */
+      return;
     }
-  }
-  const dirs = await topLevelDirs(root);
-  if (dirs.length) blocks.push(`### layout\n\nTop-level directories: ${dirs.join(', ')}`);
-  return { text: blocks.join('\n\n'), files };
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const abs = path.join(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) await walk(abs, relPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+      if (SKIP_FILES.has(entry.name.toLowerCase())) continue;
+      let stat: import('node:fs').Stats;
+      try {
+        stat = await fs.stat(abs);
+      } catch {
+        continue;
+      }
+      ledger[relPath] = { mtimeMs: stat.mtimeMs, size: stat.size };
+      const last = previous[relPath];
+      if (last && last.mtimeMs === stat.mtimeMs && last.size === stat.size) continue;
+      let text: string;
+      try {
+        text = await fs.readFile(abs, 'utf8');
+      } catch {
+        continue;
+      }
+      const clipped = text.length > MAX_FILE_CHARS ? `${text.slice(0, MAX_FILE_CHARS)}\n…(truncated)` : text;
+      blocks.push({ rel: relPath, text: clipped });
+    }
+  };
+  await walk(root, '', 0);
+  return { blocks, ledger };
 }
 
-async function topLevelDirs(root: string): Promise<string[]> {
-  const skip = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', '.venv', 'venv', 'target', '.vocs-code', '.gitnexus']);
-  try {
-    const entries = await fs.readdir(root, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !skip.has(e.name))
-      .map((e) => e.name)
-      .sort()
-      .slice(0, 30);
-  } catch {
-    return [];
+/** Splits documents into evidence groups that each fit one completion. */
+function batchBlocks(blocks: DocumentBlock[], maxChars: number): DocumentBlock[][] {
+  const batches: DocumentBlock[][] = [];
+  let current: DocumentBlock[] = [];
+  let size = 0;
+  for (const block of blocks) {
+    const cost = block.text.length + block.rel.length + 8;
+    if (current.length && (size + cost > maxChars || current.length >= 24)) {
+      batches.push(current);
+      current = [];
+      size = 0;
+    }
+    current.push(block);
+    size += cost;
   }
-}
-
-async function isFile(file: string): Promise<boolean> {
-  try {
-    return (await fs.stat(file)).isFile();
-  } catch {
-    return false;
-  }
+  if (current.length) batches.push(current);
+  return batches;
 }
 
 interface RawPage {
@@ -133,6 +175,7 @@ interface RawPage {
   body?: unknown;
   pageId?: unknown;
   keywords?: unknown;
+  labels?: unknown;
   sources?: unknown;
   anchors?: unknown;
   related?: unknown;
@@ -180,63 +223,92 @@ function kindOf(value: unknown): KnowledgeKind {
   return (KNOWLEDGE_KINDS as readonly string[]).includes(String(value)) ? (String(value) as KnowledgeKind) : 'concept';
 }
 
-/** Bootstrap: draft pages only. A draft is never served to an agent until a human accepts it. */
+/**
+ * Bootstrap: recursively scan every changed document, batch the evidence through the utility
+ * model, and ingest the pages it returns. Incremental by construction — unchanged files are never
+ * re-read, so a second run costs almost nothing.
+ */
 export async function bootstrapKnowledge(scope: KnowledgeScope, deps: KnowledgeSynthDeps): Promise<KnowledgeJobResult> {
   if (!deps.completer) return { ok: false, error: 'No background model is configured.' };
-  const { text, files } = await gatherEvidence(scope);
-  if (text.trim().length < 400) return { ok: false, error: 'Not enough project documentation to synthesise from (README, docs/, AGENTS.md).' };
-  const prompt = [
-    `Project: ${path.basename(scope.projectRoot)}`,
-    '',
-    `Evidence (${files.length} file(s)). Propose at most ${MAX_BOOTSTRAP_PAGES} pages, most important first.`,
-    '',
-    text
-  ].join('\n');
-  const reply = await deps.completer.complete({ system: BOOTSTRAP_SYSTEM, prompt, maxTokens: 16_000 });
-  const parsed = parseJsonReply<{ pages?: RawPage[] }>(reply);
-  const salvagedPages = Array.isArray(parsed?.pages) && parsed.pages.length ? parsed.pages : salvageArrayEntries<RawPage>(reply, 'pages');
-  const raw = salvagedPages.slice(0, MAX_BOOTSTRAP_PAGES);
-  if (!raw.length) {
-    return { ok: false, error: reply ? 'The model returned no usable pages. Check the app log for the raw reply.' : `The background model (${deps.completer.label() ?? 'unknown'}) did not answer. Check the app log.` };
+  const { blocks, ledger } = await scanDocuments(scope, deps.store);
+  if (!blocks.length) {
+    await deps.store.writeScan(scope, ledger).catch((e) => deps.log('debug', `knowledge: could not record the scan: ${errorMessage(e)}`));
+    return { ok: true, detail: 'no changed documentation to scan' };
   }
-  let written = 0;
-  for (const entry of raw.slice(0, MAX_BOOTSTRAP_PAGES)) {
-    const title = typeof entry.title === 'string' ? entry.title.trim() : '';
-    const claim = typeof entry.claim === 'string' ? entry.claim.trim() : '';
-    const body = typeof entry.body === 'string' ? entry.body.trim() : '';
-    if (!title || !body || body.length < MIN_BODY_CHARS) continue;
-    const kind = kindOf(entry.kind);
-    const id = pathForProposal(kind, title).replace(/\.md$/, '');
-    const existing = await deps.store.read(scope, id);
-    if (existing && isSameClaim(existing.meta.claim, claim)) continue;
-    const meta: KnowledgePageMeta = {
-      id,
-      title,
-      kind,
-      status: 'draft',
-      scope: 'repo',
-      ...(claim ? { claim } : {}),
-      confidence: entry.confidence === 'low' || entry.confidence === 'medium' || entry.confidence === 'high' ? entry.confidence : 'medium',
-      keywords: asStringList(entry.keywords, 12),
-      sources: asSources(entry.sources, files),
-      anchors: asAnchors(entry.anchors),
-      related: asStringList(entry.related, 8),
-      supersedes: [],
-      contradicts: [],
-      updatedBy: 'job:bootstrap'
-    };
-    await deps.store.write(scope, meta, body);
-    written++;
+  const batches = batchBlocks(blocks, MAX_EVIDENCE_CHARS);
+  const claims = new Set<string>();
+  let ingested = 0;
+  let batchesRun = 0;
+  let attempted = 0;
+  for (const batch of batches) {
+    const evidence = batch.map((b) => `### ${b.rel}\n\n${b.text}`).join('\n\n');
+    if (evidence.trim().length < 200) continue;
+    attempted++;
+    const prompt = [`Project: ${path.basename(scope.projectRoot)}`, '', `Evidence (${batch.length} document(s)). Propose at most ${MAX_PAGES_PER_BATCH} pages, most important first.`, '', evidence].join('\n');
+    const reply = await deps.completer.complete({ system: BOOTSTRAP_SYSTEM, prompt, maxTokens: 16_000 });
+    const parsed = parseJsonReply<{ pages?: RawPage[] }>(reply);
+    const raw = (Array.isArray(parsed?.pages) && parsed.pages.length ? parsed.pages : salvageArrayEntries<RawPage>(reply, 'pages')).slice(0, MAX_PAGES_PER_BATCH);
+    if (!raw.length) {
+      deps.log('warn', `knowledge: bootstrap batch returned no usable pages (${batch.length} document(s))`);
+      continue;
+    }
+    batchesRun++;
+    const fallbackFiles = batch.map((b) => b.rel);
+    for (const entry of raw) {
+      const title = typeof entry.title === 'string' ? entry.title.trim() : '';
+      const claim = typeof entry.claim === 'string' ? entry.claim.trim() : '';
+      const body = typeof entry.body === 'string' ? entry.body.trim() : '';
+      if (!title || !body || body.length < MIN_BODY_CHARS) continue;
+      const claimKey = normalizeClaim(claim || title);
+      if (claims.has(claimKey)) continue;
+      claims.add(claimKey);
+      const kind = kindOf(entry.kind);
+      const id = pathForProposal(kind, title).replace(/\.md$/, '');
+      const existing = await deps.store.read(scope, id);
+      // Never overwrite a page a human wrote or reviewed; a duplicate claim is not re-recorded.
+      if (existing && (existing.meta.updatedBy?.startsWith('human') || existing.meta.review?.state === 'reviewed')) continue;
+      if (existing && isSameClaim(existing.meta.claim, claim)) continue;
+      const meta: KnowledgePageMeta = {
+        id,
+        title,
+        kind,
+        status: 'current',
+        scope: 'repo',
+        ...(claim ? { claim } : {}),
+        confidence: entry.confidence === 'low' || entry.confidence === 'medium' || entry.confidence === 'high' ? entry.confidence : 'medium',
+        keywords: asStringList(entry.keywords, 12),
+        labels: normalizeLabels(asStringList(entry.labels, 12)),
+        sources: asSources(entry.sources, fallbackFiles),
+        anchors: asAnchors(entry.anchors),
+        related: asStringList(entry.related, 8),
+        supersedes: [],
+        contradicts: [],
+        updatedBy: 'agent:bootstrap'
+      };
+      await deps.store.write(scope, meta, body);
+      ingested++;
+    }
   }
-  deps.log('info', `knowledge: bootstrap wrote ${written} draft page(s) from ${files.length} file(s)`);
-  return { ok: true, detail: `wrote ${written} draft page(s) — review them in the Knowledge panel` };
+  await deps.store.writeScan(scope, ledger).catch((e) => deps.log('debug', `knowledge: could not record the scan: ${errorMessage(e)}`));
+  if (attempted > 0 && ingested === 0) {
+    return { ok: false, error: 'The background model returned no usable pages. Check the app log for the raw reply.' };
+  }
+  deps.log('info', `knowledge: bootstrap ingested ${ingested} page(s) from ${blocks.length} changed document(s) in ${batchesRun} batch(es)`);
+  return { ok: true, detail: `ingested ${ingested} page(s) from ${blocks.length} changed document(s)` };
+}
+
+export interface DistillOptions {
+  /** `reflect` widens the evidence to a PR's commits and diff; `distill` uses one episode. */
+  mode?: 'distill' | 'reflect';
 }
 
 /**
- * Distillation: episodes since the last run, plus the freshest episode's transcript slice, become
- * proposals. The model may only propose; every write goes through the service's rules.
+ * Distillation and PR reflection. Episodes since the last run (plus the newest episode's detail and
+ * a transcript slice) become page writes. Every write goes through `propose`, so the service's
+ * dedupe, evidence and rejection rules apply.
  */
-export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSynthDeps): Promise<KnowledgeJobResult> {
+export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSynthDeps, opts: DistillOptions = {}): Promise<KnowledgeJobResult> {
+  const reflect = opts.mode === 'reflect';
   if (!deps.completer) return { ok: false, error: 'No background model is configured.' };
   if (!deps.propose) return { ok: false, error: 'Distillation is not wired to the proposal pipeline.' };
   const episodes = await deps.store.readEpisodes(scope, 20);
@@ -254,31 +326,36 @@ export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSyn
   if (transcriptText.length > MAX_TRANSCRIPT_CHARS) transcriptText = transcriptText.slice(-MAX_TRANSCRIPT_CHARS);
   const pages = await deps.store.load(scope);
   const index = pages
-    .slice(0, 60)
-    .map((p) => `- ${p.meta.id}: ${p.meta.title}${p.meta.claim ? ` — ${p.meta.claim}` : ''}`)
+    .slice(0, 80)
+    .map((p) => `- ${p.meta.id}: ${p.meta.title}${p.meta.claim ? ` — ${p.meta.claim}` : ''}${p.meta.labels.length ? ` [${p.meta.labels.join(', ')}]` : ''}`)
     .join('\n');
   const episodeText = episodes
-    .slice(0, 12)
-    .map((e) => `- [${e.kind}] ${e.at} ${e.summary}${e.detail ? `\n  ${e.detail.replace(/\s+/g, ' ').slice(0, 400)}` : ''}`)
+    .slice(0, reflect ? 20 : 12)
+    .map((e) => {
+      const detail = e.detail ? `\n  ${reflect ? e.detail.slice(0, MAX_EPISODE_CHARS) : e.detail.replace(/\s+/g, ' ').slice(0, 400)}` : '';
+      return `- [${e.kind}] ${e.at} ${e.summary}${detail}`;
+    })
     .join('\n');
   const prompt = [
     `Project: ${path.basename(scope.projectRoot)}${scope.branch ? ` (branch ${scope.branch})` : ''}`,
     '',
-    'Recent durable outcomes:',
+    reflect ? 'Pull request outcomes:' : 'Recent durable outcomes:',
     episodeText,
     '',
-    'Existing wiki pages (prefer updating one of these over creating a near duplicate):',
+    'Existing wiki pages (update one of these with its pageId rather than creating a near duplicate):',
     index || '(none yet)',
     transcriptText ? '\nTranscript slice from the most recent episode:\n' : '',
     transcriptText
   ].join('\n');
-  const reply = await deps.completer.complete({ system: DISTILL_SYSTEM, prompt, maxTokens: 8000 });
+  const system = reflect ? REFLECT_SYSTEM : DISTILL_SYSTEM;
+  const maxPages = reflect ? MAX_REFLECTED_PAGES : MAX_DISTILLED_PROPOSALS;
+  const reply = await deps.completer.complete({ system, prompt, maxTokens: reflect ? 16_000 : 8_000 });
   const parsed = parseJsonReply<{ proposals?: RawPage[] }>(reply);
-  const raw = (Array.isArray(parsed?.proposals) && parsed.proposals.length ? parsed.proposals : salvageArrayEntries<RawPage>(reply, 'proposals')).slice(0, MAX_DISTILLED_PROPOSALS);
-  if (!raw.length) return { ok: true, detail: reply ? 'no durable knowledge proposed' : 'the background model did not answer' };
+  const raw = (Array.isArray(parsed?.proposals) && parsed.proposals.length ? parsed.proposals : salvageArrayEntries<RawPage>(reply, 'proposals')).slice(0, maxPages);
+  if (!raw.length) return { ok: true, detail: reply ? 'no durable knowledge found' : 'the background model did not answer' };
   let proposed = 0;
-  let promoted = 0;
-  for (const entry of raw.slice(0, MAX_DISTILLED_PROPOSALS)) {
+  let updated = 0;
+  for (const entry of raw) {
     const title = typeof entry.title === 'string' ? entry.title.trim() : '';
     const claim = typeof entry.claim === 'string' ? entry.claim.trim() : '';
     const body = typeof entry.body === 'string' ? entry.body.trim() : '';
@@ -293,17 +370,18 @@ export async function distillKnowledge(scope: KnowledgeScope, deps: KnowledgeSyn
         kind: kindOf(entry.kind),
         ...(pageId ? { pageId } : {}),
         keywords: asStringList(entry.keywords, 12),
+        labels: asStringList(entry.labels, 12),
         sources: asSources(entry.sources, []),
         anchors: asAnchors(entry.anchors)
       },
-      'agent:distill',
+      reflect ? 'agent:reflect' : 'agent:distill',
       newest.sessionId
     );
     if (result.rejected) continue;
     proposed++;
-    if (result.promoted) promoted++;
+    if (pageId) updated++;
   }
-  const detail = `proposed ${proposed} candidate(s)${promoted ? `, ${promoted} already backed by repeated evidence` : ''}`;
-  deps.log('info', `knowledge: distill ${detail}`);
+  const detail = reflect ? `reflected ${proposed} page(s) from the PR` : `recorded ${proposed} page(s)${updated ? `, ${updated} updated` : ''}`;
+  deps.log('info', `knowledge: ${reflect ? 'reflect' : 'distill'} ${detail}`);
   return { ok: true, detail };
 }

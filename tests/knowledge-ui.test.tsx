@@ -1,12 +1,13 @@
 /**
- * The Project knowledge panel: pages render with their authority, proposals need an explicit
- * decision, and the background jobs are reachable. @vitest-environment jsdom
+ * The Project knowledge panel: auto-ingested pages render with their labels, provenance and
+ * relation graph, and the only edits are rejecting (a tombstone) or deleting a page.
+ * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { KnowledgeTab } from '../src/renderer/src/components/KnowledgeTab';
 import { useStore } from '../src/renderer/src/store';
-import type { KnowledgePageSummary, KnowledgeView } from '../src/shared/knowledge';
+import type { KnowledgeGraph, KnowledgePageDetail, KnowledgePageMeta, KnowledgePageSummary, KnowledgeView } from '../src/shared/knowledge';
 import type { SessionMeta } from '../src/shared/types';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -33,7 +34,9 @@ function summary(over: Partial<KnowledgePageSummary> = {}): KnowledgePageSummary
     path: 'conventions/harness-lifecycle.md',
     claim: 'A harness belongs to exactly one session.',
     keywords: ['harness'],
-    authority: 2,
+    labels: ['session-lifecycle'],
+    updatedBy: 'agent:bootstrap',
+    authority: 3,
     ...over
   };
 }
@@ -43,14 +46,51 @@ function view(over: Partial<KnowledgeView> = {}): KnowledgeView {
     projectRoot: 'G:/repo',
     cwd: 'G:/repo',
     wikiDir: 'G:/repo/.vocs-code/wiki',
-    status: { hasWiki: true, pages: 2, needsReview: 1, proposals: 1, stale: 0, indexed: false },
-    pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', status: 'proposed', authority: 5 })],
-    proposals: [summary({ id: 'pty-guard-1a2b3c4d', title: 'PTY guard', status: 'proposed', authority: 5, targetPageId: 'gotchas/pty', evidenceCount: 2 })],
+    status: { hasWiki: true, pages: 1, needsReview: 0, proposals: 0, stale: 0, indexed: false },
+    pages: [summary()],
+    proposals: [],
     rejectedClaims: [],
     settings: { prime: true, autoDistill: true },
     ...over
   };
 }
+
+function pageDetail(id: string, over: Partial<KnowledgePageDetail> = {}): KnowledgePageDetail {
+  const pty = id === 'gotchas/pty';
+  const meta: KnowledgePageMeta = {
+    id,
+    title: pty ? 'Duplicate PTYs' : 'Harness lifecycle',
+    kind: pty ? 'gotcha' : 'convention',
+    status: 'current',
+    scope: 'repo',
+    claim: pty ? 'Renderer reconnects can duplicate a PTY.' : 'A harness belongs to exactly one session.',
+    keywords: [],
+    labels: pty ? ['pty-lifecycle'] : ['session-lifecycle'],
+    updatedBy: pty ? 'agent:distill' : 'agent:bootstrap',
+    sources: [],
+    anchors: [],
+    related: [],
+    supersedes: [],
+    contradicts: []
+  };
+  return {
+    page: { meta, body: 'Body.', path: `${id}.md` },
+    related: [],
+    anchors: [],
+    stale: false,
+    staleReasons: [],
+    ...over
+  };
+}
+
+const graph: KnowledgeGraph = {
+  builtAt: '2026-01-01T00:00:00.000Z',
+  nodes: [
+    { id: 'conventions/harness-lifecycle', kind: 'convention', status: 'current', labels: ['session-lifecycle'], degree: 1 },
+    { id: 'gotchas/pty', kind: 'gotcha', status: 'current', labels: ['pty-lifecycle'], degree: 1 }
+  ],
+  edges: [{ from: 'gotchas/pty', to: 'conventions/harness-lifecycle', type: 'related', weight: 2 }]
+};
 
 beforeEach(() => {
   invoke.mockReset();
@@ -60,38 +100,155 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Project knowledge panel', () => {
-  it('lists pages, marks proposals as needing review, and keeps them out of the served list', async () => {
+  it('lists an auto-ingested page with its labels and provenance, and opens it', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:read') return null;
+      if (channel === 'knowledge:read') return pageDetail('conventions/harness-lifecycle');
+      if (channel === 'knowledge:graph') return graph;
       return undefined;
     });
     await act(async () => {
       render(<KnowledgeTab session={session()} />);
     });
     expect(screen.getByTestId('knowledge-tab').textContent).toContain('Project knowledge');
-    expect(screen.getByTestId('knowledge-proposals').textContent).toContain('PTY guard');
-    expect(screen.getByTestId('knowledge-proposal-pty-guard-1a2b3c4d').textContent).toContain('2 sessions');
-    // The accepted page row links to its detail.
+    // Ingestion is automatic: there is no queue to accept from.
+    expect(screen.getByTestId('knowledge-auto-note')).toBeTruthy();
+    expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
+    expect(screen.queryByTestId('knowledge-accept-all')).toBeNull();
+
+    const row = screen.getByTestId('knowledge-page-conventions/harness-lifecycle');
+    expect(row.textContent).toContain('Harness lifecycle');
+    expect(row.textContent).toContain('accepted');
+    expect(screen.getByTestId('knowledge-labels-conventions/harness-lifecycle').textContent).toContain('session-lifecycle');
+    expect(row.textContent).toContain('agent:bootstrap');
+
     await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-page-conventions/harness-lifecycle'));
+      fireEvent.click(row);
     });
     expect(invoke).toHaveBeenCalledWith('knowledge:read', { sessionId: 's1', id: 'conventions/harness-lifecycle' });
+    expect(screen.getByTestId('knowledge-detail').textContent).toContain('A harness belongs to exactly one session.');
   });
 
-  it('accepts a proposal only through the explicit button', async () => {
+  it('renders the labels and provenance of an open page', async () => {
     invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:review') return view({ proposals: [], status: { hasWiki: true, pages: 2, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+      if (channel === 'knowledge:view') return view({ pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', labels: ['pty-lifecycle'], updatedBy: 'agent:distill' })] });
+      if (channel === 'knowledge:read') return pageDetail('gotchas/pty');
+      if (channel === 'knowledge:graph') return graph;
       return undefined;
     });
     await act(async () => {
       render(<KnowledgeTab session={session()} />);
     });
     await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-accept-pty-guard-1a2b3c4d'));
+      fireEvent.click(screen.getByTestId('knowledge-page-gotchas/pty'));
     });
-    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'pty-guard-1a2b3c4d', action: 'accept' });
+    expect(screen.getByTestId('knowledge-labels').textContent).toContain('pty-lifecycle');
+    expect(screen.getByTestId('knowledge-detail').textContent).toContain('agent:distill');
+  });
+
+  it('rejects a page from its row and removes it without opening the detail', async () => {
+    let current = view();
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return current;
+      if (channel === 'knowledge:review') {
+        current = view({ pages: [], status: { hasWiki: true, pages: 0, needsReview: 0, proposals: 0, stale: 0, indexed: false } });
+        return current;
+      }
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-row-reject-conventions/harness-lifecycle'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'conventions/harness-lifecycle', action: 'reject' });
+    expect(screen.queryByTestId('knowledge-page-conventions/harness-lifecycle')).toBeNull();
+    // The row's reject button must not have opened the page behind it.
+    expect(invoke).not.toHaveBeenCalledWith('knowledge:read', expect.anything());
+  });
+
+  it('deletes a page from its detail and removes both detail and row', async () => {
+    let current = view({ pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha' })] });
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return current;
+      if (channel === 'knowledge:read') return pageDetail('gotchas/pty');
+      if (channel === 'knowledge:graph') return graph;
+      if (channel === 'knowledge:delete') {
+        current = view();
+        return current;
+      }
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-gotchas/pty'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-delete'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:delete', { sessionId: 's1', id: 'gotchas/pty' });
+    expect(screen.queryByTestId('knowledge-detail')).toBeNull();
+    expect(screen.queryByTestId('knowledge-page-gotchas/pty')).toBeNull();
+  });
+
+  it('rejects an open page through the review channel', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:read') return pageDetail('conventions/harness-lifecycle');
+      if (channel === 'knowledge:graph') return graph;
+      if (channel === 'knowledge:review') return view({ pages: [] });
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-conventions/harness-lifecycle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-reject'));
+    });
+    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'conventions/harness-lifecycle', action: 'reject' });
+    expect(screen.queryByTestId('knowledge-detail')).toBeNull();
+  });
+
+  it('renders the relation graph of the open page with direction and edge type', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view({ pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha' })] });
+      if (channel === 'knowledge:read') return pageDetail('gotchas/pty');
+      if (channel === 'knowledge:graph') return graph;
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-gotchas/pty'));
+    });
+    const relations = screen.getByTestId('knowledge-graph');
+    expect(relations.textContent).toContain('→');
+    expect(relations.textContent).toContain('related');
+    expect(relations.textContent).toContain('Harness lifecycle');
+  });
+
+  it('keeps the page readable when the graph call fails', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'knowledge:view') return view();
+      if (channel === 'knowledge:read') return pageDetail('conventions/harness-lifecycle');
+      if (channel === 'knowledge:graph') throw new Error('No relation graph in this run');
+      return undefined;
+    });
+    await act(async () => {
+      render(<KnowledgeTab session={session()} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('knowledge-page-conventions/harness-lifecycle'));
+    });
+    expect(screen.getByTestId('knowledge-detail').textContent).toContain('Body.');
+    expect(screen.queryByTestId('knowledge-graph')).toBeNull();
   });
 
   it('starts the bootstrap job and flips the digest switch through settings', async () => {
@@ -115,72 +272,6 @@ describe('Project knowledge panel', () => {
     expect(invoke).toHaveBeenCalledWith('settings:update', { knowledge: { prime: false, autoDistill: true } });
   });
 
-  it('accepts a pending page straight from its row without opening it', async () => {
-    invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:review') return view({ proposals: [], pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', status: 'current' })] });
-      return undefined;
-    });
-    await act(async () => {
-      render(<KnowledgeTab session={session()} />);
-    });
-    // A current page offers no accept button; a proposed one does.
-    expect(screen.queryByTestId('knowledge-row-accept-conventions/harness-lifecycle')).toBeNull();
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-row-accept-gotchas/pty'));
-    });
-    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'gotchas/pty', action: 'accept' });
-    // The row click must not have been triggered by the accept button.
-    expect(invoke).not.toHaveBeenCalledWith('knowledge:read', expect.anything());
-  });
-
-  it('accepts everything pending with one click and clears the queue', async () => {
-    invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:reviewAll')
-        return { accepted: 2, view: view({ proposals: [], pages: [summary(), summary({ id: 'gotchas/pty', title: 'Duplicate PTYs', status: 'current' })] }) };
-      return undefined;
-    });
-    await act(async () => {
-      render(<KnowledgeTab session={session()} />);
-    });
-    expect(screen.getByTestId('knowledge-accept-all').textContent).toContain('(2)');
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-accept-all'));
-    });
-    expect(invoke).toHaveBeenCalledWith('knowledge:reviewAll', { sessionId: 's1' });
-    expect(screen.queryByTestId('knowledge-proposals')).toBeNull();
-  });
-
-  it('offers accept and discard in the detail view of a draft', async () => {
-    invoke.mockImplementation(async (channel: string) => {
-      if (channel === 'knowledge:view') return view();
-      if (channel === 'knowledge:read')
-        return {
-          page: {
-            meta: { id: 'gotchas/pty', title: 'Duplicate PTYs', kind: 'gotcha', status: 'proposed', scope: 'repo', keywords: [], sources: [], anchors: [], related: [], supersedes: [], contradicts: [] },
-            body: 'Body.',
-            path: 'gotchas/pty.md'
-          },
-          related: [],
-          stale: false,
-          staleReasons: []
-        };
-      if (channel === 'knowledge:review') return view();
-      return undefined;
-    });
-    await act(async () => {
-      render(<KnowledgeTab session={session()} />);
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-page-gotchas/pty'));
-    });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('knowledge-page-accept'));
-    });
-    expect(invoke).toHaveBeenCalledWith('knowledge:review', { sessionId: 's1', id: 'gotchas/pty', action: 'accept' });
-  });
-
   it('shows what GitNexus says about each anchor', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'knowledge:view') return view();
@@ -194,6 +285,7 @@ describe('Project knowledge panel', () => {
               status: 'current',
               scope: 'repo',
               keywords: [],
+              labels: [],
               sources: [],
               anchors: [
                 { file: 'src/main/session-manager.ts', symbol: 'buildContext' },
@@ -214,6 +306,7 @@ describe('Project knowledge panel', () => {
           stale: false,
           staleReasons: []
         };
+      if (channel === 'knowledge:graph') return graph;
       return undefined;
     });
     await act(async () => {
