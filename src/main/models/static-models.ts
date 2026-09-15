@@ -181,6 +181,16 @@ function isSnapshotSuffix(suffix: string): boolean {
   return /^[-._/](?:latest|\d{8}|\d{4}(?:[-._]\d{2}){1,2})$/i.test(suffix);
 }
 
+/**
+ * One provider's own cached catalog, for the pricing lookups here and in the repair helpers. Only
+ * this list carries a model nobody else knows: a gateway's vendor-named id (OpenRouter's
+ * `z-ai/glm-5.3-flash`) exists in the provider's cached models and in no bundled catalog, so a
+ * lookup without it finds no price and the caller falls back to whatever the harness guessed.
+ */
+export function modelsForProvider(providers: ProviderConfig[], id: string | undefined): ModelInfo[] {
+  return providers.find((p) => p.id === id)?.models ?? [];
+}
+
 export function findPricing(provider: string, model: string, extra: ModelInfo[] = []): ModelInfo['pricing'] | undefined {
   const pool = [...extra, ...(STATIC_MODELS_BY_PROVIDER[provider] ?? []), ...OPENAI_STATIC_MODELS, ...ANTHROPIC_STATIC_MODELS, ...DEEPSEEK_STATIC_MODELS];
   const exact = pool.find((x) => x.id === model && x.pricing);

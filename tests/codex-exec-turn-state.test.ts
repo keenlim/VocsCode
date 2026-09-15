@@ -111,7 +111,7 @@ function makeCtx(overrides: Partial<SessionMeta> = {}): { ctx: HarnessContext; m
   const ctx = {
     sessionId: meta.id,
     session: () => meta,
-    settings: () => ({ claude: { settingSources: [], useProviderKey: false }, pi: { extraArgs: [] } }) as never,
+    settings: () => ({ claude: { settingSources: [], useProviderKey: false }, pi: { extraArgs: [] }, providers: [] }) as never,
     runtime: { resolve: () => null } as never,
     sessionDir: '/tmp/s1',
     permissionMode: () => meta.config.permissionMode,

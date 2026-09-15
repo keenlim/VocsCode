@@ -16,7 +16,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { toClaude } from '../mcp/effective';
-import { estimateCostUsd, findContextWindow, findPricing } from '../models/static-models';
+import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
 import { subagentDir } from '../subagents';
 import { subagentSupport } from '../../shared/subagents';
 import { anthropicAuthFor, anthropicBaseUrlFor, ANTHROPIC_DEFAULT_BASE_URL, isClaudeCapableProvider, isClaudeGatewayProvider } from '../../shared/providers';
@@ -165,6 +165,7 @@ export class ClaudeAdapter implements HarnessAdapter {
       dir: ctx.sessionDir && subagentSupport('claude').runs ? subagentDir(ctx.sessionDir, 'claude') : null,
       cwd: ctx.session().cwd,
       providerId: () => this.providerId,
+      models: () => modelsForProvider(this.ctx.settings().providers, this.providerId),
       emit: (event) => this.ctx.emit(event),
       log: (level, message) => this.ctx.log(level, message)
     });
@@ -254,6 +255,10 @@ export class ClaudeAdapter implements HarnessAdapter {
     }
     this.ctx.log('info', `claude runtime: ${options.pathToClaudeCodeExecutable ?? 'SDK-bundled'}; model=${options.model ?? 'default'} mode=${options.permissionMode}${options.resume ? ` resume=${options.resume}${options.forkSession ? ' (fork)' : ''}` : ''}${mcp.length ? ` mcp=${mcp.length}` : ''}${provider ? ` auth=${auth} provider=${provider.id}` : ''}`);
     this.q = query({ prompt: this.input, options });
+    // This CLI counts the tokens and dollars of the process that is starting, not of the session:
+    // a resumed process opens at zero, so without this the first turn after every resume would be
+    // measured against the totals already recorded and thrown away.
+    this.usage.beginProcess();
     // The app can configure a window before the process exists; hand it over as soon as it does.
     if (this.autoCompactionWindow !== undefined) {
       void this.applyAutoCompactionWindow().catch((e) => this.ctx.log('warn', `claude auto-compaction window rejected: ${errorMessage(e)}`));
@@ -503,7 +508,11 @@ export class ClaudeAdapter implements HarnessAdapter {
   /** What this app's catalog says a model costs; undefined when it has no row, leaving the CLI's number. */
   private catalogCostUsd(model: string, v: ModelUsage): number | undefined {
     const provider = this.providerId ?? 'anthropic';
-    const pricing = findPricing(provider, model) ?? (v.canonicalModel ? findPricing(provider, v.canonicalModel) : undefined);
+    // The gateway's own cached list first: a vendor-named id like OpenRouter's `z-ai/glm-5.3-flash`
+    // exists only there, so without it a model this app can price perfectly well falls back to the
+    // CLI's default rate — the exact overstatement this method exists to undo.
+    const models = modelsForProvider(this.ctx.settings().providers, this.providerId);
+    const pricing = findPricing(provider, model, models) ?? (v.canonicalModel ? findPricing(provider, v.canonicalModel, models) : undefined);
     if (!pricing) return undefined;
     return estimateCostUsd(pricing, {
       inputTokens: v.inputTokens,
@@ -515,6 +524,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   private async consume(q: Query): Promise<void> {
     for await (const msg of q) this.handle(msg, q);
+    this.closeOpenTurn();
     this.compactionWaiter?.reject(new Error('Claude Code stopped during context compaction.'));
     this._busy = false;
     this.ctx.emit({ type: 'status', status: 'stopped', detail: 'Claude Code process ended' });
@@ -740,6 +750,34 @@ export class ClaudeAdapter implements HarnessAdapter {
     this.ctx.emit({ type: 'status', status: 'running' });
   }
 
+  /**
+   * Closes a turn the process ended in the middle of — an interrupt, a stop, a CLI crash. No
+   * `result` is coming for it, so without this its usage stays in the session totals owned by no
+   * turn row: the headline spend then reads higher than the turns under it, and the next turn's
+   * delta silently absorbs the abandoned usage instead of starting clean.
+   */
+  private closeOpenTurn(): void {
+    if (!this._busy) return;
+    const trackerTurn = this.usage.finishTurn();
+    this.usageReporter.report(trackerTurn.totals);
+    this.usageReporter.flush();
+    const u = trackerTurn.usage;
+    this.ctx.emit({
+      type: 'item.upsert',
+      item: {
+        id: shortId('turn_'),
+        kind: 'turn',
+        ts: Date.now(),
+        status: 'interrupted',
+        durationMs: this.turnStartedAt > 0 ? Math.max(0, Date.now() - this.turnStartedAt) : 0,
+        costUsd: u?.costUsd ?? 0,
+        usage: u ? { inputTokens: u.inputTokens, outputTokens: u.outputTokens, cacheReadTokens: u.cacheReadTokens, cacheWriteTokens: u.cacheWriteTokens } : undefined
+      }
+    });
+    this.turnStartedAt = 0;
+    this._busy = false;
+  }
+
   private info(text: string, level: 'info' | 'warn' | 'error' = 'info'): void {
     this.ctx.emit({ type: 'item.upsert', item: { id: shortId('i_'), kind: 'info', ts: Date.now(), level, text } });
   }
@@ -846,6 +884,8 @@ export class ClaudeAdapter implements HarnessAdapter {
   }
 
   async dispose(): Promise<void> {
+    // Before the reporter closes: the turn being abandoned is reported through it.
+    this.closeOpenTurn();
     this.usageReporter.close();
     this.compactionWaiter?.reject(new Error('Claude context compaction was cancelled.'));
     this.input.close();

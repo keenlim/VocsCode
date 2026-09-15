@@ -698,6 +698,13 @@ export interface SessionMeta {
    */
   lastUserMessageAt?: number;
   config: SessionConfig;
+  /**
+   * The session this one was forked from. `fork` copies the source's transcript into the new
+   * session, so the rows older than `createdAt` are the source's own history: they describe the
+   * conversation the fork inherited, never work this session did. Spend is carried by neither —
+   * the fork starts its counters at zero.
+   */
+  forkedFrom?: string;
   /** Effective working directory (worktree path if isolated). */
   cwd: string;
   worktreeBranch?: string;
@@ -837,6 +844,13 @@ export type TranscriptItem =
       durationMs?: number;
       usage?: Partial<UsageTotals>;
       costUsd?: number;
+      /**
+       * Set on a turn copied in from the session this one was forked from. Its tokens describe the
+       * context the fork inherited, so they are kept, but its `costUsd` is zero: that money was
+       * spent — and counted — by the session it came from. Distinguishes such a row from a
+       * completed turn the tracker genuinely recorded at zero (see `TurnUsageTracker.beginProcess`).
+       */
+      carried?: boolean;
       error?: string;
     }
   | {

@@ -80,6 +80,51 @@ describe('TurnUsageTracker', () => {
     expect(tracker.snapshot()).toMatchObject({ inputTokens: 150, turns: 2 });
   });
 
+  it('counts the first cumulative sample of a declared process instead of discarding it', () => {
+    // Claude Code restarts its counters at zero on every resume, so the first snapshot of a new
+    // process arrives *below* the totals already recorded. Read as a stale sample it hits the
+    // only-raise branch and the whole first turn's cost is dropped — which is exactly what the
+    // resumed sessions showed: a turn with real tokens recorded at cost 0.
+    const seeded = (): TurnUsageTracker => new TurnUsageTracker({ ...emptyUsage(), inputTokens: 5_000, costUsd: 10 });
+
+    const undeclared = seeded();
+    undeclared.beginTurn();
+    undeclared.setCumulative({ inputTokens: 1_000, costUsd: 0.4 });
+    expect(undeclared.finishTurn().usage).toMatchObject({ inputTokens: 0, costUsd: 0 });
+    expect(undeclared.snapshot().inputTokens).toBe(5_000);
+    expect(undeclared.snapshot().costUsd).toBeCloseTo(10, 9);
+
+    const declared = seeded();
+    declared.beginProcess();
+    declared.beginTurn();
+    declared.setCumulative({ inputTokens: 1_000, costUsd: 0.4 });
+    // The process's own counters, counted on top of what the session already held.
+    const turn = declared.finishTurn().usage;
+    expect(turn?.inputTokens).toBe(1_000);
+    expect(turn?.costUsd).toBeCloseTo(0.4, 9);
+    expect(declared.snapshot().inputTokens).toBe(6_000);
+    expect(declared.snapshot().costUsd).toBeCloseTo(10.4, 9);
+  });
+
+  it('adds each process epoch once, without double counting the samples streamed before it', () => {
+    const tracker = new TurnUsageTracker({ ...emptyUsage(), costUsd: 10 });
+    tracker.beginProcess();
+    tracker.beginTurn();
+    // The streamed sample for the same request arrives first and is provisional: the cumulative
+    // snapshot that follows covers it, so taking both would bill the request twice.
+    tracker.addUsage({ costUsd: 0.1 });
+    tracker.setCumulative({ costUsd: 0.4 });
+    expect(tracker.finishTurn().usage?.costUsd).toBeCloseTo(0.4, 9);
+    expect(tracker.snapshot().costUsd).toBeCloseTo(10.4, 9);
+
+    // A second process on the same session: its first sample is its own too.
+    tracker.beginProcess();
+    tracker.beginTurn();
+    tracker.setCumulative({ costUsd: 0.25 });
+    expect(tracker.finishTurn().usage?.costUsd).toBeCloseTo(0.25, 9);
+    expect(tracker.snapshot().costUsd).toBeCloseTo(10.65, 9);
+  });
+
   it('reconciles streamed per-request samples with the final cumulative counter', () => {
     const tracker = new TurnUsageTracker(emptyUsage());
     tracker.beginTurn();

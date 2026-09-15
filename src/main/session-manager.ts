@@ -1526,6 +1526,12 @@ export class SessionManager {
       status: 'idle',
       statusDetail: undefined,
       queued: 0,
+      // A fork carries the conversation, not the ledger. The source's totals describe work this
+      // session did not do, and inheriting them charges the same dollars to two sessions — which
+      // the dashboard then adds up twice. Its own counters start at zero; the copied rows below
+      // keep their text and tokens for context but are worth nothing.
+      usage: emptyUsage(),
+      forkedFrom: src.id,
       harnessRef: {},
       pendingForkContext: undefined,
       pendingKnowledgeDigest: undefined,
@@ -1566,7 +1572,7 @@ export class SessionManager {
     // The fork keeps the project's digest (same project, same directory) but hands it over the way
     // its own harness can: in the system prompt, or on the first message.
     if (meta.knowledgeDigest && !HARNESS_BY_ID[meta.config.harness].capabilities.systemPrompt) meta.pendingKnowledgeDigest = true;
-    const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision));
+    const keep = items.filter((i) => !(i.kind === 'approval' && !i.decision)).map(carriedItem);
     if (cross) {
       // The target cannot resume the source's provider session, so hand it the prior conversation
       // as plain text: the first message in the fork carries it and then the flag is cleared.
@@ -1624,6 +1630,16 @@ export class SessionManager {
   async projectRootFor(cwd: string): Promise<string | null> {
     return gitRoot(cwd);
   }
+}
+
+/**
+ * One transcript row the source session hands to its fork. The row is the fork's context, not its
+ * record: everything it describes happened in the session it came from, under that session's
+ * counters. Text, tool calls and tokens stay — they are what the new harness can see — but a turn's
+ * dollars do not, because the session that spent them already reports them.
+ */
+function carriedItem(item: TranscriptItem): TranscriptItem {
+  return item.kind === 'turn' ? { ...item, costUsd: 0, carried: true } : item;
 }
 
 /** `provider/model` for log lines, or 'default' when the harness picks. */
