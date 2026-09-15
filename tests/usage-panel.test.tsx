@@ -55,6 +55,19 @@ describe('Usage panel', () => {
     expect(within(panel).getByTitle(/Cache reads as a share/).textContent).toContain('75%');
   });
 
+  it('counts reasoning inside the token total rather than on top of it', () => {
+    // The providers report reasoning as a subset of the output tokens (`TokensTab` labels it
+    // "counted inside output"), so the headline total is input + output + cache and nothing else.
+    const withReasoning = session({
+      usage: { inputTokens: 1000, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 200, reasoningTokens: 400, costUsd: 1.5, turns: 2 }
+    });
+    render(<SessionUsage session={withReasoning} items={items} />);
+
+    const kpi = screen.getByTitle(/Every token this session reported/);
+    expect(within(kpi).getByText('4.6k')).toBeTruthy();
+    expect(kpi.textContent).not.toContain('5.0k');
+  });
+
   it('meters the context window and warns in the red band when it is nearly full', () => {
     render(<SessionUsage session={session()} items={items} />);
 

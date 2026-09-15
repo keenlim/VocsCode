@@ -22,6 +22,7 @@ import {
 } from '../session-usage';
 import { BarList, Meter, Segmented, Sparkline, StackedBar, type BarRow, type Segment } from './analytics/charts';
 import { fmtPct } from './analytics/model';
+import { totalTokens } from '../../../shared/usage-rollup';
 import { Icon } from './ui';
 
 /** Stable fallback so a zustand selector never returns a fresh array (React #185 infinite loop). */
@@ -64,7 +65,9 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
   const stats = useMemo(() => sessionUsageStats(session, items ?? EMPTY), [session, items]);
   const [view, setView] = useState<DetailView>('turns');
   const u = session.usage;
-  const totalTokens = u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens + u.reasoningTokens;
+  // The same total every analytics tab shows: reasoning is a subset of output as the providers
+  // report it, so adding it here counted those tokens twice.
+  const tokens = totalTokens(u);
   const speed = useMemo(() => speedOfTurns(stats.series.map((p) => ({ status: p.status, durationMs: p.durationMs, usage: { outputTokens: p.outputTokens } }))), [stats.series]);
   const turnCount = Math.max(u.turns, stats.turns.total);
   const avgTurnMs = stats.turns.timed > 0 ? stats.turns.totalMs / stats.turns.timed : 0;
@@ -90,7 +93,7 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
       </div>
 
       <div className="usage-kpis">
-        <Kpi label="Tokens" value={fmtTokens(totalTokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported, including cache traffic and reasoning." />
+        <Kpi label="Tokens" value={fmtTokens(tokens)} sub={`${fmtTokens(u.inputTokens)} in · ${fmtTokens(u.outputTokens)} out`} title="Every token this session reported: input, output and cache traffic. Reasoning is counted inside output, the way the providers report it." />
         <Kpi label="Cache hit" value={fmtPct(cache)} sub={`${fmtTokens(u.cacheReadTokens)} reused`} title="Cache reads as a share of everything read into the model (cache reads + fresh input)." />
         <Kpi label="Output speed" value={fmtRate(speed.tokens, speed.ms) || '—'} sub={avgTurnMs > 0 ? `${fmtDuration(avgTurnMs)} / turn` : undefined} title="Output tokens per second of turn wall time, averaged over completed turns (includes tool execution and any subagents the turn ran)." />
         <Kpi label="Avg turn" value={avgTurnCost > 0 ? fmtCost(avgTurnCost) : '—'} sub={stats.turns.longestMs > 0 ? `longest ${fmtDuration(stats.turns.longestMs)}` : undefined} title="Session cost divided by the number of turns." />
@@ -138,7 +141,7 @@ export function SessionUsage({ session, items }: { session: SessionMeta; items?:
         </div>
       )}
 
-      {totalTokens > 0 && (
+      {tokens > 0 && (
         <section className="usage-block">
           <h5>Token mix</h5>
           <StackedBar segments={TOKEN_SEGMENTS.filter((s) => u[s.key] > 0).map((s) => ({ key: s.key, label: s.label, value: u[s.key], color: s.color }))} format={fmtTokens} title="Token mix for this session" />
