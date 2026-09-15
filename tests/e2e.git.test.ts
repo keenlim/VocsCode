@@ -4,8 +4,8 @@
  * markdown body and metadata; the issue dialog keeps working, comment counts included. The PR
  * table keeps the number in its own column at the default panel width and when the panel is wide.
  * The row's New session action confirms first in a dialog carrying the review template, editable
- * before the session starts on the repo; that turn is not asserted, since no provider key is
- * configured.
+ * before the session starts on the repo; the issue row does the same with the fix template. That
+ * turn is not asserted, since no provider key is configured.
  * The session is seeded on disk so no harness and no provider key is involved. Requires
  * `npm run build` first; gated by VOCS_CODE_E2E_UI=1.
  */
@@ -205,6 +205,48 @@ describe.runIf(enabled)('git panel PR review session', () => {
     // The Git panel re-renders for the new session, so the table is back with the review running.
     await win.waitForSelector('.pr-row', { timeout: 30_000 });
     await win.screenshot({ path: path.join(shots, 'git-panel-03-pr-review-session.png') });
+
+    await app.close();
+  }, 180_000);
+});
+
+describe.runIf(enabled)('git panel issue session', () => {
+  it('confirms the fix prompt in a dialog, then starts the session on the repo', async () => {
+    const { app, win } = await launchGitPanel(420);
+
+    await win.getByTitle('Issues on GitHub (via gh)').click();
+    const issueRow = win.getByRole('button', { name: 'Read issue #12: Widget is wobbly' });
+    await issueRow.waitFor({ timeout: 30_000 });
+    // Like the PR row: the GitHub link and the New session action, nothing else.
+    expect(await win.locator('.issue-row .branch-actions .btn').count()).toBe(2);
+
+    await win.getByRole('button', { name: 'New session on issue #12' }).click();
+
+    // The action confirms first: the dialog is seeded with the fix template, and nothing is created
+    // until it is confirmed.
+    const promptBox = win.getByTestId('issue-prompt');
+    await promptBox.waitFor({ timeout: 30_000 });
+    expect(await promptBox.inputValue()).toContain('Fix issue #12 "Widget is wobbly"');
+    expect(await win.locator('[data-testid="session-row"]', { hasText: 'Fix issue #12' }).count()).toBe(0);
+
+    // Whatever is left in the dialog is the session's first message.
+    await promptBox.fill('Custom brief for issue #12.\nStart with the wobble regression test.');
+    await win.getByRole('button', { name: 'Start session' }).click();
+
+    // The app switches to a session titled for the issue, open on the fix template.
+    await win.waitForSelector('[data-testid="session-title"][title="Fix issue #12"]', { timeout: 30_000 });
+    const opened = win.locator('.msg-user .msg-text', { hasText: 'Custom brief for issue #12' });
+    await opened.first().waitFor({ timeout: 30_000 });
+    const promptText = await opened.first().innerText();
+    expect(await win.getByTestId('session-title').innerText()).toBe('Fix issue #12');
+    expect(promptText).toContain('Custom brief for issue #12.');
+    expect(promptText).toContain('wobble regression test');
+    // On the repo itself rather than an isolated worktree: the sidebar row carries no worktree tag.
+    const row = win.locator('[data-testid="session-row"]', { hasText: 'Fix issue #12' });
+    expect(await row.count()).toBe(1);
+    expect(await row.locator('.session-worktree').count()).toBe(0);
+    await win.waitForSelector('.issue-row', { timeout: 30_000 });
+    await win.screenshot({ path: path.join(shots, 'git-panel-04-issue-session.png') });
 
     await app.close();
   }, 180_000);
