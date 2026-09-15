@@ -44,6 +44,9 @@ describe('MCP panel tab', () => {
     const sections = screen.getAllByRole('heading', { level: 3 });
     expect(sections.map((h) => h.textContent)).toEqual(['Global', 'This repo']);
     expect(screen.getByTestId('gitnexus-card').textContent).toContain('built-in');
+    // The snippet leads the Global section, ahead of the server cards it teaches agents to use.
+    const global = screen.getByTestId('mcp-global-section');
+    expect(global.querySelector('.mcp-card')).toBe(screen.getByTestId('memory-guide'));
     expect(screen.getByTestId('mcp-add-server').textContent).toContain('Add MCP server');
     expect(screen.queryByText('In this session')).toBeNull();
     expect(screen.queryByText('Detected in this repo')).toBeNull();
@@ -91,7 +94,11 @@ describe('AGENTS.md memory snippet', () => {
 
     await act(async () => { fireEvent.click(toggle); });
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    const shown = screen.getByTestId('memory-guide-text').textContent ?? '';
+    const body = screen.getByTestId('memory-guide-text');
+    // Copy sits above the snippet: the button must not be pushed off-screen by a long body.
+    const copy = screen.getByTestId('memory-guide-copy');
+    expect(copy.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const shown = body.textContent ?? '';
     expect(shown).toContain(MEMORY_GUIDE_TITLE);
     for (const tool of ['query', 'context', 'impact', 'knowledge_search', 'knowledge_propose', 'session_history_search']) {
       expect(shown).toContain(tool);
