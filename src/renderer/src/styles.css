@@ -715,6 +715,23 @@ h4 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Right-click menu: the dropdown surface, placed at the cursor instead of under a trigger. */
+.context-menu {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 300;
+  min-width: 200px;
+}
+.menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+.menu-item-gap {
+  width: 14px;
+  flex: none;
+}
 .menu-group {
   padding: 6px 8px 2px;
   font-size: 10.5px;

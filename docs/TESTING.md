@@ -27,7 +27,7 @@ coverage. Screenshots land in `tests/artifacts/` (gitignored).
 ## Opt-in Electron suites (no provider key)
 
 ```bash
-npm run build && npm run test:e2e:ci       # all ten below; fails if any reports skipped
+npm run build && npm run test:e2e:ci       # all twelve below; fails if any reports skipped
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:ui
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:themes
 npm run build && VOCS_CODE_E2E_UI=1 npm run test:e2e:models
@@ -37,6 +37,8 @@ npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.git.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.knowledge.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.remote.test.ts
 npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.usage.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.goal.test.ts
+npm run build && VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.context-menu.test.ts
 npm run build && HARNESS_E2E=1 npm run test:e2e:terminal
 # Vesta on the real pi runtime, offline scripted model (installed Pi 0.85.1; HARNESS_E2E_EXE for the packaged app).
 npm run build && VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/e2e.vesta.test.ts
@@ -47,7 +49,7 @@ VOCS_CODE_E2E_UI=1 VOCS_CODE_PI_INTEGRATION=1 npx vitest run tests/pi-subagents.
 VOCS_CODE_E2E_UI=1 npx vitest run tests/e2e.subagents.test.ts
 ```
 
-`npm run test:e2e:ci` runs the ten suites and fails if any of them reports *skipped*.
+`npm run test:e2e:ci` runs the twelve suites and fails if any of them reports *skipped*.
 
 Any run with `VOCS_CODE_E2E_UI=1` or `HARNESS_E2E=1` parks its window outside every display and never
 takes focus, so suites can run while you work. `VOCS_CODE_E2E_VISIBLE=1` brings the window back on
@@ -62,6 +64,7 @@ suites alive** below):
 | --- | --- |
 | Transcript file mentions, Files panel | `e2e.files` |
 | Sidebar, New Session dialog, session lifecycle | `e2e.terminal` (no key) + `e2e.electron` (live) |
+| Right-click menus (`components/ContextMenu.tsx`), folder removal | `tests/context-menus.test.tsx`, `tests/folder-remove.test.ts` + `e2e.context-menu` |
 | Composer, attachments, model/capability UI | `e2e.vision`, `e2e.models` |
 | Usage panel, `src/renderer/src/session-usage.ts` | `tests/session-usage.test.ts`, `tests/usage-panel.test.tsx` + `e2e.usage` |
 | Themes, `styles.css`, terminal colours | `e2e.themes` |
