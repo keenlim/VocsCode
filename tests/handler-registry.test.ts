@@ -218,6 +218,34 @@ describe('handler registry', () => {
     }
   });
 
+  it('closes an archived session\'s shells, and only when it is being archived', async () => {
+    const order: string[] = [];
+    const { registry } = stubDeps({
+      terminals: {
+        list: () => [],
+        closeForSession: async (id: string) => void order.push(`closeForSession:${id}`)
+      } as unknown as TerminalManager,
+      sessions: {
+        list: () => [],
+        setArchived: async (...args: unknown[]) => {
+          order.push(`setArchived:${args.map(String).join(',')}`);
+          return { id: 's_test' } as unknown as SessionMeta;
+        }
+      } as unknown as SessionManager
+    });
+
+    await registry.invoke('sessions:archive', { id: 's_test', archived: true, removeWorktree: true });
+
+    // The shells go down first: one holding the worktree's directory open would block its removal.
+    expect(order).toEqual(['closeForSession:s_test', 'setArchived:s_test,true,true,undefined']);
+
+    order.length = 0;
+    await registry.invoke('sessions:archive', { id: 's_test', archived: false });
+
+    // Unarchiving starts nothing, so there is nothing to close.
+    expect(order).toEqual(['setArchived:s_test,false,undefined,undefined']);
+  });
+
   it('routes deep search through the search index', async () => {
     const { registry } = stubDeps();
     const res = (await registry.invoke('sessions:search', { q: 'needle' })) as { total: number };

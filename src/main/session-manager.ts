@@ -492,11 +492,16 @@ export class SessionManager {
   async setArchived(id: string, archived: boolean, removeWt = false, forceWt = false): Promise<SessionMeta> {
     const meta = this.get(id);
     if (!meta) throw new Error('Session not found');
-    if (archived && removeWt && meta.worktreeBranch) {
+    if (archived) {
+      // An archived session leaves the sidebar, so nothing of it may keep running: stop the harness
+      // (and everything it spawned) whether or not the worktree is being removed. Unarchiving starts
+      // it again on the next send.
       await this.stop(id);
-      // Non-force by default: a worktree with uncommitted changes is refused (WorktreeDirtyError);
-      // the renderer confirms discarding and retries with forceWorktree.
-      await removeWorktree(meta.config.projectRoot, meta.cwd, { force: forceWt });
+      if (removeWt && meta.worktreeBranch) {
+        // Non-force by default: a worktree with uncommitted changes is refused (WorktreeDirtyError);
+        // the renderer confirms discarding and retries with forceWorktree.
+        await removeWorktree(meta.config.projectRoot, meta.cwd, { force: forceWt });
+      }
     }
     if (!archived && meta.worktreeBranch) {
       // The worktree may have been removed while archived; recreate it so the session can start again.
