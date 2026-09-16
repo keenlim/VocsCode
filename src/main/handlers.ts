@@ -614,7 +614,12 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
   });
   handle('sessions:rename', ({ id, title }) => sessions.patch(id, { title }));
   handle('sessions:label', ({ id, label }) => sessions.patch(id, { statusLabel: label?.trim() || undefined }));
-  handle('sessions:archive', ({ id, archived, removeWorktree, forceWorktree }) => sessions.setArchived(id, archived, removeWorktree, forceWorktree));
+  handle('sessions:archive', async ({ id, archived, removeWorktree, forceWorktree }) => {
+    // Archiving parks the session, so its shells go with it — and a shell holding the worktree's
+    // directory open (Windows) must be gone before the worktree is removed.
+    if (archived) await terminals.closeForSession(id);
+    return sessions.setArchived(id, archived, removeWorktree, forceWorktree);
+  });
   handle('sessions:pin', ({ id, pinned }) => sessions.setPinned(id, pinned));
   handle('sessions:pinOrder', ({ ids }) => sessions.setPinOrder(ids));
   handle('sessions:send', ({ id, input }) => sessions.send(id, input));
