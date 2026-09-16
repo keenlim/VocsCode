@@ -1,6 +1,7 @@
 /** Shared renderer actions for changing and archiving sessions. */
 import type { AppSettings, EffortLevel, SessionMeta } from '../../shared/types';
 import { invoke } from './api';
+import { basename } from './format';
 import { askConfirm } from './components/ui';
 import { useStore } from './store';
 
@@ -84,4 +85,45 @@ export async function archiveSession(s: SessionMeta, toast: Toast) {
   void invoke('sessions:archive', { id: s.id, archived: true })
     .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e), 'error'))
     .finally(() => useStore.getState().setArchiving(s.id, false));
+}
+
+/**
+ * Takes a project folder out of the app after confirming what goes with it. Removal is about the
+ * app's own record of the project — its sessions, their transcripts and the folder's sidebar
+ * settings. The project directory itself is never deleted, and the confirmation says so, because
+ * "remove folder" is exactly the phrase a user would fear meant otherwise.
+ */
+export async function removeFolder(root: string, sessions: SessionMeta[], toast: Toast): Promise<void> {
+  const inFolder = sessions.filter((s) => s.config.projectRoot === root);
+  const worktrees = inFolder.filter((s) => s.worktreeBranch).length;
+  const count = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
+  const body = [
+    inFolder.length === 1
+      ? 'Its session and its transcript are removed from the app.'
+      : inFolder.length
+        ? `Its ${count(inFolder.length, 'session')} and their transcripts are removed from the app.`
+        : 'It has no sessions left.',
+    worktrees ? `The ${count(worktrees, 'worktree folder')} created for those sessions are deleted; their branches are kept.` : '',
+    `The project itself is not deleted — ${root} stays on disk, and you can add it again at any time.`
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const ok = await askConfirm({
+    title: `Remove "${basename(root)}" from Vocs Code?`,
+    body,
+    confirmLabel: 'Remove folder',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const { removedSessions } = await invoke('folders:remove', { root });
+    toast(
+      removedSessions
+        ? `Removed "${basename(root)}" and ${count(removedSessions, 'session')} from Vocs Code.`
+        : `Removed "${basename(root)}" from Vocs Code.`,
+      'success'
+    );
+  } catch (e) {
+    toast(e instanceof Error ? e.message : String(e), 'error');
+  }
 }

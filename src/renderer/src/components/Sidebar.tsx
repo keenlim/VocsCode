@@ -5,10 +5,11 @@ import { HARNESS_BY_ID } from '../../../shared/harness-meta';
 import { modelRefName } from '../../../shared/model-names';
 import { invoke } from '../api';
 import { basename, fmtCost, harnessShort, harnessTone, relTime } from '../format';
-import { archiveSession } from '../sessionActions';
+import { archiveSession, removeFolder } from '../sessionActions';
 import { sortSessionRows } from '../sessionOrder';
 import { useStore, toastError } from '../store';
 import { Resizer } from './Resizer';
+import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { FolderBranch } from './FolderBranch';
 import { ForkIntoDropdown } from './ForkInto';
 import { askConfirm, Badge, Button, Dropdown, Icon, MenuItem, STATUS_LABELS, StatusLabel } from './ui';
@@ -153,6 +154,25 @@ export function Sidebar() {
     void invoke('settings:update', { collapsedFolders: next });
   };
 
+  const copyPath = async (root: string) => {
+    try {
+      await navigator.clipboard.writeText(root);
+      toast('Path copied', 'success');
+    } catch {
+      toast('Could not copy the path', 'error');
+    }
+  };
+
+  /** Right-click menu for a folder header. */
+  const folderMenu = (root: string, isCollapsed: boolean): ContextMenuItem[] => [
+    { label: `New session in ${basename(root)}`, icon: 'sessionPlus', onSelect: () => void startNewSession(root) },
+    { label: isCollapsed ? 'Expand folder' : 'Collapse folder', icon: isCollapsed ? 'chevronRight' : 'chevron', onSelect: () => toggleCollapsed(root) },
+    { separator: true },
+    { label: 'Copy path', icon: 'copy', onSelect: () => void copyPath(root) },
+    { separator: true },
+    { label: 'Remove folder from Vocs Code', icon: 'trash', danger: true, onSelect: () => void removeFolder(root, sessions, toast) }
+  ];
+
   /** Persist a drop of `from` next to `to` (before or after, by drop edge). */
   const commitOrder = (from: string, to: string, after: boolean) => {
     const roots = groups.map((g) => g.root);
@@ -290,6 +310,7 @@ export function Sidebar() {
                 draggable
                 onDragStart={(e) => onDragStart(e, g.root)}
                 onDragEnd={() => setDrag(null)}
+                onContextMenu={(e) => showContextMenu(e, folderMenu(g.root, isCollapsed))}
               >
                 <button
                   type="button"
@@ -433,6 +454,18 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
     }
     if (nextCustom) void invoke('settings:update', { customLabels: nextCustom });
   };
+  /** Right-click menu for a session row; it mirrors the inline actions plus rename and delete. */
+  const rowMenu = (): ContextMenuItem[] => [
+    ...(active ? [] : [{ label: 'Open session', icon: 'arrowRight', onSelect: onSelect }]),
+    { label: 'Rename', icon: 'edit', hint: 'Double-click', onSelect: startRename },
+    { label: s.pinned ? 'Unpin' : 'Pin to top', icon: s.pinned ? 'pinOff' : 'pin', onSelect: () => void invoke('sessions:pin', { id: s.id, pinned: !s.pinned }) },
+    { separator: true },
+    s.archived
+      ? { label: 'Restore session', icon: 'restore', onSelect: () => void invoke('sessions:archive', { id: s.id, archived: false }) }
+      : { label: s.worktreeBranch ? 'Archive & remove worktree' : 'Archive', icon: 'archive', onSelect: () => void archiveSession(s, toast) },
+    { label: 'Delete session', icon: 'trash', danger: true, onSelect: () => void deleteRow() }
+  ];
+
   // Only pinned rows can be dragged, and only while they are not being renamed.
   const canDrag = !!s.pinned && !s.archived && !renaming;
   const dragClass = dnd.dragId === s.id ? ' dragging' : '';
@@ -452,6 +485,10 @@ function SessionRow({ session: s, active, customLabels, archiving, onSelect, toa
       onDragOver={(e) => dndHandlers.over(s.id, e)}
       onDragLeave={(e) => dndHandlers.leave(s.id, e)}
       onDrop={(e) => dndHandlers.drop(s.id)}
+      onContextMenu={(e) => {
+        // The rename field keeps the native editing menu (cut/copy/paste/undo).
+        if (!isEditableTarget(e.target)) showContextMenu(e, rowMenu());
+      }}
       onClick={onSelect}
       onDoubleClick={(e) => {
         e.stopPropagation();

@@ -422,8 +422,28 @@ export class SessionManager {
   }
 
   async delete(id: string, removeWt = false): Promise<void> {
+    if (await this.deleteOne(id, removeWt)) this.pushSessions();
+  }
+
+  /**
+   * Deletes several sessions as one operation — removing a project folder from the app takes its
+   * whole session list with it. The list is pushed once, at the end, so the renderer sees a single
+   * departure and picks one replacement selection instead of hopping through the doomed rows.
+   */
+  async deleteMany(ids: string[]): Promise<number> {
+    let removed = 0;
+    for (const id of ids) {
+      const removeWt = !!this.get(id)?.worktreeBranch;
+      if (await this.deleteOne(id, removeWt)) removed++;
+    }
+    if (removed) this.pushSessions();
+    return removed;
+  }
+
+  /** The delete itself, without the list push; resolves false when the id is already gone. */
+  private async deleteOne(id: string, removeWt: boolean): Promise<boolean> {
     const meta = this.get(id);
-    if (!meta) return;
+    if (!meta) return false;
     const t0 = Date.now();
     await this.stop(id);
     this.cancelPersist(id);
@@ -438,9 +458,9 @@ export class SessionManager {
     const tWorktree = Date.now();
     await this.deps.store.remove(id);
     const tStore = Date.now();
-    this.pushSessions();
     this.deps.log('info', `[${id}] session deleted (${meta.config.harness}, "${meta.title.slice(0, 60)}")${meta.worktreeBranch ? `; worktree ${meta.worktreeBranch} ${removeWt ? 'removed' : 'kept'}` : ''}`);
     if (tStore - t0 >= 1000) this.deps.log('warn', `slow session delete ${id}: stop ${tStop - t0}ms, worktree ${tWorktree - tStop}ms, store ${tStore - tWorktree}ms`);
+    return true;
   }
 
   async patch(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {

@@ -142,6 +142,63 @@ describe('handler registry', () => {
     for (const c of agentChannels()) expect(channels, `${c} is on the agent allowlist but not registered`).toContain(c);
   });
 
+  it('removes a folder from the app: its sessions in one batch, its settings, nothing on disk', async () => {
+    const rooted = (id: string, projectRoot: string): SessionMeta => ({
+      id,
+      title: id,
+      createdAt: 1,
+      updatedAt: 1,
+      config: { harness: 'native', permissionMode: 'ask', projectRoot },
+      cwd: projectRoot,
+      status: 'idle',
+      harnessRef: {},
+      usage: { ...ZERO_USAGE }
+    });
+    const live = [rooted('s_a', 'G:/proj/a'), rooted('s_b', 'G:/proj/a'), rooted('s_c', 'G:/proj/b')];
+    const batches: string[][] = [];
+    const closed: string[] = [];
+    const { registry, deps, pushes } = stubDeps({
+      sessions: {
+        list: () => live,
+        get: (id: string) => live.find((s) => s.id === id) ?? null,
+        deleteMany: async (ids: string[]) => {
+          batches.push(ids);
+          for (const id of ids) live.splice(live.findIndex((s) => s.id === id), 1);
+          return ids.length;
+        }
+      } as unknown as SessionManager,
+      terminals: { closeForSession: async (id: string) => void closed.push(id) } as unknown as TerminalManager
+    });
+    await deps.settings.load();
+    await registry.invoke('settings:update', {
+      folders: ['G:/proj/a', 'G:/proj/b'],
+      folderOrder: ['G:/proj/b', 'G:/proj/a'],
+      collapsedFolders: ['G:/proj/a'],
+      recentProjects: ['G:/proj/a', 'G:/proj/b'],
+      gitSetupSkipped: ['G:/proj/a'],
+      folderStyles: { 'G:/proj/a': { color: '#5b9bf8' }, 'G:/proj/b': { icon: 'bolt' } }
+    });
+    const before = pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length;
+
+    const result = await registry.invoke('folders:remove', { root: 'G:/proj/a' });
+
+    expect(result).toEqual({ removedSessions: 2 });
+    // One batch, not two deletes: the renderer sees a single departure and picks one replacement.
+    expect(batches).toEqual([['s_a', 's_b']]);
+    // Shells hold the cwd open, so they come down first.
+    expect(closed).toEqual(['s_a', 's_b']);
+    const after = (await registry.invoke('settings:get', undefined)) as Awaited<ReturnType<SettingsStore['get']>>;
+    expect(after.folders).toEqual(['G:/proj/b']);
+    expect(after.folderOrder).toEqual(['G:/proj/b']);
+    expect(after.collapsedFolders).toEqual([]);
+    expect(after.recentProjects).toEqual(['G:/proj/b']);
+    expect(after.gitSetupSkipped).toEqual([]);
+    expect(after.folderStyles).toEqual({ 'G:/proj/b': { icon: 'bolt' } });
+    // The other folder keeps its session, and the renderer is told about the new settings.
+    expect(live.map((s) => s.id)).toEqual(['s_c']);
+    expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBe(before + 1);
+  });
+
   it('round-trips settings and pushes settingsChanged', async () => {
     const { registry, deps, pushes } = stubDeps();
     await deps.settings.load();

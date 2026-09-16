@@ -109,6 +109,12 @@ export interface IpcContract {
   'settings:get': [void, AppSettings];
   'settings:update': [Partial<AppSettings>, AppSettings];
 
+  /**
+   * Removes a project folder from the app: every session under that root, and every setting keyed
+   * by it. The folder on disk is never touched.
+   */
+  'folders:remove': [{ root: string }, { removedSessions: number }];
+
   'secrets:set': [{ providerId: string; apiKey: string }, void];
   'secrets:clear': [{ providerId: string }, void];
   'secrets:has': [{ providerId: string }, boolean];

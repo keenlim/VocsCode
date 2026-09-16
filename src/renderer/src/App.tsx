@@ -19,6 +19,7 @@ import { SkillsView } from './components/SkillsView';
 import { TitleBar } from './components/TitleBar';
 import { Transcript } from './components/Transcript';
 import { Button, ConfirmHost, EmptyState, Icon, Kbd, Spinner } from './components/ui';
+import { ContextMenuHost } from './components/ContextMenu';
 import { handleCustomShortcut } from './shortcuts';
 import { createTerminal } from './terminal/host';
 import { applyTheme } from './theme';
@@ -212,6 +213,7 @@ export function App() {
       {paletteOpen && <CommandPalette />}
       {searchOpen && <SearchModal />}
       <ConfirmHost />
+      <ContextMenuHost />
       {settings.onboardingDone && <Vesta />}
       <Toasts />
     </div>
