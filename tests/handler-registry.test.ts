@@ -4,6 +4,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fsSync from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHandlerRegistry, type DesktopBridge, type HandlerRegistry } from '../src/main/handlers';
@@ -197,6 +198,23 @@ describe('handler registry', () => {
     // The other folder keeps its session, and the renderer is told about the new settings.
     expect(live.map((s) => s.id)).toEqual(['s_c']);
     expect(pushes.filter(([c]) => c === PUSH_CHANNELS.settingsChanged).length).toBe(before + 1);
+  });
+
+  // The pre-session git probes take a folder, not a session id, so an unregistered path must be
+  // refused outright — a paired browser reaches these channels too.
+  it('probes a folder for a git repository only once the app knows the folder', async () => {
+    const repo = tmpDir('repo');
+    const init = spawnSync('git', ['init', '.'], { cwd: repo, encoding: 'utf8' });
+    expect(init.status, init.stderr).toBe(0);
+    const { registry, deps } = stubDeps();
+    await deps.settings.load();
+
+    expect(await registry.invoke('git:folderIsRepo', { projectRoot: repo })).toEqual({ isRepo: false });
+
+    await registry.invoke('settings:update', { folders: [repo] });
+    expect(await registry.invoke('git:folderIsRepo', { projectRoot: repo })).toEqual({ isRepo: true });
+    // A known folder that is a plain directory is what disables worktree isolation in the dialog.
+    expect(await registry.invoke('git:folderIsRepo', { projectRoot: ws })).toEqual({ isRepo: false });
   });
 
   it('round-trips settings and pushes settingsChanged', async () => {
