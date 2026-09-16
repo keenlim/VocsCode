@@ -316,7 +316,7 @@ export class SessionManager {
 
   async create(req: CreateSessionRequest): Promise<SessionMeta> {
     const id = shortId('s_');
-    const cfg = req.config;
+    let cfg = req.config;
     let cwd = cfg.projectRoot;
     let worktreeBranch: string | undefined;
     if (req.checkoutBranch) {
@@ -333,9 +333,17 @@ export class SessionManager {
         worktreeBranch = wt.branch;
       }
     } else if (cfg.useWorktree) {
-      const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
-      cwd = wt.path;
-      worktreeBranch = wt.branch;
+      // A folder with no repository cannot host a worktree. The request loses its isolation rather
+      // than the session: the dialog disables the toggle, but a remembered default (quick session)
+      // or a spawned agent's `use_worktree` can still ask for it on a plain folder.
+      if (await gitRoot(cfg.projectRoot)) {
+        const wt = await createWorktree(cfg.projectRoot, slugify(req.title || req.initialPrompt || id));
+        cwd = wt.path;
+        worktreeBranch = wt.branch;
+      } else {
+        cfg = { ...cfg, useWorktree: false };
+        this.deps.log('warn', `[${id}] worktree isolation skipped: ${cfg.projectRoot} is not a git repository`);
+      }
     }
     const s = this.settings();
     const objective = req.goal?.trim() ?? '';

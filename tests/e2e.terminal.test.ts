@@ -109,6 +109,11 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await win.waitForSelector('.ns-root', { timeout: 15_000 });
       const seeded = (await win.locator('.ns-root').innerText()).replace(/\\/g, '/');
       expect(seeded, 'the dialog is seeded with the folder of the session that is active').toBe(project.replace(/\\/g, '/'));
+      // This project folder has no repository, so worktree isolation is not on offer: leaving it
+      // switchable only produces a session that fails with "Worktrees require a git repository."
+      const isolate = win.locator('.toggle', { hasText: 'Isolate in a git worktree' });
+      await isolate.locator('.muted', { hasText: 'not a git repository' }).waitFor({ timeout: 15_000 });
+      expect(await isolate.locator('input').isDisabled(), 'worktree isolation is disabled for a folder with no git repository').toBe(true);
       await win.locator('.modal').getByRole('button', { name: 'Cancel' }).click();
       await win.waitForSelector('.modal', { state: 'detached', timeout: 15_000 });
 

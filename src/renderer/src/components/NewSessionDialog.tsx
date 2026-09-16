@@ -30,6 +30,8 @@ export function NewSessionDialog() {
   const [effort, setEffort] = useState<EffortLevel | ''>(settings.defaultEffort ?? '');
   const [mode, setMode] = useState<PermissionMode>(settings.defaultPermissionMode);
   const [useWorktree, setUseWorktree] = useState(settings.defaultUseWorktree ?? false);
+  // Undefined until the folder has been probed; worktree isolation is offered only for a repository.
+  const [folderIsRepo, setFolderIsRepo] = useState<boolean | undefined>(undefined);
   const [acpAgent, setAcpAgent] = useState(settings.acpAgents[0]?.id ?? 'dsh');
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -61,6 +63,23 @@ export function NewSessionDialog() {
     ro.observe(left);
     return () => ro.disconnect();
   }, [harness, acpAgent]);
+
+  // `git worktree add` needs a repository; without one the toggle would only produce a failed
+  // session creation, so the folder is probed before the toggle is offered.
+  useEffect(() => {
+    if (!projectRoot) {
+      setFolderIsRepo(undefined);
+      return;
+    }
+    let cancelled = false;
+    setFolderIsRepo(undefined);
+    invoke('git:folderIsRepo', { projectRoot })
+      .then((r) => !cancelled && setFolderIsRepo(r.isRepo))
+      .catch(() => !cancelled && setFolderIsRepo(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot]);
 
   const descriptor = HARNESSES.find((h) => h.id === harness)!;
   const modes = descriptor.capabilities.permissionModes;
@@ -103,6 +122,12 @@ export function NewSessionDialog() {
     selectedEffort = selectedModel?.defaultEffort && supportedEfforts.includes(selectedModel.defaultEffort) ? selectedModel.defaultEffort : '';
   }
 
+  // The toggle state stays the user's preference (it is what gets remembered); a folder without a
+  // repository simply cannot act on it. Starting waits for the probe, so a fast click cannot submit
+  // the preference before it is known to be usable.
+  const isolate = useWorktree && folderIsRepo === true;
+  const ready = !!projectRoot && !modelsLoading && folderIsRepo !== undefined;
+
   const create = async () => {
     if (modelsLoading) return;
     if (!projectRoot) {
@@ -117,7 +142,7 @@ export function NewSessionDialog() {
         model,
         effort: selectedEffort || undefined,
         permissionMode: mode,
-        useWorktree,
+        useWorktree: isolate,
         acpAgent: harness === 'acp' ? acpAgent : undefined,
         appendSystemPrompt: appendSystemPrompt.trim() || undefined,
         maxBudgetUsd: maxBudget ? Number(maxBudget) : undefined
@@ -141,7 +166,7 @@ export function NewSessionDialog() {
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && !modelsLoading && projectRoot) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !creating && ready) {
       e.preventDefault();
       void create();
     }
@@ -186,7 +211,7 @@ export function NewSessionDialog() {
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={create} disabled={creating || modelsLoading || !projectRoot} title="Start from the prompt area with Enter">
+          <Button variant="primary" onClick={create} disabled={creating || !ready} title="Start from the prompt area with Enter">
             {creating ? <Spinner /> : <Icon name="play" />} Start session <Kbd>↵</Kbd>
           </Button>
         </>
@@ -277,7 +302,19 @@ export function NewSessionDialog() {
           <div className="field-hint">{PERMISSION_MODE_LABELS[mode].description}</div>
           {!descriptor.capabilities.approvals && mode !== 'plan' && <div className="callout warn">This harness cannot ask for approval; the sandbox mode is the only safety boundary.</div>}
 
-          <Toggle checked={useWorktree} onChange={setUseWorktree} label={<span>Isolate in a git worktree <span className="muted">(new branch under .vocs-code/worktrees)</span></span>} />
+          <Toggle
+            checked={isolate}
+            onChange={setUseWorktree}
+            disabled={folderIsRepo !== true}
+            label={
+              <span>
+                Isolate in a git worktree{' '}
+                <span className="muted">
+                  {folderIsRepo === false ? '(unavailable — this folder is not a git repository)' : folderIsRepo === undefined ? '(checking the folder…)' : '(new branch under .vocs-code/worktrees)'}
+                </span>
+              </span>
+            }
+          />
         </section>
 
         <section className="ns-span2">

@@ -266,6 +266,8 @@ export interface IpcContract {
   'remote:clearAudit': [void, void];
 
   'git:folderBranch': [{ projectRoot: string }, { branch?: string; detached?: boolean }];
+  /** Pre-session probe for a folder the dialog is configuring: worktree isolation needs a git repository. */
+  'git:folderIsRepo': [{ projectRoot: string }, { isRepo: boolean }];
   'git:summary': [{ sessionId: string }, GitSummary];
   'git:diff': [{ sessionId: string; path?: string; staged?: boolean }, { diff: string; error?: string }];
   'git:revert': [{ sessionId: string; path: string }, { ok: boolean; error?: string }];
