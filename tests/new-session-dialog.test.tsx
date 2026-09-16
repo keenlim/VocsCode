@@ -42,6 +42,7 @@ beforeEach(() => {
   invoke.mockImplementation(async (channel: string) => {
     if (channel === 'harness:models') return { models: [] };
     if (channel === 'sessions:create') return createdSession;
+    if (channel === 'git:folderIsRepo') return { isRepo: true };
     return {};
   });
   useStore.setState({
@@ -64,7 +65,10 @@ afterEach(() => {
 describe('NewSessionDialog', () => {
   it('starts from the first prompt on Enter and keeps Shift+Enter for newlines', async () => {
     render(<NewSessionDialog />);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('harness:models', expect.anything()));
+    // Starting waits for the model list and the folder's git probe; Enter is inert until then.
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    expect(invoke).toHaveBeenCalledWith('harness:models', expect.anything());
 
     const prompt = screen.getByPlaceholderText('What should the agent do?');
     fireEvent.change(prompt, { target: { value: 'Fix the flaky test' } });
@@ -91,6 +95,7 @@ describe('NewSessionDialog', () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'harness:models') return { models: [{ id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' }] };
       if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
       return {};
     });
     render(<NewSessionDialog />);
@@ -105,5 +110,42 @@ describe('NewSessionDialog', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
     const createCall = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
     expect((createCall?.[1] as { config: { model?: unknown } }).config.model).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5' });
+  });
+
+  it('offers worktree isolation for a folder that is a git repository', async () => {
+    render(<NewSessionDialog />);
+    const toggle = screen.getByLabelText(/Isolate in a git worktree/) as HTMLInputElement;
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(screen.getByText('(new branch under .vocs-code/worktrees)')).toBeTruthy();
+
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const call = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
+    expect((call?.[1] as { config: { useWorktree?: boolean } }).config.useWorktree).toBe(true);
+  });
+
+  // A plain folder cannot host a worktree: `git worktree add` fails there, so creation died with
+  // "Worktrees require a git repository." — including when only the remembered default asked for it.
+  it('disables worktree isolation for a folder with no git repository and never asks for it', async () => {
+    useStore.setState({ settings: { ...settings, defaultUseWorktree: true } } as never);
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return { models: [] };
+      if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: false };
+      return {};
+    });
+    render(<NewSessionDialog />);
+
+    const toggle = screen.getByLabelText(/Isolate in a git worktree/) as HTMLInputElement;
+    await waitFor(() => expect(toggle.disabled).toBe(true));
+    // The remembered default must not survive as a checked-but-unusable toggle.
+    expect(toggle.checked).toBe(false);
+    expect(screen.getByText('(unavailable — this folder is not a git repository)')).toBeTruthy();
+
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const call = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
+    expect((call?.[1] as { config: { useWorktree?: boolean } }).config.useWorktree).toBe(false);
   });
 });

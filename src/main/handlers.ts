@@ -14,7 +14,7 @@ import { createClaudeAgent, isPinnedModel, listClaudeAgents, setClaudeAgentModel
 import type { AppSettings, DoctorReport, HarnessAvailability, HarnessId, ImageAttachment } from '../shared/types';
 import { HARNESSES } from '../shared/harness-meta';
 import { applyModelOverrides, modelOverrideKey } from '../shared/model-overrides';
-import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
+import { gitBranches, gitBranchesOverview, gitCheckout, gitCommit, gitCreateGitHubRepo, gitCreatePr, gitDeleteBranch, gitDiff, gitFetchPrune, gitFolderBranch, gitGithubIdentity, gitInit, gitInitialCommit, gitIssues, gitMergePr, gitPruneWorktrees, gitPullRequests, gitPush, gitRangeEvidence, gitRevertFile, gitRoot, gitSetIdentity, gitSetRemote, gitSetupStatus, gitStageAll, gitSummary, gitUpdateBranch, gitWorktrees, removeWorktree, type SessionPrQuery } from './git';
 import type { AnalyticsStore } from './analytics';
 import type { KnowledgeService } from './knowledge/service';
 import type { UpdateState } from '../shared/types';
@@ -234,9 +234,15 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
       return { ok: false, error: errorMessage(e) };
     }
   });
+  // Folders the local user picked in this run. A freshly picked folder is in neither settings.folders
+  // nor any session yet, so the per-folder git probes below would refuse it; the native dialog is
+  // proof enough that the user chose the path, and no remote client can reach app:pickFolder.
+  const pickedFolders = new Set<string>();
   handle('app:pickFolder', async ({ defaultPath }) => {
     const res = await deps.desktop.showOpenDialog({ properties: ['openDirectory', 'createDirectory'], defaultPath });
-    return { path: res.canceled ? null : res.filePaths[0] ?? null };
+    const picked = res.canceled ? null : res.filePaths[0] ?? null;
+    if (picked) pickedFolders.add(picked);
+    return { path: picked };
   });
   handle('app:diag', ({ kind, ms, detail }) => {
     deps.log('warn', `renderer ${kind} ${ms}ms${detail ? ` (${detail})` : ''}`);
@@ -738,10 +744,14 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     if (!m) throw new Error('Session not found');
     return m.cwd;
   };
-  handle('git:folderBranch', ({ projectRoot }) => {
-    const known = settings.get().folders.includes(projectRoot) || sessions.list().some((s) => s.config.projectRoot === projectRoot);
-    return known ? gitFolderBranch(projectRoot) : {};
-  });
+  // Neither probe takes a session id, so both gate on a folder the app already knows about (or one
+  // the local user just picked): a paired browser must not be able to walk the host's disk.
+  const knownFolder = (projectRoot: string) =>
+    pickedFolders.has(projectRoot) || settings.get().folders.includes(projectRoot) || sessions.list().some((s) => s.config.projectRoot === projectRoot);
+  handle('git:folderBranch', ({ projectRoot }) => (knownFolder(projectRoot) ? gitFolderBranch(projectRoot) : {}));
+  // The new-session dialog disables worktree isolation for a folder that has no repository, because
+  // `git worktree add` there fails the whole session creation.
+  handle('git:folderIsRepo', async ({ projectRoot }) => ({ isRepo: knownFolder(projectRoot) ? !!(await gitRoot(projectRoot)) : false }));
   handle('git:summary', ({ sessionId }) => gitSummary(cwdOf(sessionId)));
   handle('git:diff', async ({ sessionId, path: p, staged }) => gitDiff(cwdOf(sessionId), p, staged));
   handle('git:revert', ({ sessionId, path: p }) => gitRevertFile(cwdOf(sessionId), p));
