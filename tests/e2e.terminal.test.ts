@@ -247,6 +247,23 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(0);
       await win.waitForSelector('.term .empty', { timeout: 10_000 });
 
+      // A shell open when the session is archived must not outlive it: archiving parks the session
+      // and closes its terminals, so restoring it gets a fresh shell with none of the old screen.
+      await win.click('.term-new button[aria-label="New terminal"]');
+      await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(1);
+      await win.waitForSelector('.term-view .xterm .xterm-helper-textarea', { timeout: 20_000 });
+      await win.locator('.xterm-helper-textarea').focus();
+      await win.waitForTimeout(1500); // let the shell print its prompt
+      await win.keyboard.type('echo VOCS_ARCHIVE_MARKER');
+      await win.keyboard.press('Enter');
+      // “Send output to agent” reads the renderer's own xterm buffer, so it is the screen itself.
+      const screenText = async (): Promise<string> => {
+        await win.click('button[aria-label="Send output to agent"]');
+        return win.locator('.composer textarea').inputValue();
+      };
+      await expect.poll(screenText, { timeout: 20_000 }).toContain('VOCS_ARCHIVE_MARKER');
+      await win.fill('.composer textarea', '');
+
       // Pin/unpin is not a lifecycle action, so an archived session keeps the same leading toggle
       // instead of degrading to a read-only indicator. Archive the session, open the Archived view,
       // and prove the pin round-trips there.
@@ -270,6 +287,20 @@ describe.runIf(enabled)('electron e2e: terminal', () => {
       expect(await archivedPin.getAttribute('title'), 'a pinned archived row offers unpin').toBe('Unpin');
       await archivedPin.click(); // unpin, leaving the app in the state the crash check expects
       await expect.poll(async () => archivedPin.getAttribute('title'), { timeout: 10_000 }).toBe('Pin to top');
+
+      // Restore it and look at its terminal panel: the panel starts a fresh shell, and the screen the
+      // archived one had — the marker typed above — is nowhere in it.
+      await archivedRow.hover();
+      await archivedRow.locator('[aria-label="Restore session"]').click();
+      await win.click('.sidebar-link:has-text("Show active")');
+      const restoredRow = win.locator('[data-testid="session-row"]').first();
+      await restoredRow.waitFor({ timeout: 20_000 });
+      await restoredRow.click();
+      await win.click('.panel-tab:has-text("Terminal")');
+      await expect.poll(async () => win.locator('.term-tab').count(), { timeout: 20_000 }).toBe(1);
+      await expect.poll(screenText, { timeout: 20_000 }).toMatch(/^Terminal output \(/);
+      expect(await screenText(), 'the restored session starts a fresh shell, not the archived screen').not.toContain('VOCS_ARCHIVE_MARKER');
+      await win.fill('.composer textarea', '');
 
       // A killed renderer must not leave a blank window: main logs it and reloads automatically,
       // and the reloaded page paints the app again — without restarting the main process. The
