@@ -74,7 +74,8 @@ export function NewSessionDialog() {
     let cancelled = false;
     setFolderIsRepo(undefined);
     invoke('git:folderIsRepo', { projectRoot })
-      .then((r) => !cancelled && setFolderIsRepo(r.isRepo))
+      // Settled means known either way; only an in-flight probe leaves it undefined.
+      .then((r) => !cancelled && setFolderIsRepo(!!r.isRepo))
       .catch(() => !cancelled && setFolderIsRepo(false));
     return () => {
       cancelled = true;
