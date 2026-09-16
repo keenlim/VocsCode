@@ -6,6 +6,7 @@ import { installMarkdownHandlers } from '../markdown';
 import { useStore } from '../store';
 import { chunkKey, estimateChunkHeight, windowRange, type RenderChunk } from '../transcript-window';
 import { useStreamingMarkdown } from '../use-streaming-markdown';
+import { isEditableTarget, showContextMenu, type ContextMenuItem } from './ContextMenu';
 import { DiffView } from './DiffView';
 import { ImageLightbox, type LightboxImage } from './ImageLightbox';
 import { TranscriptFind } from './TranscriptFind';
@@ -201,9 +202,49 @@ export function Transcript({ session }: { session: SessionMeta }) {
 
   const pendingApprovals = useMemo(() => items.filter((i) => i.kind === 'approval' && !i.decision).length, [items]);
 
+  const copyText = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      useStore.getState().toast(`${what} copied`, 'success');
+    } catch {
+      useStore.getState().toast(`Could not copy the ${what.toLowerCase()}`, 'error');
+    }
+  };
+
+  /**
+   * Right-click menu for the transcript. A text field or the terminal keeps its own menu, and a
+   * click on a message offers that message's text even when nothing is selected.
+   */
+  const onContextMenu = (e: React.MouseEvent) => {
+    if (isEditableTarget(e.target) || isTerminalEventTarget(e.target)) return;
+    const selection = window.getSelection()?.toString() ?? '';
+    const block = e.target instanceof Element ? e.target.closest<HTMLElement>('.msg, .tool-card, .info-line') : null;
+    // A message's own body, not its meta row: the timestamp and the action buttons are chrome.
+    const body = block?.querySelector<HTMLElement>('.msg-text, .md') ?? block;
+    const blockText = body ? (body.innerText ?? body.textContent ?? '').trim() : '';
+    const items: ContextMenuItem[] = [];
+    if (selection.trim()) items.push({ label: 'Copy selection', icon: 'copy', hint: 'Ctrl+C', onSelect: () => void copyText(selection, 'Selection') });
+    if (blockText) items.push({ label: 'Copy message', icon: 'copy', onSelect: () => void copyText(blockText, 'Message') });
+    items.push(
+      { separator: true },
+      { label: 'Find in transcript', icon: 'search', hint: 'Ctrl+F', onSelect: () => setFindOpen(true) },
+      { label: 'Jump to latest', icon: 'chevron', disabled: stick, onSelect: () => { setStick(true); if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; } },
+      { separator: true },
+      {
+        label: 'Export transcript…',
+        icon: 'download',
+        onSelect: () =>
+          void invoke('sessions:export', { id: session.id })
+            .then((r) => r.path && useStore.getState().toast(`Exported to ${r.path}`, 'success'))
+            .catch((err) => useStore.getState().toast(err instanceof Error ? err.message : String(err), 'error'))
+      }
+    );
+    showContextMenu(e, items);
+  };
+
   return (
     <div className="transcript-wrap">
-      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll}>
+      <div className={`transcript ${virtual ? 'virtual' : ''}`} ref={ref} onScroll={onScroll} onContextMenu={onContextMenu}>
         {!loaded && !transcriptError && <div className="transcript-loading"><Spinner /> Loading…</div>}
         {!loaded && transcriptError && (
           <div className="transcript-error callout warn" role="alert">

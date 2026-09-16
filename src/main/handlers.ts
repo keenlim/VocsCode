@@ -276,6 +276,40 @@ export function createHandlerRegistry(deps: HandlerDeps): HandlerRegistry {
     return next;
   });
 
+  /**
+   * Takes a project folder out of the app: its sessions (and their worktrees, exactly as the
+   * per-session delete does) plus every setting keyed by that root. Nothing on disk is removed —
+   * the project itself stays where it is, and re-adding it starts from a clean slate.
+   */
+  handle('folders:remove', async ({ root }) => {
+    const doomed = sessions.list().filter((s) => s.config.projectRoot === root);
+    // Shells hold their cwd open; take them down before any worktree is removed.
+    for (const s of doomed) await terminals.closeForSession(s.id);
+    const removedSessions = await sessions.deleteMany(doomed.map((s) => s.id));
+    const cur = settings.get();
+    const patch: Partial<AppSettings> = {};
+    const without = (key: 'folders' | 'folderOrder' | 'collapsedFolders' | 'recentProjects' | 'gitSetupSkipped') => {
+      const list = cur[key];
+      if (list?.includes(root)) patch[key] = list.filter((p) => p !== root);
+    };
+    without('folders');
+    without('folderOrder');
+    without('collapsedFolders');
+    without('recentProjects');
+    without('gitSetupSkipped');
+    for (const key of ['folderStyles', 'mcpProjectState'] as const) {
+      const map = cur[key];
+      if (map && root in map) {
+        const next = { ...map };
+        delete next[root];
+        (patch as Record<string, unknown>)[key] = next;
+      }
+    }
+    if (Object.keys(patch).length) deps.push(PUSH_CHANNELS.settingsChanged, await settings.update(patch));
+    deps.log('info', `folder removed from app: ${root} (${removedSessions} session${removedSessions === 1 ? '' : 's'})`);
+    return { removedSessions };
+  });
+
   handle('secrets:set', async ({ providerId, apiKey }) => {
     await secrets.set(providerId, apiKey);
     await syncProviderKeyFlags();
