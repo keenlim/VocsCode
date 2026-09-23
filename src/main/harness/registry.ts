@@ -8,7 +8,7 @@ import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
-import { ClaudeAdapter } from './claude';
+import { ClaudeAdapter, claudeProviderEnv, listClaudeModels } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
 import { CursorAdapter, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
@@ -35,7 +35,7 @@ export function createAdapter(id: HarnessId, ctx: HarnessContext): HarnessAdapte
   }
 }
 
-/** Models offered in the New Session dialog before any process exists. */
+/** Models offered before a session process exists; some harnesses use a short-lived catalog probe. */
 export async function listHarnessModels(opts: {
   harness: HarnessId;
   settings: AppSettings;
@@ -57,8 +57,20 @@ async function listHarnessModelsRaw(opts: {
   const { harness, settings, runtime } = opts;
   try {
     switch (harness) {
-      case 'claude':
-        return { models: mergeClaudeCatalog(claudeNativeModels(settings), settings) };
+      case 'claude': {
+        const fallback = claudeNativeModels(settings);
+        const bin = runtime.resolve('claude');
+        if (!bin) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code runtime not found; showing the saved catalog.' };
+        try {
+          const provider = settings.providers.find((p) => p.id === 'anthropic');
+          const apiKey = settings.claude.useProviderKey ? await opts.getApiKey('anthropic') : undefined;
+          const live = await listClaudeModels(bin.path, claudeProviderEnv(settings, provider, apiKey));
+          if (!live.length) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code reported no models; showing the saved catalog.' };
+          return { models: mergeClaudeCatalog(live, settings) };
+        } catch (e) {
+          return { models: mergeClaudeCatalog(fallback, settings), error: `Claude model discovery failed (${errorMessage(e)}); showing the saved catalog.` };
+        }
+      }
       case 'codex':
       case 'codex-exec': {
         const native = await codexNativeModels(runtime);

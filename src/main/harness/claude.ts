@@ -5,6 +5,7 @@ import {
   query,
   type CanUseTool,
   type HookCallback,
+  type ModelInfo as ClaudeSdkModelInfo,
   type ModelUsage,
   type Options,
   type PermissionMode as SdkPermissionMode,
@@ -1017,16 +1018,60 @@ export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfi
   return settings.claude.useProviderKey && apiKey ? { ANTHROPIC_API_KEY: apiKey } : {};
 }
 
-export function claudeModelToInfo(m: { value: string; displayName: string; description?: string; resolvedModel?: string }): ModelInfo {
+/**
+ * Discover the models the selected Claude Code runtime offers to its current login. The streaming
+ * input stays open only long enough for the SDK initialization handshake; no user turn is sent.
+ */
+export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOverlay: Record<string, string | undefined> = {}): Promise<ModelInfo[]> {
+  const input = new AsyncQueue<SDKUserMessage>();
+  const abortController = new AbortController();
+  const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
+  // A desktop app launched from a Claude terminal must not look like a nested Claude Code process.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CLAUDE_CODE_') && key !== 'CLAUDE_CODE_USE_BEDROCK' && key !== 'CLAUDE_CODE_USE_VERTEX' && key !== 'CLAUDE_CODE_USE_FOUNDRY') delete env[key];
+  }
+  delete env.CLAUDECODE;
+  Object.assign(env, envOverlay);
+
+  const q = query({
+    prompt: input,
+    options: {
+      // Model discovery is global to the runtime/login. Do not let an IPC-provided project path load
+      // project settings, hooks or MCP servers into this short-lived process.
+      cwd: process.cwd(),
+      pathToClaudeCodeExecutable,
+      permissionMode: 'plan',
+      settingSources: [],
+      persistSession: false,
+      env,
+      abortController
+    }
+  });
+  try {
+    return (await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels')).map(claudeModelToInfo);
+  } finally {
+    input.close();
+    abortController.abort();
+    q.close();
+  }
+}
+
+export function claudeModelToInfo(m: ClaudeSdkModelInfo): ModelInfo {
+  const releaseName = m.description?.split(' · ')[0]?.trim();
+  const displayName = releaseName ? (m.value === 'default' ? `${m.displayName || m.value} — ${releaseName}` : releaseName) : m.displayName || m.value;
+  const supportsEffort = m.supportsEffort === true;
   return {
-    id: m.value,
+    // Keep `default` as the moving recommendation, but expose explicit choices under the canonical
+    // wire id so remembered selections survive Claude renaming an alias such as `sonnet`.
+    id: m.value === 'default' ? m.value : m.resolvedModel ?? m.value,
     provider: 'anthropic',
-    displayName: m.displayName || m.value,
+    displayName,
     description: m.description,
     contextWindow: findContextWindow('anthropic', m.resolvedModel ?? m.value),
     supportsImages: true,
-    supportsReasoning: true,
-    supportedEfforts: ['low', 'medium', 'high', 'xhigh', 'max']
+    supportsReasoning: supportsEffort || m.supportsAdaptiveThinking === true,
+    supportedEfforts: supportsEffort && m.supportedEffortLevels?.length ? [...m.supportedEffortLevels] : undefined,
+    isDefault: m.value === 'default'
   };
 }
 

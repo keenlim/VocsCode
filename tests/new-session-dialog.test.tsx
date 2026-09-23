@@ -91,6 +91,31 @@ describe('NewSessionDialog', () => {
     expect(start.textContent).not.toContain('Ctrl');
   });
 
+  it('shows and selects a newly discovered Claude login model explicitly', async () => {
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') {
+        return {
+          models: [
+            { id: 'default', provider: 'anthropic', displayName: 'Default (recommended) — Opus 5.5 with 1M context', isDefault: true },
+            { id: 'claude-opus-5-5[1m]', provider: 'anthropic', displayName: 'Opus 5.5 with 1M context' }
+          ]
+        };
+      }
+      if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      return {};
+    });
+    render(<NewSessionDialog />);
+
+    const opus = await screen.findByRole('button', { name: /anthropic\/claude-opus-5-5\[1m\].*Opus 5\.5 with 1M context/ });
+    fireEvent.click(opus);
+    fireEvent.click(screen.getByTitle('Start from the prompt area with Enter'));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
+    const createCall = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
+    expect((createCall?.[1] as { config: { model?: unknown } }).config.model).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5[1m]' });
+  });
+
   it('does not offer an unlisted model id typed into the model search', async () => {
     invoke.mockImplementation(async (channel: string) => {
       if (channel === 'harness:models') return { models: [{ id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Claude Sonnet 5' }] };

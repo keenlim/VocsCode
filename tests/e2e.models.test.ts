@@ -58,6 +58,9 @@ async function launch(userData: string): Promise<Page> {
     env[k] = v;
   }
   env.VOCS_CODE_USER_DATA = userData;
+  // Keep the short-lived Claude model probe off the developer's real login. Claude Code may still
+  // report its runtime catalog, but this suite never borrows account credentials or starts a turn.
+  env.CLAUDE_CONFIG_DIR = path.join(userData, 'claude');
   // requestSingleInstanceLock() runs before VOCS_CODE_USER_DATA is applied, so a run started while
   // the app is open would exit silently; --user-data-dir is a Chromium switch and lands earlier.
   const args = [path.join(root, 'out', 'main', 'index.js'), `--user-data-dir=${userData}`];
@@ -174,15 +177,26 @@ describe.runIf(enabled)('model picker before the first message', () => {
       models: [{ id: 'z-ai/glm-4.6', provider: 'openrouter', displayName: 'GLM 4.6' }],
       enabled: true
     };
-    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [gateway, openrouter] }), 'utf8');
+    await fs.writeFile(
+      path.join(userData, 'settings.json'),
+      seedSettings(project, { providers: [gateway, openrouter], claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] } }),
+      'utf8'
+    );
 
     const win = await launch(userData);
     await openNewSession(win);
     await pickHarness(win, /^Claude Agent SDK$/);
     const picker = win.locator('.ns-col-model .model-picker');
     await picker.locator('.mp-row').first().waitFor({ timeout: 60_000 });
+    await expect.poll(async () => picker.locator('.mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 20_000 }).toBe(1);
+    await expect.poll(async () => picker.locator('.mp-row:has(.mp-name[title="anthropic/claude-opus-5-5[1m]"])').innerText(), { timeout: 20_000 }).toContain('Opus 5.5');
     await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
     await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
+
+    // A newly advertised Claude model is a real selection, not only what "Harness default" happens
+    // to resolve to today.
+    await pickModel(win, 'anthropic/claude-opus-5-5[1m]');
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 10_000 }).toBe(1);
 
     // The dialog starts on a listed model only: the header accepts a typed custom id after start,
     // but here the search must not offer one, so it can never leak into a new session's config.
