@@ -43,12 +43,17 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | Harness | Engine | Approvals | Models | MCP |
 | --- | --- | --- | --- | --- |
 | **Claude Agent SDK** | `@anthropic-ai/claude-agent-sdk` (Claude Code loop, hooks, MCP, checkpoints) | interactive (`canUseTool`) | a short-lived `supportedModels()` probe of the selected Claude runtime/login (saved/static fallback), plus every provider with an Anthropic-format endpoint (OpenRouter, DeepSeek, OpenCode Go, or an anthropic-kind gateway); the endpoint follows the selected model's provider, with Bedrock/Vertex/Foundry via env | injected (`options.mcpServers`) |
-| **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | Codex's `model/list` plus every enabled OpenAI-wire provider (OpenRouter, DeepSeek, OpenCode Go, Groq, …), registered per session as a `model_providers` entry using the Responses API | injected (`config.mcp_servers`) |
-| **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | Codex catalog | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
+| **Codex (app-server)** | `codex app-server` JSON-RPC — the same engine as the Codex desktop app | interactive (command + file-change requests), steer, interrupt | all pages of Codex's dynamic `model/list` (static fallback only), plus every enabled OpenAI-wire provider (OpenRouter, DeepSeek, OpenCode Go, Groq, …), registered per session as a `model_providers` entry using the Responses API | injected (`config.mcp_servers`) |
+| **Codex (exec SDK)** | `@openai/codex-sdk` | none — sandbox mode is the boundary | all pages of Codex's dynamic `model/list` via a short-lived app-server probe (static fallback only) | injected (`config.mcp_servers`; secrets via the environment) — Codex declines MCP tool calls under this adapter's `approvalPolicy: never` |
 | **Cursor** | `@cursor/sdk` (same agent loop as the Cursor app/CLI, local runtime) | none — Cursor's sandbox + Plan-mode read-only tool allowlist are the boundary | `Cursor.models.list()`, billed to the Cursor plan | inherited — Cursor reads its own `mcp.json`; import/export only |
 | **Pi** | `pi --mode rpc` + bundled approvals and MCP-bridge extensions | interactive | pi's registry plus the app's bundled catalogs for every provider pi already lists (Anthropic, OpenAI, Codex OAuth, Google, DeepSeek, OpenRouter, OpenCode Go, Ollama, custom) | injected — the bridge extension registers each MCP tool with pi |
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
+
+Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
+following every `model/list` page rather than treating the bundled catalog as authoritative. The
+active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot
+probe too. Static Codex models are only a fallback when live discovery is unavailable or empty.
 
 **Pi's tool set is Vocs Code's, on Pi's implementations.** `resources/pi/vocs-code-tools.ts`
 registers Pi's own `grep`, `find` and `ls` definitions under the names `rg`, `glob` and `ls`, so a Pi

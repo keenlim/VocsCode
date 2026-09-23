@@ -121,7 +121,7 @@ async function codexNativeModels(runtime: RuntimeResolver): Promise<{ models: Mo
   if (!bin) return { models: CODEX_STATIC_MODELS, error: 'Codex CLI not found; showing the built-in catalog.' };
   try {
     const models = await listCodexModels(bin.path);
-    return { models: models.length ? models : CODEX_STATIC_MODELS };
+    return models.length ? { models } : { models: CODEX_STATIC_MODELS, error: 'Codex reported no models; showing the built-in catalog.' };
   } catch (e) {
     return { models: CODEX_STATIC_MODELS, error: `model/list failed (${errorMessage(e)}); showing the built-in catalog.` };
   }

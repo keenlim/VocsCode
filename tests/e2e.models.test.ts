@@ -1,8 +1,8 @@
 /**
  * Regression test for an empty model dropdown on a brand-new session. A harness process is only
  * spawned by the first message, so its `models` event does not exist before that; the header has to
- * fall back to the process-free catalog instead of showing "no model list yet". Two more cases cover
- * the new-session dialog listing a configured provider for Codex and for Claude.
+ * fall back to the pre-session catalog instead of showing "no model list yet". Additional cases cover
+ * the new-session dialog listing configured providers and both Codex harnesses' live runtime catalog.
  *
  * Requires `npm run build` first. Gated by VOCS_CODE_E2E_UI=1. Each session is seeded straight into a
  * fresh userData — the New Session dialog picks its folder through a native chooser Playwright cannot
@@ -53,7 +53,7 @@ async function launch(userData: string): Promise<Page> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined) continue;
-    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
+    if (k === 'ELECTRON_RUN_AS_NODE' || k === 'ELECTRON_RENDERER_URL' || k === 'CLAUDECODE' || k.startsWith('CLAUDE_CODE_')) continue;
     if (/^(ANTHROPIC|OPENAI|DEEPSEEK|OPENROUTER|OPENCODE|GEMINI|GROQ|XAI|MISTRAL)_API_KEY$/.test(k)) continue;
     env[k] = v;
   }
@@ -117,6 +117,38 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await picker2.locator('.mp-search input').fill('acme-custom-1');
     await picker2.getByRole('button', { name: 'Use “acme-custom-1”' }).click();
     await win.waitForSelector(`.pill[title="Model"]:has-text("${picked.split('/')[0]}/acme-custom-1")`, { timeout: 10_000 });
+  }, 180_000);
+
+  it.each([
+    { harness: 'codex', name: /^Codex \(app-server\)$/ },
+    { harness: 'codex-exec', name: /^Codex \(exec SDK\)$/ }
+  ] as const)('offers and selects the live $harness catalog in New Session', async ({ harness, name }) => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-${harness}-live-models-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(userData, 'settings.json'), seedSettings(project, { providers: [] }), 'utf8');
+
+    const win = await launch(userData);
+    // Query the real main-process boundary, not a fixture or a renderer mock. A fallback catalog
+    // must fail this live-runtime check even if it happens to contain the model we select below.
+    const result = await win.evaluate(({ harness, projectRoot }) => window.harness.invoke('harness:models', { harness, projectRoot }), { harness, projectRoot: project });
+    expect(result.error).toBeUndefined();
+    expect(result.models.length).toBeGreaterThan(0);
+    const expected = result.models.map((m) => `${m.provider}/${m.id}`).sort();
+
+    await openNewSession(win);
+    await pickHarness(win, name);
+    const picker = win.locator('.ns-col-model .model-picker');
+    await expect.poll(async () => picker.locator('.mp-row .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')).sort()), { timeout: 60_000 }).toEqual(expected);
+    // The dialog makes its own discovery request: it must not silently display a fallback either.
+    expect(await picker.locator('.menu-empty').count()).toBe(0);
+
+    const picked = expected[expected.length - 1]!;
+    await pickModel(win, picked);
+    await expect.poll(async () => picker.locator('.mp-row.active .mp-name').getAttribute('title'), { timeout: 10_000 }).toBe(picked);
+    expect(await picker.locator('.mp-row.active').count()).toBe(1);
   }, 180_000);
 
   it('offers a configured provider model for the Codex harness', async () => {
