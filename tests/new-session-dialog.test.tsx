@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
+import { mergeClaudeCatalog } from '../src/main/models/claude-catalog';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => ({
@@ -114,6 +115,77 @@ describe('NewSessionDialog', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.anything()));
     const createCall = invoke.mock.calls.find(([channel]) => channel === 'sessions:create');
     expect((createCall?.[1] as { config: { model?: unknown } }).config.model).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5[1m]' });
+  });
+
+  it.each([
+    { provider: 'anthropic', model: 'claude-opus-5-5' },
+    { provider: 'anthropic', model: 'claude-opus-5-5[1m]' },
+    { provider: 'custom-anthropic', model: 'claude-opus-5-5' },
+  ])('deduplicates normalized Claude rows and remembers the explicit $provider/$model selection', async (selected) => {
+    const catalogSettings: AppSettings = {
+      ...settings,
+      providers: [{
+        id: 'custom-anthropic',
+        kind: 'anthropic',
+        name: 'Custom Anthropic gateway',
+        baseUrl: 'https://gateway.example.test',
+        enabled: true,
+        hasApiKey: true,
+        models: [{ id: 'claude-opus-5-5', provider: 'custom-anthropic', displayName: 'Gateway Opus 5.5' }],
+      }],
+    };
+    // Alias and explicit SDK entries have already normalized to the same canonical id.
+    // Exercise the real catalog boundary rather than supplying a pre-deduplicated IPC fixture.
+    const models = mergeClaudeCatalog([
+      { id: 'default', provider: 'anthropic', displayName: 'Default (recommended) — Opus 5.5', isDefault: true },
+      { id: 'claude-opus-5-5', provider: 'anthropic', displayName: 'Opus 5.5' },
+      { id: 'claude-opus-5-5', provider: 'anthropic', displayName: 'Claude Opus 5.5' },
+      { id: 'claude-opus-5-5[1m]', provider: 'anthropic', displayName: 'Opus 5.5 with 1M context' },
+    ], catalogSettings);
+    useStore.setState({ settings: catalogSettings });
+    invoke.mockImplementation(async (channel: string) => {
+      if (channel === 'harness:models') return { models };
+      if (channel === 'sessions:create') return createdSession;
+      if (channel === 'git:folderIsRepo') return { isRepo: true };
+      return {};
+    });
+    render(<NewSessionDialog />);
+    const start = screen.getByTitle('Start from the prompt area with Enter') as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+
+    const expectUniqueRows = () => {
+      expect(screen.getAllByRole('button', { name: /^(anthropic|custom-anthropic)\// })).toHaveLength(4);
+      for (const title of [
+        'anthropic/default',
+        'anthropic/claude-opus-5-5',
+        'anthropic/claude-opus-5-5[1m]',
+        'custom-anthropic/claude-opus-5-5',
+      ]) {
+        expect(screen.getAllByTitle(title)).toHaveLength(1);
+      }
+    };
+    const buttonFor = (title: string) => screen.getByTitle(title).closest('button')!;
+    expectUniqueRows();
+    expect(buttonFor('anthropic/default').getAttribute('aria-pressed')).toBe('true');
+
+    const selectedTitle = `${selected.provider}/${selected.model}`;
+    fireEvent.click(buttonFor(selectedTitle));
+    expectUniqueRows();
+    expect(buttonFor(selectedTitle).getAttribute('aria-pressed')).toBe('true');
+    expect(buttonFor('anthropic/default').getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(start);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      'sessions:create',
+      expect.objectContaining({ config: expect.objectContaining({ model: selected }) }),
+    ));
+    expect(invoke.mock.calls.filter(([channel]) => channel === 'sessions:create')).toHaveLength(1);
+    expect(invoke).toHaveBeenCalledWith('settings:update', expect.objectContaining({
+      defaultModelByHarness: { claude: selected },
+      folderSessionDefaults: {
+        'G:/project': expect.objectContaining({ modelByHarness: { claude: selected } }),
+      },
+    }));
   });
 
   it('does not offer an unlisted model id typed into the model search', async () => {

@@ -18,6 +18,7 @@ import {
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
+import { dedupeClaudeModels } from '../models/claude-catalog';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
 import { subagentDir } from '../subagents';
 import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
@@ -587,7 +588,7 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (!this.modelsEmitted && !this.gateway) {
             this.modelsEmitted = true;
             q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: models.map(claudeModelToInfo) }))
+              .then((models) => this.ctx.emit({ type: 'models', models: dedupeClaudeModels(models.map(claudeModelToInfo)) }))
               .catch((e) => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
@@ -933,7 +934,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
-    return (await this.q.supportedModels()).map(claudeModelToInfo);
+    return dedupeClaudeModels((await this.q.supportedModels()).map(claudeModelToInfo));
   }
 
   /**
@@ -1048,7 +1049,7 @@ export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOv
     }
   });
   try {
-    return (await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels')).map(claudeModelToInfo);
+    return dedupeClaudeModels((await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels')).map(claudeModelToInfo));
   } finally {
     input.close();
     abortController.abort();

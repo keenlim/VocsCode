@@ -189,6 +189,43 @@ describe('Claude endpoint is fixed for the process', () => {
 });
 
 describe('Claude model reporting', () => {
+  it('emits unique explicit model choices from SDK initialization without changing the pinned session model', async () => {
+    const pinned = 'claude-opus-pinned';
+    const next = 'claude-opus-future';
+    const supportedModels = vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: next, displayName: 'Default' },
+      { value: 'opus', resolvedModel: next, displayName: 'Opus' },
+      { value: next, resolvedModel: next, displayName: 'Duplicate Opus' },
+      { value: 'opus[1m]', resolvedModel: `${next}[1m]`, displayName: 'Opus 1M' }
+    ]);
+    const close = vi.fn();
+    queryMock.mockReset();
+    queryMock.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: pinned };
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: pinned };
+      },
+      supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close, interrupt: vi.fn()
+    });
+    const events: SessionEvent[] = [];
+    const adapter = new ClaudeAdapter(stubCtx(settings(), { provider: 'anthropic', model: pinned }, undefined, events));
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(events.some((e) => e.type === 'status' && e.status === 'stopped')).toBe(true));
+      const catalogs = events.filter((e) => e.type === 'models');
+      expect(catalogs).toHaveLength(1);
+      expect(catalogs[0].models.map((m) => m.id)).toEqual(['default', next, `${next}[1m]`]);
+      expect(catalogs[0].models[1].displayName).toBe('Opus');
+      expect(queryMock.mock.calls[0][0].options.model).toBe(pinned);
+      expect(supportedModels).toHaveBeenCalledOnce();
+      expect(events.filter((e) => e.type === 'error')).toEqual([]);
+      expect(await adapter.listModels()).toEqual(catalogs[0].models);
+    } finally {
+      await adapter.dispose();
+    }
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   /** handle() is private; drive it directly with SDK-shaped messages. */
   const feed = (adapter: ClaudeAdapter, msg: Record<string, unknown>): void => {
     (adapter as unknown as { handle: (m: unknown, q: unknown) => void }).handle(msg as never, queryMock.mock.results[0]?.value);

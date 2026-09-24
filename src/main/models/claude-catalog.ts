@@ -22,17 +22,20 @@ export function claudeProviderModels(settings: AppSettings, providerId: string):
   return provider.models.map((m) => ({ ...m, provider: provider.id }));
 }
 
+/** Keep the first row for each selectable provider/id, preserving SDK order and metadata.
+ *  Run after alias-to-explicit mapping: different SDK rows can resolve to the same selection.
+ *  `default`, context variants and identical model ids on different providers remain distinct. */
+export function dedupeClaudeModels(models: ModelInfo[]): ModelInfo[] {
+  const seen = new Set<string>();
+  return models.filter((model) => {
+    const key = JSON.stringify([model.provider, model.id]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** Every usable provider's models, appended to the native catalog without duplicates. */
 export function mergeClaudeCatalog(native: ModelInfo[], settings: AppSettings): ModelInfo[] {
-  const seen = new Set(native.map((m) => `${m.provider}/${m.id}`));
-  const extra: ModelInfo[] = [];
-  for (const provider of settings.providers) {
-    for (const model of claudeProviderModels(settings, provider.id)) {
-      const key = `${model.provider}/${model.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      extra.push(model);
-    }
-  }
-  return [...native, ...extra];
+  return dedupeClaudeModels([...native, ...settings.providers.flatMap((provider) => claudeProviderModels(settings, provider.id))]);
 }

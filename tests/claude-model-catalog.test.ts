@@ -96,6 +96,36 @@ describe('Claude model catalog', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('lists each explicit model once when multiple SDK rows resolve to it, preserving order and provider variants', async () => {
+    const close = vi.fn();
+    const id = 'claude-opus-future';
+    const row = (value: string, resolvedModel = id) => ({ value, resolvedModel, displayName: value, description: '', supportsEffort: true, supportedEffortLevels: ['high'] });
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      row('default'), row('opus'), row(id), row('opus[1m]', `${id}[1m]`), row(`${id}[1m]`, `${id}[1m]`)
+    ]), close });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+    const gatewayModel = { id, provider: 'gateway', displayName: 'Gateway Opus' };
+    const r = await list([
+      provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' }),
+      provider({ id: 'gateway', models: [gatewayModel, gatewayModel] })
+    ], runtime);
+
+    expect(r.error).toBeUndefined();
+    expect(r.models.map((m) => `${m.provider}/${m.id}`)).toEqual([
+      'anthropic/default', `anthropic/${id}`, `anthropic/${id}[1m]`, `gateway/${id}`
+    ]);
+    // First SDK occurrence wins deterministically; don't merge conflicting alias metadata.
+    expect(r.models[1]).toMatchObject({ displayName: 'opus', supportedEfforts: ['high'] });
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('removes duplicate native entries from the saved fallback catalog too', async () => {
+    const model = { id: 'claude-opus-pinned', provider: 'anthropic', displayName: 'Pinned Opus' };
+    const r = await list([provider({ id: 'anthropic', models: [model, { ...model, displayName: 'Duplicate' }] })]);
+    expect(r.models).toEqual([model]);
+    expect(r.error).toContain('runtime not found');
+  });
+
   it('falls back to the saved catalog when live Claude discovery fails', async () => {
     const close = vi.fn();
     queryMock.mockReturnValue({ supportedModels: vi.fn().mockRejectedValue(new Error('login expired')), close });
