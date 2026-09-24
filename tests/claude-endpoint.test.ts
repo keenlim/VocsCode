@@ -290,6 +290,36 @@ describe('Claude model reporting', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it('marks a model without effort in the in-session catalog', async () => {
+    const haiku = 'claude-haiku-4-5-20251001';
+    const supportedModels = vi.fn().mockResolvedValue([
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+      // Claude Code's shape for a model without effort: the fields are absent, never `false`.
+      { value: 'haiku', resolvedModel: haiku, displayName: 'Haiku' }
+    ]);
+    queryMock.mockReset();
+    queryMock.mockReturnValue({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk1', model: haiku };
+      },
+      supportedModels, supportedCommands: vi.fn().mockResolvedValue([]), close: vi.fn(), interrupt: vi.fn()
+    });
+    const events: SessionEvent[] = [];
+    const adapter = new ClaudeAdapter(stubCtx(settings(), { provider: 'anthropic', model: haiku }, undefined, events));
+    try {
+      await adapter.start();
+      await vi.waitFor(() => expect(events.some((e) => e.type === 'models')).toBe(true));
+      const catalogs = events.filter((e) => e.type === 'models');
+      expect(catalogs).toHaveLength(1);
+      expect(catalogs[0].models.map((m) => [m.id, m.supportedEfforts])).toEqual([
+        ['claude-opus-5-5', ['low', 'medium', 'high', 'xhigh', 'max']],
+        [haiku, []]
+      ]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   /** handle() is private; drive it directly with SDK-shaped messages. */
   const feed = (adapter: ClaudeAdapter, msg: Record<string, unknown>): void => {
     (adapter as unknown as { handle: (m: unknown, q: unknown) => void }).handle(msg as never, queryMock.mock.results[0]?.value);

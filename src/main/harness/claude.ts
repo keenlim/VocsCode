@@ -1071,11 +1071,16 @@ export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOv
  * resolve has no version to pin, so it is left out rather than offered as a moving alias.
  */
 export function claudeSdkCatalog(models: ClaudeSdkModelInfo[]): ModelInfo[] {
-  const rows = models.map(claudeModelToInfo).filter((m) => m.id !== 'default');
+  // Claude Code sends the effort fields only for a model that takes effort, never `supportsEffort:
+  // false`. A row without them has no effort, but only from a runtime that reports them on some
+  // row: one that never does (an older install) leaves every model's effort unknown.
+  const reportsEffort = models.some((m) => m.supportsEffort === true);
+  const rows = models.map((m) => claudeModelToInfo(m, reportsEffort)).filter((m) => m.id !== 'default');
   return dedupeClaudeModels([...rows.filter((m) => m.isDefault), ...rows.filter((m) => !m.isDefault)]);
 }
 
-export function claudeModelToInfo(m: ClaudeSdkModelInfo): ModelInfo {
+/** `reportsEffort`: the runtime reports effort support, so a row without it takes no effort. */
+export function claudeModelToInfo(m: ClaudeSdkModelInfo, reportsEffort = false): ModelInfo {
   // Every row, the recommended `default` included, is listed under the canonical wire id it
   // resolves to. A remembered selection is then a version pin: it survives Claude renaming an alias
   // such as `sonnet`, and a later start or resume never follows a changed recommendation.
@@ -1091,9 +1096,15 @@ export function claudeModelToInfo(m: ClaudeSdkModelInfo): ModelInfo {
     contextWindow: findContextWindow('anthropic', id),
     supportsImages: true,
     supportsReasoning: supportsEffort || m.supportsAdaptiveThinking === true,
-    supportedEfforts: supportsEffort && m.supportedEffortLevels?.length ? [...m.supportedEffortLevels] : undefined,
+    supportedEfforts: claudeEfforts(m, reportsEffort),
     isDefault: recommended
   };
+}
+
+/** A row's effort levels: `[]` for a model that takes none, `undefined` while that is unknown. */
+function claudeEfforts(m: ClaudeSdkModelInfo, reportsEffort: boolean): EffortLevel[] | undefined {
+  if (m.supportsEffort === true) return m.supportedEffortLevels?.length ? [...m.supportedEffortLevels] : undefined;
+  return m.supportsEffort === false || reportsEffort ? [] : undefined;
 }
 
 function extractText(content: unknown): string {

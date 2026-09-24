@@ -255,4 +255,47 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 10_000 }).toBe(1);
     await win.screenshot({ path: path.join(shots, 'models-03-claude-providers.png') });
   }, 180_000);
+
+  it('disables reasoning effort for a Claude model the runtime lists without it', async () => {
+    const tmp = path.join(os.tmpdir(), `vocs-code-claude-effort-${Date.now()}`);
+    const userData = path.join(tmp, 'userData');
+    const project = path.join(tmp, 'project');
+    await fs.mkdir(userData, { recursive: true });
+    await fs.mkdir(project, { recursive: true });
+    await fs.writeFile(path.join(project, 'README.md'), '# claude effort e2e\n');
+    await fs.mkdir(shots, { recursive: true });
+    await fs.writeFile(
+      path.join(userData, 'settings.json'),
+      seedSettings(project, { providers: [], claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] } }),
+      'utf8'
+    );
+
+    const win = await launch(userData);
+    // Which models take effort is the runtime's answer (Haiku 4.5 takes none today), so read it the
+    // way the dialog does instead of hard-coding a model.
+    const { models } = await win.evaluate(({ projectRoot }) => window.harness.invoke('harness:models', { harness: 'claude', projectRoot }), { projectRoot: project });
+    const withEffort = models.find((m) => m.provider === 'anthropic' && m.supportedEfforts?.length);
+    const without = models.find((m) => m.provider === 'anthropic' && m.supportedEfforts?.length === 0);
+    expect(withEffort, 'the runtime lists a Claude model that takes effort').toBeDefined();
+    expect(without, 'the runtime lists a Claude model that takes none').toBeDefined();
+
+    await openNewSession(win);
+    await pickHarness(win, /^Claude Agent SDK$/);
+    const effort = win.locator('.ns-col-model .field', { has: win.locator('.field-label', { hasText: /^Reasoning effort$/ }) }).locator('select');
+    await pickModel(win, `anthropic/${withEffort!.id}`);
+    await expect.poll(() => effort.isEnabled(), { timeout: 10_000 }).toBe(true);
+    expect(await effort.locator('option').evaluateAll((els) => els.map((el) => (el as HTMLOptionElement).value))).toEqual(['', ...withEffort!.supportedEfforts!]);
+
+    await pickModel(win, `anthropic/${without!.id}`);
+    await expect.poll(() => effort.isDisabled(), { timeout: 10_000 }).toBe(true);
+    expect(await effort.locator('option').allInnerTexts()).toEqual(['Not supported']);
+
+    // Started without a prompt, so no harness process exists; the header reads the same catalog.
+    await win.getByRole('button', { name: /Start session/ }).click();
+    const pill = win.locator('.header-controls .pill[aria-label="Reasoning effort"]');
+    await expect.poll(async () => pill.count(), { timeout: 60_000 }).toBe(1);
+    expect(await pill.isDisabled()).toBe(true);
+    expect(await pill.getAttribute('title')).toContain('does not support reasoning effort');
+    await win.screenshot({ path: path.join(shots, 'models-04-claude-no-effort.png') });
+  }, 180_000);
 });

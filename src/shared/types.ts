@@ -1058,6 +1058,8 @@ export interface HarnessCapabilities {
   interrupt: boolean;
   liveModelSwitch: boolean;
   effort: boolean;
+  /** The levels to offer while a model's own `supportedEfforts` is unknown; every level when unset. */
+  effortLevels?: readonly EffortLevel[];
   images: boolean;
   /**
    * Whether the harness itself strips image attachments when its own catalog says the selected

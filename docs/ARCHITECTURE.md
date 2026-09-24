@@ -58,6 +58,15 @@ and metadata. Deduplication applies to pre-session discovery, active-session mod
 and saved-catalog fallback. Distinct providers and explicit context variants remain separate;
 catalog refresh does not rewrite a session's pinned selection.
 
+A model's `supportedEfforts` has three states, and adapters must keep them apart: a list offers
+exactly those levels; `[]` means the model takes no effort, so the New Session select and header pill
+are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort; `undefined`
+is unknown and offers the harness's scale (`capabilities.effortLevels`, else every level). Claude Code
+omits the SDK's effort fields for a model without effort rather than sending `supportsEffort: false`,
+so a Claude row without them becomes `[]` only when another row in the same `supportedModels()`
+answer carries them; a runtime that reports them on no row leaves every model unknown. An ACP effort
+option with no level the app models stays unknown too.
+
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The
 active app-server uses the same paginated discovery, and exec SDK model listing uses the one-shot

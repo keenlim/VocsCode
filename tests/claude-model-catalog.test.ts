@@ -62,12 +62,12 @@ describe('Claude model catalog', () => {
         supportsEffort: true,
         supportedEffortLevels: ['low', 'high', 'max']
       },
+      // Claude Code's shape for a model without effort: the fields are absent, never `false`.
       {
         value: 'haiku',
         resolvedModel: 'claude-haiku-4-5-20251001',
         displayName: 'Haiku',
-        description: 'Haiku 4.5 · Fastest for quick answers',
-        supportsEffort: false
+        description: 'Haiku 4.5 · Fastest for quick answers'
       }
     ]);
     queryMock.mockReturnValue({ supportedModels, close });
@@ -87,7 +87,8 @@ describe('Claude model catalog', () => {
     expect(r.models).toEqual([
       expect.objectContaining({ id: 'claude-opus-5-5[1m]', displayName: 'Opus 5.5 with 1M context (recommended)', isDefault: true }),
       expect.objectContaining({ id: 'claude-sonnet-5', displayName: 'Sonnet 5', supportedEfforts: ['low', 'high', 'max'], isDefault: false }),
-      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: undefined, isDefault: false }),
+      // Other rows report effort, so Haiku's missing fields mean it takes none, not "unknown".
+      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: [], isDefault: false }),
       expect.objectContaining({ id: 'glm-4.6', provider: 'zai' })
     ]);
     expect(queryMock).toHaveBeenCalledWith(
@@ -104,6 +105,24 @@ describe('Claude model catalog', () => {
     );
     expect(supportedModels).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('leaves effort unknown when the runtime reports it on no model', async () => {
+    // An older Claude Code without the effort fields: a missing field cannot mean "none" there. A row
+    // that says `supportsEffort: false` outright still takes none.
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: 'Opus 5.5' },
+      { value: 'haiku', resolvedModel: 'claude-haiku-4-5-20251001', displayName: 'Haiku', description: 'Haiku 4.5', supportsEffort: false }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.error).toBeUndefined();
+    expect(r.models.map((m) => [m.id, m.supportedEfforts])).toEqual([
+      ['claude-opus-5-5', undefined],
+      ['claude-haiku-4-5-20251001', []]
+    ]);
   });
 
   it('lists each explicit model once when multiple SDK rows resolve to it, preserving order and provider variants', async () => {
