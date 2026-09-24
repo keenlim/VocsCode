@@ -19,6 +19,7 @@ import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, Permiss
 import { hasClaudeAgentPins } from '../claude-agents';
 import { toClaude } from '../mcp/effective';
 import { dedupeClaudeModels } from '../models/claude-catalog';
+import { resolveProviderApiKey } from '../models/providers';
 import { estimateCostUsd, findContextWindow, findPricing, modelsForProvider } from '../models/static-models';
 import { subagentDir } from '../subagents';
 import { subagentSupport, type AgentTypeInfo } from '../../shared/subagents';
@@ -289,11 +290,7 @@ export class ClaudeAdapter implements HarnessAdapter {
     const provider = claudeProviderFor(s, this.ctx.session().config.model ?? this.ctx.session().activeModel);
     if (provider) this.providerId = provider.id;
     this.gateway = isClaudeGatewayProvider(provider);
-    const stored = provider ? await this.ctx.getApiKey(provider.id) : undefined;
-    // A provider whose key lives in its env var has to be handed over explicitly: the child inherits
-    // the process env, but the gateway reads a header this app has to set (see claudeProviderEnv).
-    const key = stored ?? (provider?.envKey ? process.env[provider.envKey] : undefined);
-    const overlay = claudeProviderEnv(s, provider, key);
+    const overlay = await resolveClaudeProviderEnv(s, provider, (id) => this.ctx.getApiKey(id));
     let auth = 'login';
     if (Object.keys(overlay).length) {
       options.env = { ...(options.env ?? {}), ...overlay };
@@ -1017,6 +1014,17 @@ export function claudeProviderEnv(settings: AppSettings, provider: ProviderConfi
     return overlay;
   }
   return settings.claude.useProviderKey && apiKey ? { ANTHROPIC_API_KEY: apiKey } : {};
+}
+
+/**
+ * claudeProviderEnv with the provider's stored key or, failing that, the key in its env var. That
+ * key still has to be handed over explicitly: the child inherits the process env, but a gateway
+ * reads a header this app has to set. Sessions and the pre-session model probe both resolve their
+ * credentials here, so the probe starts with the endpoint and key of the session it lists models for.
+ */
+export async function resolveClaudeProviderEnv(settings: AppSettings, provider: ProviderConfig | undefined, getApiKey: (id: string) => Promise<string | undefined>): Promise<Record<string, string | undefined>> {
+  const key = provider ? await resolveProviderApiKey(provider, getApiKey) : undefined;
+  return claudeProviderEnv(settings, provider, key);
 }
 
 /**

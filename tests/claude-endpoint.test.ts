@@ -1,7 +1,7 @@
 /** Claude Code can run any Anthropic-compatible endpoint, so the harness must (a) offer the models
  *  of every anthropic-kind provider, (b) wire the selected model's endpoint and key into the
- *  subprocess, and (c) use a bearer token for a gateway. Regression coverage for "Claude Code on
- *  other models". */
+ *  subprocess, the pre-session model probe included, and (c) use a bearer token for a gateway.
+ *  Regression coverage for "Claude Code on other models". */
 import type { AppSettings, ModelRef, ProviderConfig, SessionEvent, SessionMeta } from '../src/shared/types';
 import type { HarnessContext } from '../src/main/harness/types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ const { queryMock, setModelMock } = vi.hoisted(() => ({ queryMock: vi.fn(), setM
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: queryMock }));
 
 import { ClaudeAdapter, claudeProviderEnv, claudeProviderFor } from '../src/main/harness/claude';
+import { listHarnessModels } from '../src/main/harness/registry';
 
 const ANTHROPIC: ProviderConfig = { id: 'anthropic', kind: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com', hasApiKey: false, models: [], enabled: true };
 const GATEWAY: ProviderConfig = { id: 'zai', kind: 'anthropic', name: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/anthropic', hasApiKey: false, models: [], enabled: true };
@@ -172,6 +173,68 @@ describe('Claude endpoint env', () => {
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     expect(env.ANTHROPIC_API_KEY).toBe('inherited-real-key');
+  });
+});
+
+describe('Claude model probe credentials', () => {
+  // The built-in Anthropic provider as settings.ts ships it, and the same provider behind a proxy.
+  const BUILTIN: ProviderConfig = { ...ANTHROPIC, envKey: 'ANTHROPIC_API_KEY' };
+  const PROXY_URL = 'https://llm-proxy.corp.example/anthropic';
+  const PROXIED: ProviderConfig = { ...BUILTIN, baseUrl: PROXY_URL };
+
+  interface Case {
+    name: string;
+    provider: ProviderConfig;
+    useProviderKey: boolean;
+    /** Key in the app's secret store. */
+    stored?: string;
+    /** Key in the provider's env var. */
+    fromEnv?: string;
+    /** Endpoint and credential variables Claude Code must start with; anything absent is unset. */
+    expected: Record<string, string>;
+  }
+  const cases: Case[] = [
+    // Anthropic's own endpoint takes the stored key only with the opt-in; otherwise the login or an inherited key stays.
+    { name: 'Anthropic endpoint, opt-in off, stored key', provider: BUILTIN, useProviderKey: false, stored: 'sk-stored', expected: {} },
+    { name: 'Anthropic endpoint, opt-in off, env key', provider: BUILTIN, useProviderKey: false, fromEnv: 'sk-env', expected: { ANTHROPIC_API_KEY: 'sk-env' } },
+    { name: 'Anthropic endpoint, opt-in on, stored key', provider: BUILTIN, useProviderKey: true, stored: 'sk-stored', expected: { ANTHROPIC_API_KEY: 'sk-stored' } },
+    { name: 'Anthropic endpoint, opt-in on, env key', provider: BUILTIN, useProviderKey: true, fromEnv: 'sk-env', expected: { ANTHROPIC_API_KEY: 'sk-env' } },
+    // A proxy gets the key as a bearer token whatever the opt-in says, and never the inherited x-api-key.
+    { name: 'proxy, opt-in off, stored key', provider: PROXIED, useProviderKey: false, stored: 'sk-stored', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in off, env key', provider: PROXIED, useProviderKey: false, fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-env', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in on, stored key', provider: PROXIED, useProviderKey: true, stored: 'sk-stored', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, opt-in on, env key', provider: PROXIED, useProviderKey: true, fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-env', ANTHROPIC_BASE_URL: PROXY_URL } },
+    { name: 'proxy, stored key over env key', provider: PROXIED, useProviderKey: false, stored: 'sk-stored', fromEnv: 'sk-env', expected: { ANTHROPIC_AUTH_TOKEN: 'sk-stored', ANTHROPIC_BASE_URL: PROXY_URL } }
+  ];
+
+  /** Runs the pre-session model probe once and captures the env handed to the SDK. */
+  async function probeEnvFor(s: AppSettings, stored: string | undefined): Promise<Record<string, string | undefined>> {
+    queryMock.mockReset();
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([{ value: 'default', resolvedModel: 'claude-sonnet-5', displayName: 'Default (recommended)' }]), close: vi.fn() });
+    const r = await listHarnessModels({
+      harness: 'claude',
+      settings: s,
+      runtime: { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never,
+      getApiKey: async (id) => (id === 'anthropic' ? stored : undefined)
+    });
+    expect(r.error).toBeUndefined();
+    return (queryMock.mock.calls[0][0] as { options: { env: Record<string, string | undefined> } }).options.env;
+  }
+
+  const credentials = (env: Record<string, string | undefined>) => ({
+    ANTHROPIC_API_KEY: env.ANTHROPIC_API_KEY,
+    ANTHROPIC_AUTH_TOKEN: env.ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_BASE_URL: env.ANTHROPIC_BASE_URL
+  });
+
+  it.each(cases)('starts the probe with the credentials a session gets: $name', async ({ provider, useProviderKey, stored, fromEnv, expected }) => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    if (fromEnv) process.env.ANTHROPIC_API_KEY = fromEnv;
+    else delete process.env.ANTHROPIC_API_KEY;
+    const s = settings({ useProviderKey, providers: [provider] });
+    expect(credentials(await envFor(s, { provider: 'anthropic', model: 'claude-sonnet-5' }, stored))).toEqual(expected);
+    expect(credentials(await probeEnvFor(s, stored))).toEqual(expected);
   });
 });
 

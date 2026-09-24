@@ -8,7 +8,7 @@ import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
-import { ClaudeAdapter, claudeProviderEnv, listClaudeModels } from './claude';
+import { ClaudeAdapter, listClaudeModels, resolveClaudeProviderEnv } from './claude';
 import { CodexAppServerAdapter, listCodexModels } from './codex-app-server';
 import { CursorAdapter, listCursorModels } from './cursor';
 import { CodexExecAdapter } from './codex-exec';
@@ -63,8 +63,8 @@ async function listHarnessModelsRaw(opts: {
         if (!bin) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code runtime not found; showing the saved catalog.' };
         try {
           const provider = settings.providers.find((p) => p.id === 'anthropic');
-          const apiKey = settings.claude.useProviderKey ? await opts.getApiKey('anthropic') : undefined;
-          const live = await listClaudeModels(bin.path, claudeProviderEnv(settings, provider, apiKey));
+          // The endpoint and key a session on this provider starts with; the useProviderKey opt-in is applied inside.
+          const live = await listClaudeModels(bin.path, await resolveClaudeProviderEnv(settings, provider, opts.getApiKey));
           if (!live.length) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code reported no models; showing the saved catalog.' };
           return { models: mergeClaudeCatalog(live, settings) };
         } catch (e) {
