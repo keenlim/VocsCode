@@ -225,14 +225,21 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(async () => picker.locator('.mp-name[title="zai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
     await expect.poll(async () => picker.locator('.mp-name[title="openrouter/z-ai/glm-4.6"]').count(), { timeout: 20_000 }).toBe(1);
 
-    // SDK aliases can resolve to the same explicit choice; every selectable provider/id must
-    // appear once even before any of those rows is pinned into the Selected section.
+    // SDK aliases and the recommended default can resolve to the same explicit choice; every
+    // selectable provider/id must appear once.
     const catalogIds = await picker.locator('.mp-row .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')));
     expect(catalogIds).not.toContain(null);
     expect(new Set(catalogIds).size).toBe(catalogIds.length);
 
-    // A newly advertised Claude model is a real selection, not only what "Harness default" happens
-    // to resolve to today.
+    // Claude's recommendation opens selected under the concrete id it resolves to, so a session
+    // started without touching the picker is pinned to a version, never the moving `default` alias.
+    expect(catalogIds).not.toContain('anthropic/default');
+    const activeIds = () => picker.locator('.mp-row.active .mp-name').evaluateAll((els) => els.map((el) => el.getAttribute('title')));
+    await expect.poll(activeIds, { timeout: 10_000 }).toEqual([expect.stringMatching(/^anthropic\/claude-/)]);
+    expect(await picker.locator('.mp-row.active').innerText()).toContain('(recommended)');
+
+    // A newly advertised Claude model is selectable under its explicit id, whether or not it is
+    // today's recommendation.
     await pickModel(win, 'anthropic/claude-opus-5-5[1m]');
     await expect.poll(async () => picker.locator('.mp-row.active .mp-name[title="anthropic/claude-opus-5-5[1m]"]').count(), { timeout: 10_000 }).toBe(1);
 

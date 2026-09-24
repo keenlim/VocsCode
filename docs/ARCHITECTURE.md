@@ -50,10 +50,13 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 | **ACP agent** | Agent Client Protocol over stdio: **DeepSeek Harness** (`dsh --profile acp`), Claude Agent ACP, Codex ACP, Pi ACP, Gemini CLI, anything else | interactive (`session/request_permission`) | agent-advertised config options | injected (`session/new.mcpServers`) |
 | **Native loop** | built-in loop with bash / read / write / edit / glob / grep | interactive | Anthropic API or any OpenAI-compatible endpoint (OpenAI, DeepSeek, OpenRouter, OpenCode Go, Ollama, LM Studio, Groq, xAI, Mistral, Gemini) | client — the app runs the MCP client itself |
 
-Claude catalogs deduplicate after mapping SDK rows to selectable IDs, by `(provider, id)`, keeping
-first-occurrence order and metadata. This applies to pre-session discovery, active-session model
-events/listing, and saved-catalog fallback. Distinct providers, explicit context variants, and the
-`default` choice remain separate; catalog refresh does not rewrite a session's pinned selection.
+Claude catalogs map every SDK row to the canonical wire id it resolves to, the recommended `default`
+included: that row leads as `<model> (recommended)` and is the New Session preselection, so a saved
+Claude selection is always a concrete version, never the moving alias. A `default` the runtime does
+not resolve is dropped. The rows then deduplicate by `(provider, id)`, keeping first-occurrence order
+and metadata. Deduplication applies to pre-session discovery, active-session model events/listing,
+and saved-catalog fallback. Distinct providers and explicit context variants remain separate;
+catalog refresh does not rewrite a session's pinned selection.
 
 Both Codex harnesses discover their pre-session models through a short-lived app-server probe,
 following every `model/list` page rather than treating the bundled catalog as authoritative. The

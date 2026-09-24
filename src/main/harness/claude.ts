@@ -588,7 +588,7 @@ export class ClaudeAdapter implements HarnessAdapter {
           if (!this.modelsEmitted && !this.gateway) {
             this.modelsEmitted = true;
             q.supportedModels()
-              .then((models) => this.ctx.emit({ type: 'models', models: dedupeClaudeModels(models.map(claudeModelToInfo)) }))
+              .then((models) => this.ctx.emit({ type: 'models', models: claudeSdkCatalog(models) }))
               .catch((e) => {
                 // Retry on the next init so the model picker is not permanently empty.
                 this.modelsEmitted = false;
@@ -934,7 +934,7 @@ export class ClaudeAdapter implements HarnessAdapter {
 
   async listModels(): Promise<ModelInfo[]> {
     if (!this.q) return [];
-    return dedupeClaudeModels((await this.q.supportedModels()).map(claudeModelToInfo));
+    return claudeSdkCatalog(await this.q.supportedModels());
   }
 
   /**
@@ -1049,7 +1049,7 @@ export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOv
     }
   });
   try {
-    return dedupeClaudeModels((await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels')).map(claudeModelToInfo));
+    return claudeSdkCatalog(await withTimeout(q.supportedModels(), 20_000, 'Claude supportedModels'));
   } finally {
     input.close();
     abortController.abort();
@@ -1057,22 +1057,34 @@ export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOv
   }
 }
 
+/**
+ * The SDK's model rows as a selectable catalog. The recommended row leads, so deduplication keeps
+ * it (and its flag) over the explicit row for the same model. A `default` the runtime does not
+ * resolve has no version to pin, so it is left out rather than offered as a moving alias.
+ */
+export function claudeSdkCatalog(models: ClaudeSdkModelInfo[]): ModelInfo[] {
+  const rows = models.map(claudeModelToInfo).filter((m) => m.id !== 'default');
+  return dedupeClaudeModels([...rows.filter((m) => m.isDefault), ...rows.filter((m) => !m.isDefault)]);
+}
+
 export function claudeModelToInfo(m: ClaudeSdkModelInfo): ModelInfo {
-  const releaseName = m.description?.split(' · ')[0]?.trim();
-  const displayName = releaseName ? (m.value === 'default' ? `${m.displayName || m.value} — ${releaseName}` : releaseName) : m.displayName || m.value;
+  // Every row, the recommended `default` included, is listed under the canonical wire id it
+  // resolves to. A remembered selection is then a version pin: it survives Claude renaming an alias
+  // such as `sonnet`, and a later start or resume never follows a changed recommendation.
+  const id = m.resolvedModel || m.value;
+  const recommended = m.value === 'default' && id !== 'default';
+  const name = m.description?.split(' · ')[0]?.trim() || (recommended ? id : m.displayName || m.value);
   const supportsEffort = m.supportsEffort === true;
   return {
-    // Keep `default` as the moving recommendation, but expose explicit choices under the canonical
-    // wire id so remembered selections survive Claude renaming an alias such as `sonnet`.
-    id: m.value === 'default' ? m.value : m.resolvedModel ?? m.value,
+    id,
     provider: 'anthropic',
-    displayName,
+    displayName: recommended ? `${name} (recommended)` : name,
     description: m.description,
-    contextWindow: findContextWindow('anthropic', m.resolvedModel ?? m.value),
+    contextWindow: findContextWindow('anthropic', id),
     supportsImages: true,
     supportsReasoning: supportsEffort || m.supportsAdaptiveThinking === true,
     supportedEfforts: supportsEffort && m.supportedEffortLevels?.length ? [...m.supportedEffortLevels] : undefined,
-    isDefault: m.value === 'default'
+    isDefault: recommended
   };
 }
 

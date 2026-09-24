@@ -22,9 +22,10 @@ export function claudeProviderModels(settings: AppSettings, providerId: string):
   return provider.models.map((m) => ({ ...m, provider: provider.id }));
 }
 
-/** Keep the first row for each selectable provider/id, preserving SDK order and metadata.
- *  Run after alias-to-explicit mapping: different SDK rows can resolve to the same selection.
- *  `default`, context variants and identical model ids on different providers remain distinct. */
+/** Keep the first row for each selectable provider/id, preserving order and metadata.
+ *  Run after alias-to-explicit mapping: different SDK rows, the recommended `default` among them,
+ *  can resolve to the same selection. Context variants and identical model ids on different
+ *  providers remain distinct. */
 export function dedupeClaudeModels(models: ModelInfo[]): ModelInfo[] {
   const seen = new Set<string>();
   return models.filter((model) => {

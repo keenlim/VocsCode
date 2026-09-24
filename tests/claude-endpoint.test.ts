@@ -214,8 +214,9 @@ describe('Claude model reporting', () => {
       await vi.waitFor(() => expect(events.some((e) => e.type === 'status' && e.status === 'stopped')).toBe(true));
       const catalogs = events.filter((e) => e.type === 'models');
       expect(catalogs).toHaveLength(1);
-      expect(catalogs[0].models.map((m) => m.id)).toEqual(['default', next, `${next}[1m]`]);
-      expect(catalogs[0].models[1].displayName).toBe('Opus');
+      // The in-session list offers the recommendation as its concrete model too, never the alias.
+      expect(catalogs[0].models.map((m) => m.id)).toEqual([next, `${next}[1m]`]);
+      expect(catalogs[0].models[0]).toMatchObject({ displayName: `${next} (recommended)`, isDefault: true });
       expect(queryMock.mock.calls[0][0].options.model).toBe(pinned);
       expect(supportedModels).toHaveBeenCalledOnce();
       expect(events.filter((e) => e.type === 'error')).toEqual([]);

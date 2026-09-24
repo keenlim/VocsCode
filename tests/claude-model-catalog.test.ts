@@ -52,6 +52,14 @@ describe('Claude model catalog', () => {
         displayName: 'Opus (1M context)',
         description: 'Opus 5.5 with 1M context · Best for everyday, complex tasks',
         supportsEffort: true,
+        supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+      },
+      {
+        value: 'sonnet',
+        resolvedModel: 'claude-sonnet-5',
+        displayName: 'Sonnet',
+        description: 'Sonnet 5 · Efficient for routine tasks',
+        supportsEffort: true,
         supportedEffortLevels: ['low', 'high', 'max']
       },
       {
@@ -74,10 +82,12 @@ describe('Claude model catalog', () => {
     );
 
     expect(r.error).toBeUndefined();
+    // Claude's recommendation is offered as the model it resolves to, merged with the explicit row
+    // for that model, so choosing it (or starting without touching the picker) saves a version.
     expect(r.models).toEqual([
-      expect.objectContaining({ id: 'default', displayName: 'Default (recommended) — Opus 5.5 with 1M context', isDefault: true }),
-      expect.objectContaining({ id: 'claude-opus-5-5[1m]', displayName: 'Opus 5.5 with 1M context', supportedEfforts: ['low', 'high', 'max'] }),
-      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: undefined }),
+      expect.objectContaining({ id: 'claude-opus-5-5[1m]', displayName: 'Opus 5.5 with 1M context (recommended)', isDefault: true }),
+      expect.objectContaining({ id: 'claude-sonnet-5', displayName: 'Sonnet 5', supportedEfforts: ['low', 'high', 'max'], isDefault: false }),
+      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: undefined, isDefault: false }),
       expect.objectContaining({ id: 'glm-4.6', provider: 'zai' })
     ]);
     expect(queryMock).toHaveBeenCalledWith(
@@ -112,11 +122,44 @@ describe('Claude model catalog', () => {
 
     expect(r.error).toBeUndefined();
     expect(r.models.map((m) => `${m.provider}/${m.id}`)).toEqual([
-      'anthropic/default', `anthropic/${id}`, `anthropic/${id}[1m]`, `gateway/${id}`
+      `anthropic/${id}`, `anthropic/${id}[1m]`, `gateway/${id}`
     ]);
     // First SDK occurrence wins deterministically; don't merge conflicting alias metadata.
-    expect(r.models[1]).toMatchObject({ displayName: 'opus', supportedEfforts: ['high'] });
+    expect(r.models[0]).toMatchObject({ displayName: `${id} (recommended)`, isDefault: true, supportedEfforts: ['high'] });
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the recommendation when the SDK lists the explicit row for that model first', async () => {
+    const row = (value: string, resolvedModel: string, description: string) => ({ value, resolvedModel, displayName: value, description });
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      row('opus', 'claude-opus-5-5', 'Opus 5.5'), row('sonnet', 'claude-sonnet-5', 'Sonnet 5'), row('default', 'claude-opus-5-5', 'Opus 5.5')
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.models.map((m) => [m.id, m.displayName, m.isDefault])).toEqual([
+      ['claude-opus-5-5', 'Opus 5.5 (recommended)', true],
+      ['claude-sonnet-5', 'Sonnet 5', false]
+    ]);
+  });
+
+  it('drops a default the runtime does not resolve instead of offering the moving alias', async () => {
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'default', displayName: 'Default (recommended)', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    // Nothing is flagged, so the dialog falls back to the first row: a concrete model either way.
+    expect(r.error).toBeUndefined();
+    expect(r.models.map((m) => [m.id, !!m.isDefault])).toEqual([
+      ['claude-opus-5-5', false],
+      ['claude-sonnet-5', false]
+    ]);
   });
 
   it('removes duplicate native entries from the saved fallback catalog too', async () => {
