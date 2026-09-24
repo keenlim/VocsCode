@@ -113,6 +113,9 @@ describe('NewSessionDialog', () => {
     const recommended = screen.getByTitle('anthropic/claude-opus-5-5[1m]').closest('button')!;
     expect(recommended.getAttribute('aria-pressed')).toBe('true');
     expect(recommended.textContent).toContain('Opus 5.5 with 1M context (recommended)');
+    // The `[1m]` row carries the window it names instead of reading "unknown" — the recommended
+    // model's context was the one thing only the static fallback used to know.
+    expect(recommended.textContent).toContain('Context 1.00M');
     expect(screen.queryByTitle('anthropic/default')).toBeNull();
     fireEvent.click(start);
 

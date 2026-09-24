@@ -3,6 +3,11 @@ import type { ModelInfo, ProviderConfig, UsageTotals } from '../../shared/types'
 /** Offline fallbacks with pricing (USD per 1M tokens). Live lists override these when available. */
 
 export const ANTHROPIC_STATIC_MODELS: ModelInfo[] = [
+  // Rates without cache columns are the ones Claude Code states for the model and nothing more; the
+  // estimator derives its cache defaults from the input rate. `claude-opus-5-5` is here because the
+  // runtime offers it and no other table row covers it — a version newer than every entry is exactly
+  // what a prefix match must not price with its neighbour's older rate.
+  m('anthropic', 'claude-opus-5-5', 'Claude Opus 5.5', 1_000_000, { input: 4, output: 20 }),
   m('anthropic', 'claude-opus-5', 'Claude Opus 5', 1_000_000, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, true),
   m('anthropic', 'claude-sonnet-5', 'Claude Sonnet 5', 1_000_000, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }),
   m('anthropic', 'claude-fable-5-1', 'Claude Fable 5.1', 1_000_000, { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 }),
@@ -161,19 +166,34 @@ export function enrichModelsFromProviders(models: ModelInfo[], providers: Provid
 
 export function findContextWindow(provider: string, model: string, extra: ModelInfo[] = []): number | undefined {
   const pool = [...extra.filter((x) => x.provider === provider), ...(STATIC_MODELS_BY_PROVIDER[provider] ?? [])].filter((x) => validContextWindow(x.contextWindow));
-  const exact = pool.find((x) => x.id === model);
-  if (exact) return exact.contextWindow;
-  const bare = model.split('/').pop() ?? model;
+  const { base, markedWindow } = splitContextMarker(model);
+  // A marker names the window outright, so it outranks whatever the base model carries — and it is
+  // the only thing known about the window of a model no table row covers yet.
+  const atLeast = (value: number | undefined) => (markedWindow ? Math.max(value ?? 0, markedWindow) : value);
+  const exact = pool.find((x) => x.id === base);
+  if (exact) return atLeast(exact.contextWindow);
+  const bare = base.split('/').pop() ?? base;
   const bareExact = pool.find((x) => x.id === bare);
-  if (bareExact) return bareExact.contextWindow;
+  if (bareExact) return atLeast(bareExact.contextWindow);
   const fuzzy = pool
     .filter((x) => bare.startsWith(x.id) && isSnapshotSuffix(bare.slice(x.id.length)))
     .sort((a, b) => b.id.length - a.id.length)[0];
-  return fuzzy?.contextWindow;
+  return atLeast(fuzzy?.contextWindow);
 }
 
 function validContextWindow(value: number | undefined): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * A trailing context marker on a runtime model id, which Claude Code writes as the window in
+ * millions of tokens (`[1m]`). It names a variant of the same model at the same rate, so both
+ * lookups here strip it; only the window cares what it said.
+ */
+function splitContextMarker(model: string): { base: string; markedWindow?: number } {
+  const marker = /\[(\d+)m\]$/i.exec(model);
+  if (!marker) return { base: model };
+  return { base: model.slice(0, marker.index), markedWindow: Number(marker[1]) * 1_000_000 };
 }
 
 /** Context variants can differ from their base model; only dated/latest snapshots inherit it. */
@@ -193,12 +213,15 @@ export function modelsForProvider(providers: ProviderConfig[], id: string | unde
 
 export function findPricing(provider: string, model: string, extra: ModelInfo[] = []): ModelInfo['pricing'] | undefined {
   const pool = [...extra, ...(STATIC_MODELS_BY_PROVIDER[provider] ?? []), ...OPENAI_STATIC_MODELS, ...ANTHROPIC_STATIC_MODELS, ...DEEPSEEK_STATIC_MODELS];
-  const exact = pool.find((x) => x.id === model && x.pricing);
+  // Look the model up without its context marker: `claude-sonnet-5[1m]` is `claude-sonnet-5` at the
+  // same rate, and matching the marker instead drops it onto a shorter, older entry.
+  const { base } = splitContextMarker(model);
+  const exact = pool.find((x) => x.id === base && x.pricing);
   if (exact) return exact.pricing;
   // OpenRouter-style ids (vendor/model) or dated snapshots. A prefix only counts when the live
   // id continues with a separator: 'gpt-5.4-2025-08-07' matches 'gpt-5.4', but a short live id
   // like 'gpt-5' must not be priced with a longer catalog entry such as 'gpt-5.6-luna'.
-  const bare = model.split('/').pop() ?? model;
+  const bare = base.split('/').pop() ?? base;
   const bareExact = pool.find((x) => x.id === bare && x.pricing);
   if (bareExact) return bareExact.pricing;
   const fuzzy = pool.find((x) => {
