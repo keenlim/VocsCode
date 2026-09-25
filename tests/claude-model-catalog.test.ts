@@ -19,13 +19,15 @@ const provider = (over: Partial<ProviderConfig>): ProviderConfig => ({
   ...over
 });
 
-function settings(providers: ProviderConfig[]): AppSettings {
-  return { claude: { runtime: 'auto', useProviderKey: false, settingSources: [] }, providers } as unknown as AppSettings;
+type SettingSources = AppSettings['claude']['settingSources'];
+
+function settings(providers: ProviderConfig[], settingSources: SettingSources = []): AppSettings {
+  return { claude: { runtime: 'auto', useProviderKey: false, settingSources }, providers } as unknown as AppSettings;
 }
 
 const missingRuntime = { resolve: () => null } as never;
-const list = (providers: ProviderConfig[], runtime = missingRuntime) =>
-  listHarnessModels({ harness: 'claude', settings: settings(providers), runtime, getApiKey: async () => undefined });
+const list = (providers: ProviderConfig[], runtime = missingRuntime, settingSources: SettingSources = []) =>
+  listHarnessModels({ harness: 'claude', settings: settings(providers, settingSources), runtime, getApiKey: async () => undefined });
 
 describe('Claude model catalog', () => {
   beforeEach(() => queryMock.mockReset());
@@ -99,12 +101,34 @@ describe('Claude model catalog', () => {
           pathToClaudeCodeExecutable: '/bin/claude',
           permissionMode: 'plan',
           settingSources: [],
+          settings: { disableAllHooks: true },
+          strictMcpConfig: true,
           persistSession: false
         })
       })
     );
     expect(supportedModels).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('reads the user settings sessions read, so the list matches the endpoint and model they configure', async () => {
+    // ~/.claude/settings.json can point Claude Code at Bedrock, Vertex or a gateway, set an
+    // apiKeyHelper or pick a model; a probe that skips it lists another endpoint's models.
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+    const anthropic = provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' });
+
+    await list([anthropic], runtime, ['user', 'project', 'local']);
+    await list([anthropic], runtime, ['project', 'local']);
+
+    // Project and local settings would resolve against this app's own cwd, not a project, and the
+    // user's hooks and MCP servers have no business in a model probe.
+    expect(queryMock.mock.calls.map(([arg]) => arg.options)).toEqual([
+      expect.objectContaining({ settingSources: ['user'], settings: { disableAllHooks: true }, strictMcpConfig: true }),
+      expect.objectContaining({ settingSources: [], settings: { disableAllHooks: true }, strictMcpConfig: true })
+    ]);
   });
 
   it('leaves effort unknown when the runtime reports it on no model', async () => {

@@ -63,8 +63,9 @@ async function listHarnessModelsRaw(opts: {
         if (!bin) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code runtime not found; showing the saved catalog.' };
         try {
           const provider = settings.providers.find((p) => p.id === 'anthropic');
-          // The endpoint and key a session on this provider starts with; the useProviderKey opt-in is applied inside.
-          const live = await listClaudeModels(bin.path, await resolveClaudeProviderEnv(settings, provider, opts.getApiKey));
+          // The endpoint, key and user settings a session on this provider starts with; the useProviderKey opt-in is applied inside.
+          const env = await resolveClaudeProviderEnv(settings, provider, opts.getApiKey);
+          const live = await listClaudeModels(bin.path, env, settings.claude.settingSources);
           if (!live.length) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code reported no models; showing the saved catalog.' };
           return { models: mergeClaudeCatalog(withSavedClaudeModels(live, fallback), settings) };
         } catch (e) {

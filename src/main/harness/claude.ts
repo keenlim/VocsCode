@@ -12,6 +12,7 @@ import {
   type Query,
   type SDKMessage,
   type SDKUserMessage,
+  type SettingSource,
   type SlashCommand
 } from '@anthropic-ai/claude-agent-sdk';
 import type { AppSettings, EffortLevel, FileChange, ModelInfo, ModelRef, PermissionMode, ProviderConfig, TranscriptItem, UsageTotals, UserInput } from '../../shared/types';
@@ -1029,8 +1030,13 @@ export async function resolveClaudeProviderEnv(settings: AppSettings, provider: 
 /**
  * Discover the models the selected Claude Code runtime offers to its current login. The streaming
  * input stays open only long enough for the SDK initialization handshake; no user turn is sent.
+ * `settingSources` are the ones sessions load (`settings.claude.settingSources`).
  */
-export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOverlay: Record<string, string | undefined> = {}): Promise<ModelInfo[]> {
+export async function listClaudeModels(
+  pathToClaudeCodeExecutable: string,
+  envOverlay: Record<string, string | undefined> = {},
+  settingSources: SettingSource[] = []
+): Promise<ModelInfo[]> {
   const input = new AsyncQueue<SDKUserMessage>();
   const abortController = new AbortController();
   const env: Record<string, string | undefined> = { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: APP_ID };
@@ -1049,7 +1055,14 @@ export async function listClaudeModels(pathToClaudeCodeExecutable: string, envOv
       cwd: process.cwd(),
       pathToClaudeCodeExecutable,
       permissionMode: 'plan',
-      settingSources: [],
+      // ~/.claude/settings.json decides what a session runs against: its env (base URL, Bedrock or
+      // Vertex), apiKeyHelper and model. Read it whenever sessions do, or the list describes a
+      // different endpoint. Project and local settings resolve against cwd, which here is this app's
+      // own directory rather than any project, so they stay out.
+      settingSources: settingSources.filter((source) => source === 'user'),
+      // User settings also declare hooks and MCP servers; this process only answers supportedModels().
+      settings: { disableAllHooks: true },
+      strictMcpConfig: true,
       persistSession: false,
       env,
       abortController
