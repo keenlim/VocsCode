@@ -188,6 +188,26 @@ describe('Claude model catalog', () => {
     ]);
   });
 
+  it('does not offer Opus Plan Mode, even when the runtime lists opusplan before the model it resolves to', async () => {
+    // Claude Code 0.3.280 lists opusplan only when the user's model setting is opusplan, and resolves
+    // it to the execution model. Pinned, it would become a "Opus Plan Mode" row that runs plain Sonnet.
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: 'Opus 5.5 · Best for everyday, complex tasks' },
+      { value: 'opusplan', resolvedModel: 'claude-sonnet-5', displayName: 'Opus Plan Mode', description: 'Opus Plan Mode · Use Opus 5.5 in plan mode, Sonnet 5 otherwise' },
+      { value: 'sonnet', resolvedModel: 'claude-sonnet-5', displayName: 'Sonnet', description: 'Sonnet 5 · Efficient for routine tasks' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime, ['user']);
+
+    expect(r.error).toBeUndefined();
+    expect(r.models.slice(0, 2).map((m) => [m.id, m.displayName])).toEqual([
+      ['claude-opus-5-5', 'Opus 5.5'],
+      ['claude-sonnet-5', 'Sonnet 5']
+    ]);
+    expect(r.models.filter((m) => /plan/i.test(`${m.id} ${m.displayName} ${m.description ?? ''}`))).toEqual([]);
+  });
+
   it('drops a default the runtime does not resolve instead of offering the moving alias', async () => {
     queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
       { value: 'default', displayName: 'Default (recommended)', description: 'Opus 5.5 · Best for everyday, complex tasks' },

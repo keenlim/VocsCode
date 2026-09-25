@@ -53,7 +53,8 @@ tests             unit + format + review-fixes run offline; smoke and e2e are op
 Claude catalogs map every SDK row to the canonical wire id it resolves to, the recommended `default`
 included: that row leads as `<model> (recommended)` and is the New Session preselection, so a saved
 Claude selection is always a concrete version, never the moving alias. A `default` the runtime does
-not resolve is dropped. The rows then deduplicate by `(provider, id)`, keeping first-occurrence order
+not resolve is dropped, and so is `opusplan` (Opus Plan Mode is not supported: it is a mode, and it
+resolves to its execution model, so a pin would mislabel a plain Sonnet session). The rows then deduplicate by `(provider, id)`, keeping first-occurrence order
 and metadata. Deduplication applies to pre-session discovery, active-session model events/listing,
 and saved-catalog fallback. Distinct providers and explicit context variants remain separate;
 catalog refresh does not rewrite a session's pinned selection.
