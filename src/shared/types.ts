@@ -341,7 +341,8 @@ export interface SessionConfig {
   /** Project root chosen by the user (the git repo or folder). */
   projectRoot: string;
   model?: ModelRef;
-  effort?: EffortLevel;
+  /** null explicitly omits effort; undefined inherits the app preference. Survives restart. */
+  effort?: EffortLevel | null;
   permissionMode: PermissionMode;
   /** Run in an isolated git worktree under .vocs-code/worktrees. */
   useWorktree?: boolean;

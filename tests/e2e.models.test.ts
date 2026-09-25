@@ -266,7 +266,7 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await fs.mkdir(shots, { recursive: true });
     await fs.writeFile(
       path.join(userData, 'settings.json'),
-      seedSettings(project, { providers: [], claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] } }),
+      seedSettings(project, { providers: [], defaultEffort: 'high', claude: { runtime: 'bundled', useProviderKey: false, settingSources: [] } }),
       'utf8'
     );
 
@@ -296,6 +296,13 @@ describe.runIf(enabled)('model picker before the first message', () => {
     await expect.poll(async () => pill.count(), { timeout: 60_000 }).toBe(1);
     expect(await pill.isDisabled()).toBe(true);
     expect(await pill.getAttribute('title')).toContain('does not support reasoning effort');
+    const sessions = await win.evaluate(() => window.harness.invoke('sessions:list', undefined));
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].config.effort).toBeNull();
+    expect((await win.evaluate(() => window.harness.invoke('settings:get', undefined))).defaultEffort).toBe('high');
+    const saved = JSON.parse(await fs.readFile(path.join(userData, 'sessions.json'), 'utf8')) as SessionMeta[];
+    expect(saved).toHaveLength(1);
+    expect(saved[0].config.effort).toBeNull();
     await win.screenshot({ path: path.join(shots, 'models-04-claude-no-effort.png') });
   }, 180_000);
 });

@@ -61,7 +61,10 @@ catalog refresh does not rewrite a session's pinned selection.
 
 A model's `supportedEfforts` has three states, and adapters must keep them apart: a list offers
 exactly those levels; `[]` means the model takes no effort, so the New Session select and header pill
-are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort; `undefined`
+are disabled, `/effort` is refused, and the dialog neither submits nor remembers an effort level.
+It persists `SessionConfig.effort: null` to explicitly omit effort at the adapter boundary, including
+after restart, without clearing the app/folder preference. An absent config effort still inherits the
+app preference; a later explicit session effort replaces the omission. `supportedEfforts: undefined`
 is unknown and offers the harness's scale (`capabilities.effortLevels`, else every level). Claude Code
 omits the SDK's effort fields for a model without effort rather than sending `supportsEffort: false`,
 so a Claude row without them becomes `[]` only when another row in the same `supportedModels()`

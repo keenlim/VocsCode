@@ -146,7 +146,8 @@ export function NewSessionDialog() {
         harness,
         projectRoot,
         model,
-        effort: selectedEffort || undefined,
+        // undefined inherits the app preference in the main process; null explicitly omits it.
+        effort: noEffort ? null : selectedEffort || undefined,
         permissionMode: mode,
         useWorktree: isolate,
         acpAgent: harness === 'acp' ? acpAgent : undefined,

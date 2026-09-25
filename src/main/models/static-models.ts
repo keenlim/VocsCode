@@ -166,9 +166,11 @@ export function enrichModelsFromProviders(models: ModelInfo[], providers: Provid
 
 export function findContextWindow(provider: string, model: string, extra: ModelInfo[] = []): number | undefined {
   const pool = [...extra.filter((x) => x.provider === provider), ...(STATIC_MODELS_BY_PROVIDER[provider] ?? [])].filter((x) => validContextWindow(x.contextWindow));
+  const fullExact = pool.find((x) => x.id === model);
+  if (fullExact) return fullExact.contextWindow;
   const { base, markedWindow } = splitContextMarker(model);
-  // A marker names the window outright, so it outranks whatever the base model carries — and it is
-  // the only thing known about the window of a model no table row covers yet.
+  // Without an exact row, the marker outranks whatever the base model carries — and it is the
+  // only thing known about the window of a model no table row covers yet.
   const atLeast = (value: number | undefined) => (markedWindow ? Math.max(value ?? 0, markedWindow) : value);
   const exact = pool.find((x) => x.id === base);
   if (exact) return atLeast(exact.contextWindow);
@@ -187,8 +189,8 @@ function validContextWindow(value: number | undefined): value is number {
 
 /**
  * A trailing context marker on a runtime model id, which Claude Code writes as the window in
- * millions of tokens (`[1m]`). It names a variant of the same model at the same rate, so both
- * lookups here strip it; only the window cares what it said.
+ * millions of tokens (`[1m]`). When no exact metadata row exists, both lookups strip it to inherit
+ * the base model's metadata; only the window cares what it said.
  */
 function splitContextMarker(model: string): { base: string; markedWindow?: number } {
   const marker = /\[(\d+)m\]$/i.exec(model);
@@ -212,9 +214,11 @@ export function modelsForProvider(providers: ProviderConfig[], id: string | unde
 }
 
 export function findPricing(provider: string, model: string, extra: ModelInfo[] = []): ModelInfo['pricing'] | undefined {
-  const pool = [...extra, ...(STATIC_MODELS_BY_PROVIDER[provider] ?? []), ...OPENAI_STATIC_MODELS, ...ANTHROPIC_STATIC_MODELS, ...DEEPSEEK_STATIC_MODELS];
-  // Look the model up without its context marker: `claude-sonnet-5[1m]` is `claude-sonnet-5` at the
-  // same rate, and matching the marker instead drops it onto a shorter, older entry.
+  const pool = [...extra.filter((x) => x.provider === provider), ...(STATIC_MODELS_BY_PROVIDER[provider] ?? []), ...OPENAI_STATIC_MODELS, ...ANTHROPIC_STATIC_MODELS, ...DEEPSEEK_STATIC_MODELS];
+  const fullExact = pool.find((x) => x.id === model && x.pricing);
+  if (fullExact) return fullExact.pricing;
+  // Only inherit the base model's rate when no full-ID row prices this context variant. Matching
+  // the marker instead would drop `claude-sonnet-5[1m]` onto a shorter, older entry.
   const { base } = splitContextMarker(model);
   const exact = pool.find((x) => x.id === base && x.pricing);
   if (exact) return exact.pricing;

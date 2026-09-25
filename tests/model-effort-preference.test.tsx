@@ -141,7 +141,7 @@ describe('reasoning effort preference', () => {
     await startSession();
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('sessions:create', expect.objectContaining({
-      config: expect.objectContaining({ model: { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }, effort: undefined })
+      config: expect.objectContaining({ model: { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' }, effort: null })
     })));
     const saves = invoke.mock.calls.filter(([channel]) => channel === 'settings:update').map(([, patch]) => patch);
     expect(saves).toHaveLength(1);
