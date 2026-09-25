@@ -84,13 +84,13 @@ describe('Claude model catalog', () => {
     expect(r.error).toBeUndefined();
     // Claude's recommendation is offered as the model it resolves to, merged with the explicit row
     // for that model, so choosing it (or starting without touching the picker) saves a version.
-    expect(r.models).toEqual([
+    expect(r.models.slice(0, 3)).toEqual([
       expect.objectContaining({ id: 'claude-opus-5-5[1m]', displayName: 'Opus 5.5 with 1M context (recommended)', isDefault: true }),
       expect.objectContaining({ id: 'claude-sonnet-5', displayName: 'Sonnet 5', supportedEfforts: ['low', 'high', 'max'], isDefault: false }),
       // Other rows report effort, so Haiku's missing fields mean it takes none, not "unknown".
-      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: [], isDefault: false }),
-      expect.objectContaining({ id: 'glm-4.6', provider: 'zai' })
+      expect.objectContaining({ id: 'claude-haiku-4-5-20251001', supportsReasoning: false, supportedEfforts: [], isDefault: false })
     ]);
+    expect(r.models.at(-1)).toEqual(expect.objectContaining({ id: 'glm-4.6', provider: 'zai' }));
     expect(queryMock).toHaveBeenCalledWith(
       expect.objectContaining({
         prompt: expect.objectContaining({ [Symbol.asyncIterator]: expect.any(Function) }),
@@ -119,7 +119,7 @@ describe('Claude model catalog', () => {
     const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
 
     expect(r.error).toBeUndefined();
-    expect(r.models.map((m) => [m.id, m.supportedEfforts])).toEqual([
+    expect(r.models.slice(0, 2).map((m) => [m.id, m.supportedEfforts])).toEqual([
       ['claude-opus-5-5', undefined],
       ['claude-haiku-4-5-20251001', []]
     ]);
@@ -134,14 +134,15 @@ describe('Claude model catalog', () => {
     ]), close });
     const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
     const gatewayModel = { id, provider: 'gateway', displayName: 'Gateway Opus' };
+    const saved = { id: 'claude-sonnet-saved', provider: 'anthropic', displayName: 'Saved Sonnet' };
     const r = await list([
-      provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' }),
+      provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com', models: [saved] }),
       provider({ id: 'gateway', models: [gatewayModel, gatewayModel] })
     ], runtime);
 
     expect(r.error).toBeUndefined();
     expect(r.models.map((m) => `${m.provider}/${m.id}`)).toEqual([
-      `anthropic/${id}`, `anthropic/${id}[1m]`, `gateway/${id}`
+      `anthropic/${id}`, `anthropic/${id}[1m]`, 'anthropic/claude-sonnet-saved', `gateway/${id}`
     ]);
     // First SDK occurrence wins deterministically; don't merge conflicting alias metadata.
     expect(r.models[0]).toMatchObject({ displayName: `${id} (recommended)`, isDefault: true, supportedEfforts: ['high'] });
@@ -157,7 +158,7 @@ describe('Claude model catalog', () => {
 
     const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
 
-    expect(r.models.map((m) => [m.id, m.displayName, m.isDefault])).toEqual([
+    expect(r.models.slice(0, 2).map((m) => [m.id, m.displayName, m.isDefault])).toEqual([
       ['claude-opus-5-5', 'Opus 5.5 (recommended)', true],
       ['claude-sonnet-5', 'Sonnet 5', false]
     ]);
@@ -175,9 +176,61 @@ describe('Claude model catalog', () => {
 
     // Nothing is flagged, so the dialog falls back to the first row: a concrete model either way.
     expect(r.error).toBeUndefined();
-    expect(r.models.map((m) => [m.id, !!m.isDefault])).toEqual([
+    expect(r.models.slice(0, 2).map((m) => [m.id, !!m.isDefault])).toEqual([
       ['claude-opus-5-5', false],
       ['claude-sonnet-5', false]
+    ]);
+    // The static catalog's own flag must not become a recommendation the runtime never made.
+    expect(r.models.filter((m) => m.isDefault)).toEqual([]);
+  });
+
+  it('adds the static catalog after a login\u2019s live rows instead of replacing it', async () => {
+    // Claude Code 0.3.280 logged out: four rows. Every other static model must stay selectable.
+    const row = (value: string, resolvedModel: string, description: string) => ({ value, resolvedModel, displayName: value, description, supportsEffort: true, supportedEffortLevels: ['high'] });
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      row('default', 'claude-opus-5-5[1m]', 'Opus 5.5 with 1M context'),
+      row('fable', 'claude-fable-5-1', 'Fable 5.1'),
+      row('sonnet', 'claude-sonnet-5', 'Sonnet 5'),
+      row('haiku', 'claude-haiku-4-5-20251001', 'Haiku 4.5')
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com' })], runtime);
+
+    expect(r.error).toBeUndefined();
+    // Live rows lead with their runtime metadata; a static row the runtime already listed (the dated
+    // Haiku snapshot included) is not repeated, and a context variant stays its own selection.
+    expect(r.models.map((m) => [m.id, m.displayName, !!m.isDefault])).toEqual([
+      ['claude-opus-5-5[1m]', 'Opus 5.5 with 1M context (recommended)', true],
+      ['claude-fable-5-1', 'Fable 5.1', false],
+      ['claude-sonnet-5', 'Sonnet 5', false],
+      ['claude-haiku-4-5-20251001', 'Haiku 4.5', false],
+      ['claude-opus-5-5', 'Claude Opus 5.5', false],
+      ['claude-opus-5', 'Claude Opus 5', false],
+      ['claude-fable-5', 'Claude Fable 5', false],
+      ['claude-opus-4-8', 'Claude Opus 4.8', false],
+      ['claude-opus-4-7', 'Claude Opus 4.7', false],
+      ['claude-opus-4-6', 'Claude Opus 4.6', false],
+      ['claude-sonnet-4-6', 'Claude Sonnet 4.6', false]
+    ]);
+    expect(r.models[1].supportedEfforts).toEqual(['high']);
+  });
+
+  it('adds the Anthropic provider\u2019s fetched catalog after the live rows', async () => {
+    queryMock.mockReturnValue({ supportedModels: vi.fn().mockResolvedValue([
+      { value: 'default', resolvedModel: 'claude-sonnet-5', displayName: 'Default', description: 'Sonnet 5' }
+    ]), close: vi.fn() });
+    const runtime = { resolve: () => ({ path: '/bin/claude', source: 'system' }) } as never;
+    const fetched = [
+      { id: 'claude-sonnet-5', provider: 'anthropic', displayName: 'Fetched Sonnet 5', isDefault: true },
+      { id: 'claude-opus-4-7', provider: 'anthropic', displayName: 'Fetched Opus 4.7' }
+    ];
+
+    const r = await list([provider({ id: 'anthropic', baseUrl: 'https://api.anthropic.com', models: fetched })], runtime);
+
+    expect(r.models.map((m) => [m.id, m.displayName, !!m.isDefault])).toEqual([
+      ['claude-sonnet-5', 'Sonnet 5 (recommended)', true],
+      ['claude-opus-4-7', 'Fetched Opus 4.7', false]
     ]);
   });
 

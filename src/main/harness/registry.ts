@@ -4,7 +4,7 @@ import { applyModelOverrides } from '../../shared/model-overrides';
 import { errorMessage } from '../util/async';
 import type { RuntimeResolver } from '../runtime';
 import { CODEX_STATIC_MODELS, CURSOR_STATIC_MODELS, STATIC_MODELS_BY_PROVIDER } from '../models/static-models';
-import { claudeNativeModels, mergeClaudeCatalog } from '../models/claude-catalog';
+import { claudeNativeModels, mergeClaudeCatalog, withSavedClaudeModels } from '../models/claude-catalog';
 import { mergeCodexCatalog } from '../models/codex-catalog';
 import { mergePiCatalog } from '../models/pi-catalog';
 import { AcpAdapter } from './acp';
@@ -66,7 +66,7 @@ async function listHarnessModelsRaw(opts: {
           // The endpoint and key a session on this provider starts with; the useProviderKey opt-in is applied inside.
           const live = await listClaudeModels(bin.path, await resolveClaudeProviderEnv(settings, provider, opts.getApiKey));
           if (!live.length) return { models: mergeClaudeCatalog(fallback, settings), error: 'Claude Code reported no models; showing the saved catalog.' };
-          return { models: mergeClaudeCatalog(live, settings) };
+          return { models: mergeClaudeCatalog(withSavedClaudeModels(live, fallback), settings) };
         } catch (e) {
           return { models: mergeClaudeCatalog(fallback, settings), error: `Claude model discovery failed (${errorMessage(e)}); showing the saved catalog.` };
         }
