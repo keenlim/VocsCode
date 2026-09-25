@@ -4,9 +4,10 @@
  * publishes its own Anthropic route such as OpenRouter or DeepSeek) contributes its models, and the
  * adapter pins the session's endpoint to the provider the chosen model came from.
  */
-import type { AppSettings, ModelInfo } from '../../shared/types';
+import type { ModelInfo as ClaudeSdkModelInfo } from '@anthropic-ai/claude-agent-sdk';
+import type { AppSettings, EffortLevel, ModelInfo } from '../../shared/types';
 import { isClaudeCapableProvider } from '../../shared/providers';
-import { ANTHROPIC_STATIC_MODELS } from './static-models';
+import { ANTHROPIC_STATIC_MODELS, findContextWindow } from './static-models';
 
 /** The built-in catalog: the Anthropic provider's cached list, or the static one when it has none. */
 export function claudeNativeModels(settings: AppSettings): ModelInfo[] {
@@ -53,4 +54,46 @@ export function withSavedClaudeModels(live: ModelInfo[], saved: ModelInfo[]): Mo
 /** Every usable provider's models, appended to the native catalog without duplicates. */
 export function mergeClaudeCatalog(native: ModelInfo[], settings: AppSettings): ModelInfo[] {
   return dedupeClaudeModels([...native, ...settings.providers.flatMap((provider) => claudeProviderModels(settings, provider.id))]);
+}
+
+/**
+ * The SDK's model rows as a selectable catalog. The recommended row leads, so deduplication keeps
+ * it (and its flag) over the explicit row for the same model. A `default` the runtime does not
+ * resolve has no version to pin, so it is left out rather than offered as a moving alias.
+ */
+export function claudeSdkCatalog(models: ClaudeSdkModelInfo[]): ModelInfo[] {
+  // Claude Code sends the effort fields only for a model that takes effort, never `supportsEffort:
+  // false`. A row without them has no effort, but only from a runtime that reports them on some
+  // row: one that never does (an older install) leaves every model's effort unknown.
+  const reportsEffort = models.some((m) => m.supportsEffort === true);
+  const rows = models.map((m) => claudeModelToInfo(m, reportsEffort)).filter((m) => m.id !== 'default');
+  return dedupeClaudeModels([...rows.filter((m) => m.isDefault), ...rows.filter((m) => !m.isDefault)]);
+}
+
+/** `reportsEffort`: the runtime reports effort support, so a row without it takes no effort. */
+export function claudeModelToInfo(m: ClaudeSdkModelInfo, reportsEffort = false): ModelInfo {
+  // Every row, the recommended `default` included, is listed under the canonical wire id it
+  // resolves to. A remembered selection is then a version pin: it survives Claude renaming an alias
+  // such as `sonnet`, and a later start or resume never follows a changed recommendation.
+  const id = m.resolvedModel || m.value;
+  const recommended = m.value === 'default' && id !== 'default';
+  const name = m.description?.split(' · ')[0]?.trim() || (recommended ? id : m.displayName || m.value);
+  const supportsEffort = m.supportsEffort === true;
+  return {
+    id,
+    provider: 'anthropic',
+    displayName: recommended ? `${name} (recommended)` : name,
+    description: m.description,
+    contextWindow: findContextWindow('anthropic', id),
+    supportsImages: true,
+    supportsReasoning: supportsEffort || m.supportsAdaptiveThinking === true,
+    supportedEfforts: claudeEfforts(m, reportsEffort),
+    isDefault: recommended
+  };
+}
+
+/** A row's effort levels: `[]` for a model that takes none, `undefined` while that is unknown. */
+function claudeEfforts(m: ClaudeSdkModelInfo, reportsEffort: boolean): EffortLevel[] | undefined {
+  if (m.supportsEffort === true) return m.supportedEffortLevels?.length ? [...m.supportedEffortLevels] : undefined;
+  return m.supportsEffort === false || reportsEffort ? [] : undefined;
 }

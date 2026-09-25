@@ -2,8 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { AppSettings, SessionMeta } from '../src/shared/types';
-import { mergeClaudeCatalog } from '../src/main/models/claude-catalog';
-import { claudeSdkCatalog } from '../src/main/harness/claude';
+import { claudeSdkCatalog, mergeClaudeCatalog } from '../src/main/models/claude-catalog';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../src/renderer/src/api', () => ({
